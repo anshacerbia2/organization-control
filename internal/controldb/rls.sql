@@ -50,6 +50,45 @@ BEGIN
 END
 $$;
 
+-- The modelling rule, checked BEFORE any policy is created.
+--
+-- TDD-organization-control-001: every table carrying RLS has a non-nullable tenant_id, and a
+-- tenant-scoped table without that column is a modelling error.
+--
+-- The order matters, and the first version of this file had it wrong. With the check placed
+-- after the policy loop, CREATE POLICY reached the missing column first and the deploy failed
+-- with `column "tenant_id" does not exist`. True, and it names a column rather than the rule
+-- that was broken. Checked first, the error names the table and says what to do about it.
+--
+-- Found by creating a table in an RLS schema outside this pipeline and reading which error came
+-- back, which is also the case it exists for: a table this pipeline did not create.
+DO $$
+DECLARE
+    offending TEXT;
+BEGIN
+    SELECT string_agg(format('%s.%s', n.nspname, c.relname), ', ' ORDER BY n.nspname, c.relname)
+      INTO offending
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname IN ('tenant', 'workspace', 'membership', 'invitation', 'operation')
+       AND c.relkind = 'r'
+       AND NOT EXISTS (
+             SELECT 1
+               FROM pg_attribute a
+              WHERE a.attrelid = c.oid
+                AND a.attname  = 'tenant_id'
+                AND a.attnotnull
+                AND a.attnum > 0
+                AND NOT a.attisdropped);
+
+    IF offending IS NOT NULL THEN
+        RAISE EXCEPTION
+            'table(s) in an RLS schema carry no non-nullable tenant_id: %', offending
+            USING HINT = 'add the column, or move the table to a schema outside the RLS set';
+    END IF;
+END
+$$;
+
 -- Applied identically to every tenant-scoped table. A loop rather than seven copied blocks:
 -- the predicate is the control, and seven hand-written copies is seven chances for one of them
 -- to drift into `USING` without `WITH CHECK`.
@@ -109,35 +148,3 @@ BEGIN
 END
 $$;
 
--- The modelling rule, enforced here rather than left to review.
---
--- TDD-organization-control-001: every table carrying RLS has a non-nullable tenant_id, and a
--- tenant-scoped table without that column is a modelling error. Without this check the loop
--- above would still create a policy, and the policy would raise at query time on a column that
--- does not exist — turning a schema mistake into a runtime outage.
-DO $$
-DECLARE
-    offending TEXT;
-BEGIN
-    SELECT string_agg(format('%s.%s', n.nspname, c.relname), ', ' ORDER BY n.nspname, c.relname)
-      INTO offending
-      FROM pg_class c
-      JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE n.nspname IN ('tenant', 'workspace', 'membership', 'invitation', 'operation')
-       AND c.relkind = 'r'
-       AND NOT EXISTS (
-             SELECT 1
-               FROM pg_attribute a
-              WHERE a.attrelid = c.oid
-                AND a.attname  = 'tenant_id'
-                AND a.attnotnull
-                AND a.attnum > 0
-                AND NOT a.attisdropped);
-
-    IF offending IS NOT NULL THEN
-        RAISE EXCEPTION
-            'table(s) in an RLS schema carry no non-nullable tenant_id: %', offending
-            USING HINT = 'add the column, or move the table to a schema outside the RLS set';
-    END IF;
-END
-$$;

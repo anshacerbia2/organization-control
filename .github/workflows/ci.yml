@@ -157,6 +157,10 @@ jobs:
       - name: apply the owned schemas
         run: atlas migrate apply --env ci
 
+      # The stage verifies its own work before returning success: applying SQL and achieving a
+      # posture are different claims, and controldb.AssertIsolation is the difference. A deploy
+      # that applied rls.sql without protecting every table fails here rather than shipping an
+      # inert control.
       - name: apply the platform schema, Row-Level Security, and privileges
         run: go run ./cmd/organization-migrate -stage=post
 

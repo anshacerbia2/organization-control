@@ -146,16 +146,50 @@ source against a schema-scoped dev URL. `atlas.hcl` bounds the scope with `schem
 `exclude` instead, and `public` is declared and managed empty — without it, the first generated
 plan ended in `DROP SCHEMA "public" CASCADE`.
 
-## Row-Level Security is not in `schema.hcl`
+## Row-Level Security is not in `schema.hcl`, and that is a vendor limitation rather than a design choice
 
-Atlas OSS models neither `ENABLE`/`FORCE ROW LEVEL SECURITY` nor `CREATE POLICY`, so the
-policies live in `internal/controldb/rls.sql` and are applied after Atlas.
+Atlas OSS models neither `ENABLE`/`FORCE ROW LEVEL SECURITY` nor `CREATE POLICY`. Verified
+against v1.3.2: `schema inspect` emits no trace of either and prints *"Skipping … advanced
+objects. Upgrade to Pro."* So the policies live in `internal/controldb/rls.sql` and are applied
+after Atlas.
 
-That has a consequence worth stating: **nothing reconciles a policy the way Atlas reconciles a
-column.** A policy dropped by hand stays dropped while the schema still matches its declared
-state. The assertions in `internal/controldb/rls_integration_test.go` read `pg_class` and
-`pg_policy` because they are the only thing that would notice — and they were verified to
-notice, by removing `FORCE` from one table and dropping one policy and watching them fail.
+**This is a workaround. Three consequences follow, and two of them are closed.**
+
+*A runtime role cannot remove a policy.* Neither holds any DDL privilege and neither owns a
+table, so the application cannot weaken its own isolation.
+
+*Drift heals on deploy.* `rls.sql` recreates every policy on every run and discovers its table
+set from the catalog, so a dropped policy returns and a newly added table is protected without
+anyone remembering to extend a list. That is better than a declarative list, which someone has
+to maintain.
+
+*Nothing reconciles a policy the way Atlas reconciles a column.* This one stays open, and it is
+narrower than it first looks: reconciliation happens at deploy time, and `rls.sql` already
+converges at deploy time. What a declarative tool would add is a **diff** — the ability to review
+a policy change as a schema change and to detect drift without applying anything.
+
+Closing that half requires Atlas Pro, which also supplies `atlas migrate lint` — the destructive
+gate `ADR-GLB-004` mandates and that CI currently stands in for with a text-level grep. One
+purchase clears both, and both are recorded as debt in [ROADMAP.md](ROADMAP.md) rather than
+presented as equivalent to the mandated mechanism.
+
+### The safety gap is closed without any vendor
+
+The dangerous half was never reconciliation. It was that **between deploys, in production,
+nothing checked** — CI asserts the posture of a throwaway database, which says nothing about the
+one serving traffic.
+
+`controldb.AssertIsolation` reads `pg_class`, `pg_policy`, and `pg_roles` and reports every way
+the posture is not intact. `-stage=post` calls it as a post-condition, so a deploy that applied
+SQL without achieving the posture fails instead of reporting green. Once the HTTP surface exists
+it is called at startup and behind the readiness probe: a replica whose database lost a policy
+leaves the load balancer, because serving tenant-scoped traffic with isolation disabled is worse
+than not serving, and `EAD-006 §8` requires a security-control failure to fail closed.
+
+Six weakenings are tested and each is detected: `FORCE` removed, RLS disabled, a policy dropped,
+a table added to a tenant-scoped schema without `tenant_id`, and a runtime role granted
+`BYPASSRLS` or `LOGIN`. Every one of them leaves the schema matching its declared state, which is
+exactly why a schema tool would not have caught them either.
 
 ## Proving isolation
 

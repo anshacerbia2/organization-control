@@ -140,3 +140,51 @@ Database including outbox and projection cursor state, cross-tenant denial prove
 the runtime role, measured accept-to-publication delay inside budget for priority
 events, and runbooks written for revocation not enforced within budget, projection
 drift repair, provider-access review, and stuck offboarding.
+
+## Debt, named rather than implied
+
+Two items, and one purchase clears both.
+
+### `atlas migrate lint` is Atlas Pro only since v0.38
+
+`ADR-GLB-004` requires the pipeline to block a destructive plan rather than report it, and names
+that command as the mechanism. On the free CLI it aborts. CI stands in with `atlas migrate
+validate` — which checks directory integrity and nothing about destructiveness — plus a
+text-level grep for `DROP TABLE`, `RENAME`, `TRUNCATE` and their neighbours.
+
+The grep fails, which is the property that matters. It is also cruder than the analyzer it
+replaces: it reads text rather than a parsed plan, so it cannot tell a destructive statement from
+the same words inside a comment, and a reviewer can silence it with an annotation. Recorded here
+rather than presented as equivalent.
+
+### Row-Level Security is outside the declarative schema
+
+Atlas OSS models neither `ENABLE`/`FORCE ROW LEVEL SECURITY` nor `CREATE POLICY` — verified
+against v1.3.2, whose `schema inspect` emits no trace of either. The policies therefore live in
+`internal/controldb/rls.sql`.
+
+**What this does not cost.** A runtime role cannot remove a policy: neither holds DDL and neither
+owns a table. Drift heals on deploy, because `rls.sql` recreates every policy on every run and
+discovers its table set from the catalog — so a new table is protected without anyone extending a
+list, which a declarative set would require.
+
+**What it costs.** No diff. A policy change cannot be reviewed as a schema change, and drift
+cannot be detected without applying anything.
+
+**What it does not cost, contrary to the first version of this note.** Production safety. The
+gap that mattered was never reconciliation — it was that nothing checked production between
+deploys, and a declarative tool would not have closed that either, because reconciliation happens
+at deploy time. `controldb.AssertIsolation` closes it: `-stage=post` calls it as a
+post-condition, and the future composition root calls it at startup and behind readiness. Six
+weakenings are tested and each is detected, and every one of them leaves the schema matching its
+declared state — which is why a schema tool would not have caught them.
+
+### Resolving both
+
+An Atlas Pro login with a CI token supplies the destructive analyzer and RLS in HCL. The
+alternative for the first item alone is an amendment to `ADR-GLB-004` naming a different
+mechanism; there is no alternative for the second short of writing a policy differ, which is not
+work this repository should own.
+
+Until then, neither is presented as satisfied. `ADR-GLB-004`'s destructive gate has a waiver in
+effect by substitution, and that is the honest description.

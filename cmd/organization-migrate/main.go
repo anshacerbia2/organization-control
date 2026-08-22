@@ -112,8 +112,34 @@ func run(stage string, timeout time.Duration, logger *slog.Logger) error {
 				return err
 			}
 		}
-		return nil
+		return verifyIsolation(ctx, pool, logger)
 	}
+}
+
+// verifyIsolation is the post-condition of the post stage.
+//
+// Applying SQL and reporting success are different claims. rls.sql can run without error and
+// still leave the posture wrong — a table added to a tenant-scoped schema outside this pipeline,
+// a role that a restored dump brought in with BYPASSRLS, a policy count that is one instead of
+// two. Every one of those is a deploy that reports green and ships an inert control.
+//
+// Asserted here rather than only in CI because CI asserts a throwaway database. This runs against
+// the database the deploy just changed.
+func verifyIsolation(ctx context.Context, pool *db.Pool, logger *slog.Logger) error {
+	report, err := controldb.AssertIsolation(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("verify tenant isolation: %w", err)
+	}
+	if !report.OK() {
+		for _, problem := range report.Problems {
+			logger.Error("isolation posture", slog.String("problem", problem))
+		}
+		return report.Err()
+	}
+	logger.Info("tenant isolation verified",
+		slog.Int("protected_tables", len(report.Tables)),
+		slog.Any("schemas", controldb.RLSSchemas))
+	return nil
 }
 
 // applyStage runs one embedded statement file in a single transaction.
