@@ -111,3 +111,71 @@ measurable from a recorded origin.
 Enforcement is the sum of a propagation term this service starts and a token-lifetime
 term the token profile owns. No single owner states the interval; the operational
 dashboard presents the sum.
+
+## Building the database
+
+Four sources build one database, and each is owned by whoever owns the SQL:
+
+| Source | Owner | What it applies |
+| :-- | :-- | :-- |
+| `internal/controldb/roles.sql` | this repository | The three cluster roles |
+| `schema.hcl` via Atlas | this repository | The seven owned schemas and their tables |
+| `foundation-platform/migrations/platform` | the shared module | The `platform` schema |
+| `internal/controldb/rls.sql`, `grants.sql` | this repository | Policies, then privileges |
+
+```powershell
+$env:ORGANIZATION_MIGRATION_DATABASE_URL = 'postgres://…/organization_control_dev?sslmode=disable'
+$env:DATABASE_URL   = $env:ORGANIZATION_MIGRATION_DATABASE_URL
+$env:ATLAS_DEV_URL  = 'postgres://…/org_atlas_dev?sslmode=disable'
+
+go run ./cmd/organization-migrate -stage=pre    # cluster roles
+atlas migrate apply --env local                 # the owned schemas and their tables
+go run ./cmd/organization-migrate -stage=post   # platform schema, RLS, privileges
+```
+
+**The order differs from identity-control's, and the reason is Atlas rather than preference.**
+
+Atlas refuses to apply against a database it considers unclean, and in database scope any
+pre-existing schema counts — including `platform`, and including one named in `exclude`, which
+the clean check does not consult. Roles are cluster objects, so creating them leaves the
+database clean; that is what makes this order possible at all.
+
+Database scope is itself forced. identity-control bounds Atlas to one schema with a
+`search_path` on both URLs, and this service declares seven: Atlas rejects a multi-schema HCL
+source against a schema-scoped dev URL. `atlas.hcl` bounds the scope with `schemas` and
+`exclude` instead, and `public` is declared and managed empty — without it, the first generated
+plan ended in `DROP SCHEMA "public" CASCADE`.
+
+## Row-Level Security is not in `schema.hcl`
+
+Atlas OSS models neither `ENABLE`/`FORCE ROW LEVEL SECURITY` nor `CREATE POLICY`, so the
+policies live in `internal/controldb/rls.sql` and are applied after Atlas.
+
+That has a consequence worth stating: **nothing reconciles a policy the way Atlas reconciles a
+column.** A policy dropped by hand stays dropped while the schema still matches its declared
+state. The assertions in `internal/controldb/rls_integration_test.go` read `pg_class` and
+`pg_policy` because they are the only thing that would notice — and they were verified to
+notice, by removing `FORCE` from one table and dropping one policy and watching them fail.
+
+## Proving isolation
+
+`TDD-organization-control-001` is explicit about what counts:
+
+> Isolation tests MUST prove cross-tenant denial using the actual application runtime role; a
+> test executed on an administrative or owning connection is not isolation evidence.
+
+Every isolation assertion connects as a login role that inherits `organization_rt` or
+`organization_provider_rt`. On an owning connection they would all pass for the wrong reason,
+because PostgreSQL exempts an owner from its own table's policies unless `FORCE` is set.
+
+```powershell
+$env:TEST_DATABASE_URL      = 'postgres://postgres:…@127.0.0.1:5432/organization_control_dev?sslmode=disable'
+$env:TEST_RUNTIME_PASSWORD  = '…'   # organization_app, inherits organization_rt
+$env:TEST_PROVIDER_PASSWORD = '…'   # organization_provider_app, inherits organization_provider_rt
+
+go test ./internal/controldb/... -v
+```
+
+CI creates both login roles, seeds two Tenants, and sets `REQUIRE_INTEGRATION=1` so a service
+container that never came up fails the build rather than leaving every cross-tenant assertion
+unrun and the build green.

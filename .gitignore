@@ -1,0 +1,21 @@
+# Coverage profiles are build output. CI produces and uploads them as an artifact, so
+# a committed copy is only ever stale.
+*.out
+coverage
+cov-src
+
+# Binaries produced by `go build` without -o.
+/organization-control
+/organization-migrate
+
+# Atlas writes its own state here when a command is interrupted. The migration
+# directory itself IS committed; this is only the lock and scratch output.
+.atlas
+atlas.sum.tmp
+
+# Editor and OS noise.
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

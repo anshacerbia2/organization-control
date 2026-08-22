@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "Boundaries asserted on every build by foundation-platform's archcheck, which this",
+    "repository reuses rather than reimplements: `go run",
+    "github.com/anshacerbia2/foundation-platform/tools/archcheck`.",
+    "",
+    "A package absent from internalEdges may import no internal package.",
+    "An edge not declared here fails the build.",
+    "",
+    "cmd/ packages are the driving adapters. They are the only packages permitted to start a",
+    "goroutine and the only place dependencies are constructed, which is why cmd is absent",
+    "from noGoroutineSegments while domain and app are listed."
+  ],
+
+  "module": "github.com/anshacerbia2/organization-control",
+
+  "internalEdges": {
+    "cmd/organization-migrate": ["internal/controldb"],
+    "internal/controldb": []
+  },
+
+  "pureSegments": ["domain"],
+
+  "noGoroutineSegments": ["domain", "app"],
+
+  "deniedImports": {
+    "github.com/jackc/pgx": {
+      "reason": "no package in this repository names the driver. foundation-platform's db package is the single place it is named, and every signature here carries db.Tx instead, so replacing the driver is one module's change rather than this repository's",
+      "except": []
+    },
+    "database/sql": {
+      "reason": "the pgx pool in foundation-platform is the only connection source. a second one would open connections outside the transaction manager, and outbox.Append would no longer be atomic with the domain mutation it accompanies",
+      "except": []
+    },
+    "net/http": {
+      "reason": "this service reaches no other domain over HTTP. ADR-ORG-001 5.4 gives it neither the Keycloak administration credential nor a network route to the kernel, and that prohibition is structural rather than procedural: an HTTP client here would be the first step toward the projection path the Identity Control Service owns. The composition root will be excepted when it serves, and nothing else",
+      "except": []
+    }
+  },
+
+  "reservedDirNames": [
+    "interface",
+    "type",
+    "func",
+    "range",
+    "map",
+    "select",
+    "go",
+    "chan",
+    "package",
+    "import",
+    "const",
+    "var",
+    "return",
+    "struct"
+  ]
+}
