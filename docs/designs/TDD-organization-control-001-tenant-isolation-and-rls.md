@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 0.1.0
+  version: 0.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-08-10
+  last_reviewed: 2026-08-23
   parent_sad: SAD-004
 ---
 
@@ -180,29 +180,55 @@ connection pooling and RLS interact badly when `SET` is used instead.
 ```go
 package db
 
+// Body is the work performed inside a bound transaction.
+type Body func(context.Context, Tx) error
+
 // WithTenantScope runs fn inside a transaction bound to exactly one Tenant.
 // The tenant identifier is taken from the authenticated administrative context.
 // It is never taken from a request path, query parameter, header, or body.
-func WithTenantScope(ctx context.Context, p *Pool, fn func(pgx.Tx) error) error
+func WithTenantScope(ctx context.Context, pool *TenantPool, fn Body) error
 
 // WithProviderScope runs fn inside a provider-scoped transaction. It requires an
 // authenticated provider context, an operation reason, and a correlation identifier,
-// and it emits a privileged-administration event before fn executes.
-func WithProviderScope(ctx context.Context, p *ProviderPool, reason string, fn func(pgx.Tx) error) error
+// and it records privileged access before fn executes.
+func WithProviderScope(ctx context.Context, pool *ProviderPool, reason string, fn Body) error
 ```
 
-These two functions are the only code permitted to issue `SET LOCAL app.tenant_id` or
-`SET LOCAL app.provider_scope`. Both take the scope from the authenticated context
-rather than from an argument, so a handler cannot pass a Tenant it was told about by
-the caller.
+These two functions are the only code permitted to bind `app.tenant_id` or
+`app.provider_scope`. Both take the scope from the authenticated context rather than from
+an argument, so a handler cannot pass a Tenant it was told about by the caller.
+
+`TenantPool` and `ProviderPool` are distinct types rather than one type with a flag, so
+handing a tenant-scoped handler the cross-Tenant pool is a compile error rather than a
+review finding. A boolean would move the decision to the call site, which is where defects
+live: any policy permissive enough for provider work is permissive enough for a mistake in
+a tenant-scoped path. `ProviderPool` additionally cannot be constructed without a
+privileged-access recorder, because an optional recorder is one a deployment forgets to
+supply — after which every cross-tenant access is unattributable and nothing reports it.
+
+**The binding is issued as `set_config('app.tenant_id', $1, true)`, not as literal
+`SET LOCAL` text.** The two are the same statement — `is_local = true` is what `SET LOCAL`
+means — and the function form is the one that accepts a bind parameter. `SET LOCAL` takes
+no parameters, so using it would require building the statement by concatenating the Tenant
+identifier into SQL text, which is the one thing this file must never do given that it is
+the file establishing what the policy trusts. The architecture test scans for both
+spellings, so the single-path rule is enforced regardless of which is written.
+
+Both signatures carry `db.Tx`, an alias for the transaction handle from
+`foundation-platform`, rather than naming the driver's `pgx.Tx`. `arch.json` denies this
+repository any import of pgx: the shared module is the single place the driver is named, so
+replacing it is one module's change rather than every consumer's. The shape is unchanged.
 
 This implements SAD-004 §8.3 directly: a Tenant identifier arriving from a client is
 a *requested* scope, and the authoritative scope is resolved from the authenticated
 administrative context and current Membership. The requested value is compared against
 the resolved value and a mismatch is refused before any query runs.
 
-An architecture test asserts that `SET LOCAL app.` appears in no package other than
-`db`.
+An architecture test asserts that no package other than `db` binds either setting, in
+either spelling — `SET LOCAL app.` or `set_config('app.…', …, true)`. It walks the
+repository rather than relying on review, because a second binding path anywhere would be a
+second answer to "which Tenant is this", and Row-Level Security would faithfully enforce
+whichever one ran last.
 
 ## Algorithms / Logic
 

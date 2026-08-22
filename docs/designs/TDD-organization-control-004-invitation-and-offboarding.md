@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.1.0
+  version: 1.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-08-14
+  last_reviewed: 2026-08-23
   parent_sad: SAD-004
 ---
 
@@ -159,12 +159,16 @@ CREATE TABLE operation.offboarding (
     frozen_at       TIMESTAMPTZ,
     retired_at      TIMESTAMPTZ,
     CONSTRAINT offboarding_stage_check
-        CHECK (stage IN ('freeze', 'obligations', 'release', 'retired'))
+        CHECK (stage IN ('freeze', 'obligations', 'release', 'retired')),
+    -- The target of the composite foreign key below, so a child's copy of tenant_id
+    -- cannot disagree with its parent's.
+    CONSTRAINT offboarding_tenant_scope_unique UNIQUE (tenant_id, offboarding_id)
 );
 
 CREATE TABLE operation.offboarding_obligation (
     obligation_id   UUID        PRIMARY KEY,
-    offboarding_id  UUID        NOT NULL REFERENCES operation.offboarding(offboarding_id),
+    offboarding_id  UUID        NOT NULL,
+    tenant_id       UUID        NOT NULL,
     domain          TEXT        NOT NULL,
     obligation_type TEXT        NOT NULL,
     state           TEXT        NOT NULL,
@@ -172,7 +176,10 @@ CREATE TABLE operation.offboarding_obligation (
     completed_at    TIMESTAMPTZ,
     detail          TEXT,
     CONSTRAINT obligation_state_check
-        CHECK (state IN ('open', 'completed', 'waived', 'failed'))
+        CHECK (state IN ('open', 'completed', 'waived', 'failed')),
+    CONSTRAINT offboarding_obligation_parent_fk
+        FOREIGN KEY (tenant_id, offboarding_id)
+        REFERENCES operation.offboarding (tenant_id, offboarding_id)
 );
 ```
 
@@ -180,6 +187,35 @@ CREATE TABLE operation.offboarding_obligation (
 consciously waived by an accountable person and an obligation that was actually
 satisfied are different facts, and collapsing them removes the only record that a
 decision was made.
+
+### Why the obligation carries `tenant_id`
+
+Version 1.1.0 of this design declared `offboarding_obligation` without one, reachable
+only through its parent. That contradicted `TDD-organization-control-001`, which
+requires a non-nullable `tenant_id` on every table in an RLS schema and has its
+structural test reject a table without one. The rule is the one that survives, and the
+reason is not consistency for its own sake: Row-Level Security evaluates a predicate per
+row and cannot follow a join, so a policy on `offboarding` protects nothing on
+`offboarding_obligation`. A child reachable only through a protected path is not a
+protected child — it is an unprotected table with a convention in front of it.
+
+The column is a denormalized copy, and the composite foreign key is what keeps the copy
+honest rather than making it a second source of truth: the `(tenant_id, offboarding_id)`
+pair must exist on the parent, so a row cannot claim a Tenant its offboarding does not
+belong to. PostgreSQL requires the referenced column set to be uniquely constrained,
+which is what `offboarding_tenant_scope_unique` above is for — it looks redundant beside
+the primary key on `offboarding_id` alone and is not.
+
+The alternatives were both worse. Excluding the table from the RLS set is what
+`TDD-organization-control-001` explicitly refuses. Leaving it inside an RLS schema with
+no policy is the exact failure that design exists to prevent, and it would fail closed
+only by accident of the grant.
+
+`schema.hcl` expresses `offboarding_tenant_scope_unique` as a unique index rather than as a
+table constraint, because that is the form Atlas's declarative HCL models. PostgreSQL
+accepts either as the target of a composite foreign key, so the invariant is identical; the
+difference is that the object appears in `pg_indexes` and not in `pg_constraint`, which is
+what any assertion on its presence must query.
 
 ## API / Interface
 
@@ -209,12 +245,29 @@ com.scnehaux.organization.tenant.security.suspended          (priority)
 com.scnehaux.organization.membership.security.suspended      (priority, one per Membership)
 com.scnehaux.organization.tenant.offboarding.frozen
 com.scnehaux.organization.tenant.offboarding.obligation-raised
-com.scnehaux.organization.tenant.offboarding.retired
+com.scnehaux.organization.tenant.lifecycle.retired
 ```
 
 The security events are what stop access and therefore occupy the priority lane.
 `offboarding.started` and `offboarding.frozen` describe process progress for obligation
 consumers; Identity does not infer enforcement from either lifecycle event.
+
+The retirement event is named for the aggregate and not for the process. Version 1.1.0 of
+this design called it `tenant.offboarding.retired` while
+`TDD-organization-control-003` §"Published Events" called the same fact
+`tenant.lifecycle.retired`. The 003 name is the one used: an event type says what
+happened to which aggregate, and naming it after the process that caused it would give
+one fact two types depending on how it arose — leaving a consumer to subscribe to both
+and deduplicate, or to miss the retirement it did not expect. The cause is already
+carried by the correlation identifier, which is where a cause belongs.
+
+Retirement is not on the priority lane, and it increments `tenant_security_version`. That
+pairing looks inconsistent and is not: the only way into `retired` is from `offboarding`,
+which already published `tenant.security.suspended` on the priority lane and already
+froze context. By the time a Tenant retires there is no access left to withdraw, so the
+urgency was discharged one transition earlier. What is enforced instead is that the lane
+agrees with the event's own classification — a type containing `security` and a
+standard-lane append cannot coexist.
 
 ## Algorithms / Logic
 

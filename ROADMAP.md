@@ -13,17 +13,40 @@ cross-repository dependency is `foundation-platform`, which lands first.
 
 ## Design status
 
-| TDD | Subject | Status |
-| :-- | :-- | :-- |
-| `TDD-organization-control-001` | Tenant isolation and Row-Level Security | approved |
-| `TDD-organization-control-002` | Membership authority, revocation, projection publication | approved |
-| `TDD-organization-control-003` | Organization, Tenant, and Workspace lifecycle | approved |
-| `TDD-organization-control-004` | Invitation, onboarding correlation, and offboarding obligations | approved |
+| TDD | Version | Subject | Status |
+| :-- | :-- | :-- | :-- |
+| `TDD-organization-control-001` | 0.2.0 | Tenant isolation and Row-Level Security | approved |
+| `TDD-organization-control-002` | 0.4.0 | Membership authority, revocation, projection publication | approved |
+| `TDD-organization-control-003` | 1.2.0 | Organization, Tenant, and Workspace lifecycle | approved |
+| `TDD-organization-control-004` | 1.2.0 | Invitation, onboarding correlation, and offboarding obligations | approved |
+
+**No design now contradicts another, and none contradicts the implementation.** Every
+departure Weeks 1 and 2 recorded has been folded back into the design that was wrong, with
+the reasoning kept rather than summarised away — the sections below still name what changed
+so the history is readable, and the designs are the current statement. Five disagreements
+were closed:
+
+| Was | Resolved by |
+| :-- | :-- |
+| `operation.offboarding_obligation` declared without `tenant_id` in 004, while 001 requires one on every table in an RLS schema | 004 §"Why the obligation carries `tenant_id`": the column, the composite foreign key that keeps the copy honest, and the `UNIQUE (tenant_id, offboarding_id)` on the parent it needs |
+| The retirement event named `tenant.offboarding.retired` in 004 and `tenant.lifecycle.retired` in 003 | 003's name, in both documents. An event type says what happened to which aggregate; the cause is carried by the correlation identifier |
+| `tenant_security_version` and `workspace_tenant_scope_unique` each declared by both 002 and 003 | 003 is the sole declaring authority, stated in its §Purpose. 002 records the dependency in a table instead |
+| 002 §Revocation incremented `tenant_security_version` when "the revocation is tenant-wide", contradicting its own §Data Model and 003's increment table | Removed. A Membership revocation reads the version and carries it. 002 explains why incrementing it would make one person's revocation invalidate every cached context in the Tenant |
+| 001 wrote both binding signatures as `fn func(pgx.Tx) error` against `*Pool` | 001 §"The Single Binding Path": `db.Tx`, the two distinct pool types, and why the binding is `set_config(..., true)` rather than literal `SET LOCAL` |
+
+Three implementation decisions the designs had not stated are now stated in them: restore
+clears `suspended_at`, every Tenant transition is provider-scoped and why, and the
+provisioning transitions publish nothing by design.
+
+One item is **not** resolved and is not mine to resolve: 001 and 002 sit below `1.0.0`
+while carrying `status: approved`, and the production gate below requires all four at
+`1.0.0`. That is a review signature, not a content change.
 
 Design 003 closed the gap that blocked the first migration. Design 002 writes a
-composite foreign key against `workspace.workspace (tenant_id, workspace_id)` and
-increments `tenant_security_version` on Tenant-wide changes; 003 supplies both tables,
-both state machines, and the `UNIQUE` constraint that composite key depends on.
+composite foreign key against `workspace.workspace (tenant_id, workspace_id)` and carries
+`tenant_security_version` in every Membership event; 003 supplies both tables, both state
+machines, the `UNIQUE` constraint that composite key depends on, and the authoritative list
+of which transitions move the security version.
 
 ## Week 1 · Database and isolation
 
@@ -69,20 +92,28 @@ appears nowhere else.
 | Atlas refuses to apply against a database it considers unclean, and `exclude` does not affect that check | The pipeline order differs from identity-control's. Roles are cluster objects so creating them leaves the database clean; Atlas runs second; the `platform` schema is applied third rather than first, because it would otherwise make the database unclean before Atlas ever ran |
 | The `tenant_security_version` column and the `workspace_tenant_scope_unique` constraint are each declared in two TDDs | Applied as SQL in the order the designs state, the second declaration fails. The declarative schema resolves it by construction — each is declared once in `schema.hcl` — and the duplication is recorded here rather than silently deduplicated |
 
-### Departures from the designs, recorded
+### Departures from the designs — Week 1, now folded back in
 
-**`WithTenantScope` and `WithProviderScope` carry `db.Tx`, not `pgx.Tx`.** The design writes both
-signatures as `fn func(pgx.Tx) error`. `arch.json` denies this repository any import of pgx, and
-foundation-platform's db package exists so a driver type never reaches a domain signature —
-replacing the driver is then one module's change rather than every consumer's. The departure is
-the type name; the shape is unchanged.
+Both were resolved in the designs on 2026-08-23. Kept here because the reasoning is the
+part worth keeping, and because a reader comparing an older design version to this code
+needs to know which way the disagreement went.
 
-**`operation.offboarding_obligation` carries `tenant_id`.** `TDD-organization-control-004`
-declares it without one. Adding it is the smaller change: the alternative was to exclude the
-table from the RLS set, which `TDD-organization-control-001` explicitly refuses, or to leave it
-in an RLS schema unprotected, which is the failure that design exists to prevent. The
-composite foreign key is what makes the denormalized column safe rather than a second source
-of truth.
+**`WithTenantScope` and `WithProviderScope` carry `db.Tx`, not `pgx.Tx`.**
+`TDD-organization-control-001` v0.1.0 wrote both signatures as `fn func(pgx.Tx) error`.
+`arch.json` denies this repository any import of pgx, and foundation-platform's db package
+exists so a driver type never reaches a domain signature — replacing the driver is then one
+module's change rather than every consumer's. The disagreement was the type name and never
+the shape. **Design corrected in v0.2.0**, which also records the two distinct pool types and
+why the binding is issued as `set_config(..., true)` rather than as literal `SET LOCAL`.
+
+**`operation.offboarding_obligation` carries `tenant_id`.**
+`TDD-organization-control-004` v1.1.0 declared it without one. Adding it was the smaller
+change: the alternatives were to exclude the table from the RLS set, which
+`TDD-organization-control-001` explicitly refuses, or to leave it in an RLS schema
+unprotected, which is the failure that design exists to prevent. The composite foreign key
+is what makes the denormalized column safe rather than a second source of truth.
+**Design corrected in v1.2.0**, including the `UNIQUE (tenant_id, offboarding_id)` on the
+parent that the composite key requires.
 
 ## Week 2 · Authority and revocation
 
@@ -145,24 +176,38 @@ silence is a declared set rather than an absent map key, and a test asserts an a
 be in neither: no context exists to invalidate before a Tenant has ever been active, and no
 consumer projects a Tenant that has never existed to it.
 
-### Departures from the designs, recorded in Week 2
+### Departures from the designs — Week 2, now folded back in
+
+All four were resolved in the designs on 2026-08-23, in the same pass as the Week 1 pair.
 
 **The retirement event is `com.scnehaux.organization.tenant.lifecycle.retired`.** The two
-designs disagree; the reasoning is in the finding above and in `internal/tenant/state.go`
-beside the table.
+designs disagreed; the reasoning is in the finding above and beside the table in
+`internal/tenant/state.go`. **004 corrected in v1.2.0**, which also records why retirement
+increments the security version and still travels the standard lane.
 
-**`suspended_at` is cleared on restore.** Neither design says. The column records when the
+**A Membership revocation reads `tenant_security_version` and does not increment it.** 002
+v0.3.0 incremented it "if the revocation is tenant-wide", contradicting its own §Data Model
+and 003's increment table. The phrase was ambiguous in a way that mattered: a *Tenant-wide
+Membership* is one scoped to the Tenant rather than to a Workspace, which is a property of
+one relationship and not a Tenant-wide event. Incrementing on it would make one person's
+revocation invalidate every cached context for every Principal in the Tenant, and in a busy
+Tenant the counter would move constantly — which destroys what a cheap staleness test is
+for. **Design corrected in v0.4.0.**
+
+**`suspended_at` is cleared on restore.** Neither design said. The column records when the
 *current* suspension began, and left populated it would make a restored Tenant
-indistinguishable from a suspended one to every report that filters on it. The history of past
-suspensions belongs to the event stream, which is the record that is supposed to be
-append-only.
+indistinguishable from a suspended one to every report and alert that filters on it — which
+is the reading someone will take, because a non-null timestamp named `suspended_at` says the
+Tenant is suspended. The history of past suspensions belongs to the event stream, which is
+the record that is supposed to be append-only. **Stated in 003 v1.2.0** §Data Model.
 
-**Every Tenant mutation requires the `version` the caller was shown.** 003 §"API / Interface"
-states this for the HTTP surface; it is enforced in the service instead, so the check cannot
-be bypassed by a second caller of the same method. The state check runs first and the version
-check second: a caller acting on a stale view usually gets both wrong, and "restore is not
-permitted from active" tells an operator what happened where "version 4 is not version 5"
-tells them only that something did.
+**Every Tenant mutation requires the `version` the caller was shown, and every one is
+provider-scoped.** 003 §"API / Interface" stated the version rule for the HTTP surface only;
+it is enforced in the service, so the check cannot be bypassed by a second caller of the same
+method. The provider binding is forced rather than chosen: `organization_rt` holds no `SELECT`
+on `organization.organization`, so the activation precondition on the sponsoring Organization
+is not evaluable on a tenant-scoped connection at all. **Both stated in 003 v1.2.0**, along
+with the check order and the evidence obligations the provider path carries.
 
 ## Week 3 · Projection publication
 

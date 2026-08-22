@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 0.3.0
+  version: 0.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-08-14
+  last_reviewed: 2026-08-23
   parent_sad: SAD-004
 ---
 
@@ -163,24 +163,42 @@ CREATE TABLE membership.membership (
         REFERENCES workspace.workspace (tenant_id, workspace_id)
 );
 
--- Required as the target of the composite foreign key above. Without it the
--- constraint cannot be created and the same-Tenant invariant is unenforced.
-ALTER TABLE workspace.workspace
-    ADD CONSTRAINT workspace_tenant_scope_unique UNIQUE (tenant_id, workspace_id);
-
 -- One active Membership per subject, context, and type.
 CREATE UNIQUE INDEX membership_active_unique
     ON membership.membership (principal_id, tenant_id, COALESCE(workspace_id, tenant_id), subject_type)
     WHERE status = 'active';
-
-ALTER TABLE tenant.tenant
-    ADD COLUMN tenant_security_version BIGINT NOT NULL DEFAULT 1;
 ```
 
-`membership_version` increments on every status transition. `tenant_security_version`
-increments on Tenant suspension, offboarding, and any change invalidating every
-context in the Tenant at once. Together they give a consumer a staleness test that
-costs no remote call.
+### Two objects this design depends on and does not declare
+
+`workspace.workspace (tenant_id, workspace_id)` must carry
+`UNIQUE (tenant_id, workspace_id)` for the composite foreign key above to be creatable at
+all — PostgreSQL requires the referenced column set to be uniquely constrained — and
+`tenant.tenant` must carry `tenant_security_version`. Version 0.3.0 of this design
+declared both with `ALTER TABLE`, and so did
+`TDD-organization-control-003`, which owns those two tables.
+
+Two designs declaring one object is not a stylistic duplication. Applied as SQL in the
+order the designs state, the second declaration fails and the migration stops; resolved by
+whoever notices, it becomes an undocumented decision about which design is authoritative.
+The declaration therefore lives once, in `TDD-organization-control-003`, and this design
+records the dependency instead:
+
+| Object | Declared by | Depended on for |
+| :-- | :-- | :-- |
+| `workspace.workspace` `UNIQUE (tenant_id, workspace_id)` | `TDD-organization-control-003` | `membership_workspace_in_tenant`, the same-Tenant invariant |
+| `tenant.tenant.tenant_security_version` | `TDD-organization-control-003` | The Tenant half of the staleness test, carried in every Membership event |
+
+Dropping either as apparent redundancy silently removes an invariant, which is why the
+migration test asserts both are present rather than trusting the schema to keep them.
+
+`membership_version` increments on every status transition of that Membership.
+`tenant_security_version` increments on Tenant transitions that invalidate every context
+in the Tenant at once, and `TDD-organization-control-003` §"Security Version Increments"
+is the authoritative list of which ones. Together they give a consumer a staleness test
+that costs no remote call: the Membership version answers "is my copy of this
+relationship current", the Tenant version answers "has everything in this Tenant been
+invalidated".
 
 The composite foreign key relies on the default `MATCH SIMPLE` semantics deliberately.
 When `workspace_id` is `NULL` the constraint is satisfied without a lookup, which is
@@ -318,20 +336,47 @@ BEGIN
     load membership FOR UPDATE
     reject if the transition is not permitted by the state machine
     set status = 'revoked'
-    increment membership_version
-    if the revocation is tenant-wide:
-        increment tenant_security_version
+    membership_version = membership_version + 1
+    read tenant_security_version
     outbox.Append(priority, com.scnehaux.organization.membership.security.revoked)
     record acting subject, reason, and correlation identifier
 COMMIT
 ```
 
 The event is appended inside the same transaction as the status change. A revocation
-that commits without its event is unreachable by every consumer, which is the failure
-the transactional outbox exists to prevent.
+that commits without its event is unreachable by every consumer: authority says revoked,
+every projection says active, and nothing in the system disagrees out loud. That is the
+failure the transactional outbox exists to prevent.
+
+The version increment is expressed as `membership_version = membership_version + 1` in the
+same statement as the status change rather than as a value computed by the service. Two
+concurrent transitions read the same version, and the one that computed it would write a
+number the other already used. The row lock serialises them, and writing the increment
+relationally keeps it correct even if the lock is ever removed.
+
+**A Membership revocation reads `tenant_security_version` and does not increment it.**
+Version 0.3.0 of this design incremented it when "the revocation is tenant-wide", which
+contradicted this document's own §"Data Model" — where the Tenant version increments on
+changes invalidating every context in the Tenant at once — and
+`TDD-organization-control-003` §"Security Version Increments", whose list of incrementing
+transitions contains no Membership operation at all.
+
+The phrase was also ambiguous in a way that mattered: a *Tenant-wide Membership* is one
+scoped to the Tenant rather than to a Workspace, which is a property of one relationship
+and not a Tenant-wide event. Incrementing on it would mean one person's revocation
+invalidating every cached context for every Principal in the Tenant. In a busy Tenant the
+counter would then move constantly, which destroys what it is for: a cheap test a consumer
+applies without a remote call is only cheap while a change to it means something. The
+per-Membership staleness test is `membership_version`, which the event already carries.
+
+The value is read inside the same transaction as the mutation, not earlier. Read before
+the transaction, a Tenant suspension committing in between would produce an event carrying
+a version older than the state it describes — and a consumer comparing versions would
+classify the newer Membership change as superseded and keep serving revoked access.
 
 Acknowledgement carries the accepted timestamp so enforcement delay is measurable from
-a recorded origin rather than from a log line.
+a recorded origin rather than from a log line. Per STD-IAM-001 §3.4 it means durable and
+queued, never enforced.
 
 ### Staleness Policy
 

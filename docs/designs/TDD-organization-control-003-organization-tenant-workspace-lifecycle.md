@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.1.0
+  version: 1.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-08-14
+  last_reviewed: 2026-08-23
   parent_sad: SAD-004
 ---
 
@@ -20,11 +20,23 @@ Specify the three authoritative aggregates this service owns before Membership c
 reference them: the Organization registry, the Tenant state machine, and the Workspace
 lifecycle bound to one Tenant.
 
-`TDD-organization-control-002` already writes a composite foreign key into
-`workspace.workspace (tenant_id, workspace_id)` and increments
-`tenant_security_version` on Tenant-wide changes. Neither table nor either constraint
-is designed anywhere. This design supplies them, and it is written before the first
-migration rather than during it.
+`TDD-organization-control-002` writes a composite foreign key into
+`workspace.workspace (tenant_id, workspace_id)` and carries `tenant_security_version` in
+every Membership event. Neither the tables nor the two objects those depend on were
+designed anywhere. This design supplies them, and it is written before the first migration
+rather than during it.
+
+**This design is the sole declaring authority for `tenant.tenant` and
+`workspace.workspace`,** including `tenant_security_version` and the
+`UNIQUE (tenant_id, workspace_id)` constraint. Version 0.3.0 of
+`TDD-organization-control-002` declared both as well; applied as SQL in the order the two
+designs state, the second declaration fails and the migration stops. That design now
+records the dependency instead of restating the declaration, and this section is where a
+reader settles which document to change.
+
+This design is also the authoritative list of which transitions increment
+`tenant_security_version` — see §"Security Version Increments". No Membership operation
+appears on it.
 
 ## Scope
 
@@ -94,6 +106,31 @@ does not exist yet.
 `retired` is terminal. There is no transition out of it, because the identifiers of a
 retired Tenant have been released to consumers as retired and reviving one would make
 a downstream projection wrong in a way no reconciliation would detect.
+
+#### Who issues which transition
+
+The machine above is declared once and here. The commands that drive it are split, and the
+split is not arbitrary:
+
+| Transition | Command owned by |
+| :-- | :-- |
+| `requested -> provisioning`, `provisioning -> failed`, `failed -> provisioning` | `ProvisioningCoordinator`, from correlated realized status |
+| `provisioning -> active` | `TenantService.Activate` |
+| `active -> suspended`, `suspended -> active` | `TenantService.Suspend` / `.Restore` |
+| `active -> offboarding`, `suspended -> offboarding` | `OffboardingService`, `TDD-organization-control-004` |
+| `offboarding -> retired` | `OffboardingService`, `TDD-organization-control-004` |
+
+The last two are transitions here and commands there because each is a stage of a process
+that does more than move this row: entering offboarding also creates an
+`operation.offboarding` record, raises obligations across domains, and suspends every
+Membership in the Tenant, and retirement is refused while any obligation is open or a legal
+hold is set. A command in `TenantService` that moved only the Tenant row would look
+complete and leave access running, which is why `TenantService` exposes neither and
+`internal/tenant` is given no dependency on `internal/membership`.
+
+Keeping the transitions themselves in one table is what makes that split safe: the
+refusal rules, the security-version consequences, and the timestamps do not fork between
+two services.
 
 ### Organization Lifecycle
 
@@ -188,6 +225,28 @@ implement isolation, it records which profile was chosen.
 `organization_id` is a plain foreign key rather than a composite, because a Tenant
 belongs to one Organization and that binding is fixed at creation.
 
+The four timestamp columns record the *current* position, not a history. Each transition
+stamps its own — `activated_at`, `suspended_at`, `offboarding_started_at`, `retired_at` —
+and **restore sets `suspended_at` back to NULL**. Left populated it would make a restored
+Tenant indistinguishable from a suspended one to every report and alert that filters on
+the column, and that is the reading someone will take, because a non-null timestamp named
+`suspended_at` says the Tenant is suspended. The history of past suspensions belongs to the
+event stream, which is the record that is supposed to be append-only; a mutable column is
+the wrong place to accumulate one.
+
+Each stamp carries the accepted instant of the transition rather than `now()` evaluated
+independently, so the lifecycle fact in the row and the `time` in the published envelope
+are the same instant. `updated_at` keeps `now()`: it is database housekeeping and answers a
+different question.
+
+`version` increments on every transition, including the ones that publish nothing.
+`tenant_security_version` increments only where the table in
+§"Security Version Increments" says so. The two are separate because they answer separate
+questions — `version` orders two events about this row and backs the optimistic check,
+`tenant_security_version` decides whether a token a consumer is holding is stale. Carrying
+only the second would leave a restore-then-suspend pair with the same value on one of the
+two events and no ordering between them.
+
 ### Workspace
 
 ```sql
@@ -268,6 +327,38 @@ caller acted on a view that has since changed.
 
 Errors are RFC 7807 problem documents from `foundation-platform`.
 
+### Every Tenant transition is provider-scoped
+
+`TenantService` binds to the provider pool, not the tenant-scoped one, and this is forced
+rather than preferred. A Tenant does not activate, suspend, or restore itself: the decision
+belongs to the provider. More concretely, `organization_rt` holds no `SELECT` on
+`organization.organization` at all — `TDD-organization-control-001` revokes it, because a
+tenant-scoped caller with that grant could read every customer in the estate — so the
+activation precondition on the sponsoring Organization is not evaluable on a tenant-scoped
+connection. The provider binding is the only one under which the checks this design
+requires can run.
+
+That binding brings its obligations with it rather than as a separate discipline.
+`db.WithProviderScope` refuses a blank reason and refuses to proceed when the
+privileged-access record cannot be written, so every Tenant transition carries an actor, a
+correlation identifier, and a reason as recorded evidence — PAD-PLT-002 §3.3 invariant 22 —
+and the evidence is written *before* the transaction runs. Evidence written on the way out
+is missing for exactly the cases an investigation asks about, because a transaction that
+panics or is killed mid-flight never reaches its own epilogue.
+
+### The optimistic check lives in the service, not only at the edge
+
+The `version` requirement above is stated for the HTTP surface, and it is enforced one
+layer lower: the service refuses a command whose expected version does not match the
+locked row. A check that only the edge performs is a check the next caller of the same
+method does not perform, and the case it protects — two operators acting on one Tenant
+from two stale views — is precisely the case where the second write silently wins.
+
+The order of the two refusals is deliberate. The state machine is consulted first and the
+version second, because a caller acting on a stale view usually has both wrong, and
+"restore is not permitted from active" tells an operator what happened where "version 4 is
+not version 5" tells them only that something did.
+
 ### Published Events
 
 ```text
@@ -291,6 +382,33 @@ suspension removes it, restoration makes a cached denial wrong.
 of the lifecycle state name. It is emitted both for `active -> suspended` and when an
 `active` or already-suspended Tenant enters `offboarding`; in both cases every existing
 Tenant context must stop. The event carries the incremented `tenant_security_version`.
+
+Two transitions therefore share one event type, deliberately. A consumer that must tell
+them apart reads `tenant_status` out of the payload — which is present for exactly this
+reason, and is why "one event type per action" is an invariant for Membership and not for
+Tenant.
+
+**The three provisioning transitions publish nothing.** `requested -> provisioning`,
+`provisioning -> failed`, and `failed -> provisioning` are silent, and the silence is part
+of the specification rather than an omission from the list above: no context exists to
+invalidate inside a Tenant that has never been active, and no consumer holds a projection
+of a Tenant that has never existed to it. An event here would carry a state change nobody
+outside this service can act on. The implementation declares the silent set explicitly and
+asserts that every action is either published or declared silent, so a transition added
+later cannot become quiet by default.
+
+**Retirement takes the standard lane and increments `tenant_security_version`.** The
+pairing looks inconsistent and is not. The only way into `retired` is from `offboarding`,
+which already published `tenant.security.suspended` on the priority lane and already froze
+context, so by the time a Tenant retires there is no access left to withdraw — the urgency
+was discharged one transition earlier. The increment is still correct: the version is
+monotonic and every context is now permanently invalid.
+
+What is enforced instead of a version-to-lane rule is that the lane agrees with the
+event's own classification. The fifth segment of the type carries the class, so a type
+containing `security` and a standard-lane append cannot coexist: an event that tells a
+consumer it is urgent while sitting behind a lifecycle backlog is a lie the consumer has
+no way to detect.
 
 ## Algorithms / Logic
 
@@ -321,10 +439,11 @@ projection failure.
 BEGIN
     load tenant FOR UPDATE
     reject if status is not 'provisioning'
-    reject if the provisioning request is not 'realized'
+    reject if the caller's expected version is not the stored version
+    reject if the most recent provisioning request is not 'realized'
     reject if the sponsoring Organization is not 'active'
-    set status = 'active', activated_at = now()
-    increment version
+    set status = 'active', activated_at = accepted_at
+    version = version + 1
     outbox.Append(tenant.lifecycle.activated)
 COMMIT
 ```
@@ -332,6 +451,24 @@ COMMIT
 The Organization check is at activation rather than at creation. A Tenant may be
 requested while its Organization is still being onboarded; it may not become active
 under a suspended or retired sponsor.
+
+Both preconditions are evaluated inside the transaction that performs the update, after
+the row is locked. Evaluated before it they would be checks against a state that can change
+before the write lands — for the sponsor check, a Tenant going active under an Organization
+suspended a moment earlier.
+
+**The provisioning check reads the most recent attempt, not any attempt.** A failed attempt
+followed by a successful retry must activate, and a realized attempt followed by a later
+failure must not. `EXISTS (... AND state = 'realized')` satisfies the first case and gets
+the second one wrong in the permissive direction, which is the direction that activates a
+Tenant whose boundary was torn down. The ordering key is `requested_at` with the request
+identifier as a tiebreaker, so two attempts recorded in the same instant still order
+deterministically.
+
+A Tenant with no provisioning request at all is refused for the same reason and with the
+same error as one whose request is unrealized. From the caller's side "provisioning has not
+confirmed" is true either way, and the distinction between "never requested" and "requested
+and pending" belongs in the operator's view of the Tenant rather than in the refusal.
 
 ### Organization Retirement Refusal
 
@@ -406,6 +543,21 @@ at the transport.
   including when the prior lifecycle state was already `suspended`.
 - Provisioning transitions and display-name changes do not.
 - The version never decreases.
+- A Membership transition does not increment it. The Membership event reads it and carries
+  it; `TDD-organization-control-002` §"Revocation" states why.
+- A rolled-back transition does not increment it. Asserted by injecting a failure between
+  the status change and the outbox append: the status, `version`,
+  `tenant_security_version`, and the outbox are all unchanged afterwards, and the same
+  transition then succeeds once the injection is removed.
+
+### Lifecycle Timestamps and Lanes
+
+- `restore` sets `suspended_at` back to NULL.
+- Each stamped timestamp equals the `time` in the event the same transition published.
+- The three provisioning transitions publish nothing, and an action that is neither
+  published nor declared silent fails the test rather than defaulting to quiet.
+- An event type whose class segment is `security` is appended to the priority lane, and one
+  whose class is `lifecycle` is not — asserted for every action rather than per event.
 
 ### Provisioning
 

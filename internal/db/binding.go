@@ -29,13 +29,12 @@ import (
 	"github.com/anshacerbia2/foundation-platform/id"
 )
 
-// DEPARTURE from TDD-organization-control-001, which writes both signatures as
-// `fn func(pgx.Tx) error`.
-//
-// arch.json denies this repository any import of pgx, and foundation-platform's db package exists
-// so a driver type never reaches a domain signature — replacing the driver is then one module's
-// change rather than every consumer's. `fdb.Tx` carries the same handle without naming the
-// driver, so the departure is in the type name and not in the shape.
+// TDD-organization-control-001 §"The Single Binding Path", from v0.2.0, writes both signatures
+// with this handle. Version 0.1.0 wrote them as `fn func(pgx.Tx) error`, and the design was
+// corrected rather than the code: arch.json denies this repository any import of pgx, and
+// foundation-platform's db package exists so a driver type never reaches a domain signature —
+// replacing the driver is then one module's change rather than every consumer's. `fdb.Tx` carries
+// the same handle without naming the driver, so the shape was never in question.
 type (
 	// Tx is the transaction handle a scoped body receives.
 	Tx = fdb.Tx

@@ -209,11 +209,12 @@ func Actions() []Action {
 // context must stop — and the payload carries the status, so a consumer that needs to tell them
 // apart still can.
 //
-// DEPARTURE, recorded: `TDD-organization-control-004` names the retirement event
-// `com.scnehaux.organization.tenant.offboarding.retired` and `TDD-organization-control-003` names
-// it `...tenant.lifecycle.retired`. The 003 name is used. An event type says what happened to which
-// aggregate; naming it after the process that caused it would give one fact two types depending on
-// how it arose, and the cause is already in the correlation identifier.
+// The retirement event is named for the aggregate, not for the process that caused it.
+// `TDD-organization-control-004` v1.1.0 called it `...tenant.offboarding.retired` while
+// `TDD-organization-control-003` called the same fact `...tenant.lifecycle.retired`; the 003 name
+// won and 004 was corrected in v1.2.0. Naming an event after its cause gives one fact two types
+// depending on how it arose, leaving a consumer to subscribe to both and deduplicate — and the
+// cause is already carried by the correlation identifier, which is where a cause belongs.
 var eventTypes = map[Action]string{
 	ActionActivate:         "com.scnehaux.organization.tenant.lifecycle.activated",
 	ActionSuspend:          "com.scnehaux.organization.tenant.security.suspended",

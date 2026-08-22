@@ -698,14 +698,14 @@ table "offboarding_obligation" {
     null = false
     type = uuid
   }
-  // DEPARTURE from TDD-organization-control-004, which declares this table without a
-  // tenant_id.
+  // TDD-organization-control-004 §"Why the obligation carries tenant_id", from v1.2.0.
   //
-  // TDD-organization-control-001 requires every table in an RLS schema to carry a
-  // non-nullable tenant_id and has its structural test reject one that does not, so the two
-  // designs contradict each other. The rule is the one that survives: RLS evaluates a
-  // predicate per row and cannot follow a join, so a policy on the parent protects nothing
-  // here. A child reachable only through an unprotected path is an unprotected child.
+  // Version 1.1.0 of that design declared this table without one, contradicting
+  // TDD-organization-control-001, which requires a non-nullable tenant_id on every table in
+  // an RLS schema and has its structural test reject one that does not. The rule was the one
+  // that survived and the design was corrected: RLS evaluates a predicate per row and cannot
+  // follow a join, so a policy on the parent protects nothing here. A child reachable only
+  // through a protected path is not a protected child.
   //
   // Denormalized rather than joined, and the composite foreign key below is what keeps the
   // copy honest: the pair must exist on the parent, so a row cannot claim a Tenant its
