@@ -25,7 +25,9 @@
       "authenticated context, which is the substitution the RLS layer is a second line of",
       "defence against. binding_test.go asserts the SQL side by walking the repository."
     ],
-    "internal/db": []
+    "internal/db": [],
+
+    "internal/membership": ["internal/db"]
   },
 
   "pureSegments": ["domain"],
