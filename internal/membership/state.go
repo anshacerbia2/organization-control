@@ -156,13 +156,6 @@ type Membership struct {
 	Provenance string
 }
 
-// Source names this system in every envelope it publishes.
-//
-// An absolute-path URI reference, which `event.ParseSource` requires: a CloudEvents source is a
-// URI-reference, and a bare name would be a relative one that a consumer resolving it against its
-// own base would resolve differently.
-const Source event.Source = "/systems/organization-control"
-
 // eventTypes maps an action to the CloudEvents type its transition publishes.
 //
 // The names are not derived from the action. `event.ParseType` requires the fifth segment to

@@ -11,6 +11,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/outbox"
 
 	"github.com/anshacerbia2/organization-control/internal/db"
+	"github.com/anshacerbia2/organization-control/internal/system"
 )
 
 // Service performs authoritative Membership mutations.
@@ -243,7 +244,7 @@ func (s *Service) appendEvent(ctx context.Context, tx db.Tx, action Action, reco
 	if err != nil {
 		return err
 	}
-	envelope, err := event.New(Source, eventType, occurredAt, NewPayload(record, securityVersion))
+	envelope, err := event.New(system.Source, eventType, occurredAt, NewPayload(record, securityVersion))
 	if err != nil {
 		return fmt.Errorf("membership: build envelope: %w", err)
 	}

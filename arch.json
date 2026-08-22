@@ -27,7 +27,23 @@
     ],
     "internal/db": [],
 
-    "internal/membership": ["internal/db"]
+    "_comment_system": [
+      "internal/system holds one constant: the CloudEvents source naming this system. It has no",
+      "internal edges and every publishing package depends on it, so the identity consumers key",
+      "their projections on is written once."
+    ],
+    "internal/system": [],
+
+    "internal/membership": ["internal/db", "internal/system"],
+
+    "_comment_tenant": [
+      "internal/tenant owns the Tenant state machine and tenant_security_version. It does not",
+      "import internal/membership and must not: TDD-organization-control-004 assigns the",
+      "offboarding freeze -- the one Tenant transition that touches Membership rows -- to",
+      "internal/offboarding, which will depend on both. An edge here would let a Tenant",
+      "transition suspend Memberships without the offboarding record that makes it resumable."
+    ],
+    "internal/tenant": ["internal/db", "internal/system"]
   },
 
   "pureSegments": ["domain"],

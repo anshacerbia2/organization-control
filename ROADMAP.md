@@ -86,15 +86,83 @@ of truth.
 
 ## Week 2 · Authority and revocation
 
-- Membership state machine, refusing every transition outside the diagram
-- Revocation transaction: status, version increments, and the priority outbox append in
+- ✅ Membership state machine, refusing every transition outside the diagram
+- ✅ Revocation transaction: status, version increments, and the priority outbox append in
   one commit
-- Suspend, restore, and their events
-- Tenant suspension incrementing `tenant_security_version`
-- Accepted timestamp on every acknowledgement
+- ✅ Suspend, restore, and their events
+- ✅ Tenant suspension incrementing `tenant_security_version` — and restore incrementing it too
+- ✅ Accepted timestamp on every acknowledgement
+- ✅ `db.WithTenantScope` / `db.WithProviderScope` as the only paths that bind scope, with the
+  architecture test that `SET LOCAL app.` appears nowhere else — the clause Week 1 left open
 
 **Exit:** injecting a failure after the status change and before the outbox append rolls
 back both; `membership_version` never decreases.
+
+**Met, and asserted by failing inside the window it protects.** Both services carry a
+`beforeAppend` seam that is nil outside tests. With a failure injected there, the Membership
+revocation leaves the status, `membership_version`, and the outbox exactly as they were, and
+the Tenant suspension leaves the status, `version`, and `tenant_security_version` unchanged
+with no row in `platform.outbox`. Each test then removes the injection and repeats the
+transition, so the rollback is shown to have left the row usable rather than merely unchanged
+— a row left locked or half-written would pass the first half of that assertion.
+
+`membership_version` is walked across grant → suspend → restore → revoke and asserted to
+increase at every step, with one event per transition on one aggregate. The increment is
+`membership_version = membership_version + 1` in the same statement as the status change
+rather than a value computed in Go, so two concurrent transitions cannot both write the
+version they read.
+
+Both suites connect as `organization_app` and `organization_provider_app` — login roles
+inheriting the runtime roles — never as the owner. On an owning connection the cross-Tenant
+assertions would pass while proving nothing.
+
+### What building Week 2 found
+
+| Finding | Consequence |
+| :-- | :-- |
+| `TDD-organization-control-003` names the retirement event `...tenant.lifecycle.retired`; `TDD-organization-control-004` names the same fact `...tenant.offboarding.retired` | The 003 name is used. An event type says what happened to which aggregate; naming it after the process that caused it gives one fact two types depending on how it arose, and the cause is already carried by the correlation identifier. Recorded as a departure below |
+| Tenant retirement increments `tenant_security_version` and its event is *not* on the priority lane | Consistent, and it reads like an oversight, so there is a test named after it. The only way into `retired` is from `offboarding`, which already published a priority event and already froze context — by the time a Tenant retires there is no access left to withdraw. What is enforced instead is that the lane agrees with the event's own classification: a name containing `security` and a standard-lane append cannot coexist |
+| `organization_rt` holds no `SELECT` on `organization.organization`, so the activation precondition on the sponsoring Organization is not evaluable on a tenant-scoped connection | `TenantService` binds to the provider pool. This is not a convenience: it is the only binding under which the checks `TDD-organization-control-003` §"Tenant Activation" requires can run, and it brings the mandatory reason and recorded evidence with it |
+| `event.ParseSource` requires an absolute-path URI reference; `"scnehaux/organization-control"` is rejected | The source is `/systems/organization-control`, declared once in `internal/system` rather than per publishing package. A duplicated system identity fails no compiler — it surfaces as two sources in a consumer's stream for one system |
+| Two Tenant transitions publish the same event type | Deliberate, per 003 §"Published Events": `tenant.security.suspended` is the security *consequence*, emitted for `active → suspended` and for either entry into `offboarding`. The payload carries the status, so a consumer that must tell them apart still can. The Membership suite's "one event type per action" assertion is therefore not repeated for Tenant |
+
+### Deliberately not exposed yet
+
+The Tenant state machine is whole — every transition in the 003 diagram is in the table, and
+a test walks the full cross product of actions and states. `TenantService` exposes three of
+them: `Activate`, `Suspend`, `Restore`.
+
+`begin-offboarding` and `retire` are transitions here and commands elsewhere.
+`TDD-organization-control-004` assigns both to `OffboardingService`: each is a stage of a
+process that also creates an `operation.offboarding` row, raises obligations across domains,
+and — for the freeze — suspends every Membership in the Tenant. A version of either that
+moved only the Tenant row would look complete and leave access running, so `arch.json` gives
+`internal/tenant` no edge to `internal/membership` and the commands wait for the package that
+owns the rest of the work.
+
+`provision` and `fail` are the provisioning-correlation transitions and publish nothing. That
+silence is a declared set rather than an absent map key, and a test asserts an action cannot
+be in neither: no context exists to invalidate before a Tenant has ever been active, and no
+consumer projects a Tenant that has never existed to it.
+
+### Departures from the designs, recorded in Week 2
+
+**The retirement event is `com.scnehaux.organization.tenant.lifecycle.retired`.** The two
+designs disagree; the reasoning is in the finding above and in `internal/tenant/state.go`
+beside the table.
+
+**`suspended_at` is cleared on restore.** Neither design says. The column records when the
+*current* suspension began, and left populated it would make a restored Tenant
+indistinguishable from a suspended one to every report that filters on it. The history of past
+suspensions belongs to the event stream, which is the record that is supposed to be
+append-only.
+
+**Every Tenant mutation requires the `version` the caller was shown.** 003 §"API / Interface"
+states this for the HTTP surface; it is enforced in the service instead, so the check cannot
+be bypassed by a second caller of the same method. The state check runs first and the version
+check second: a caller acting on a stale view usually gets both wrong, and "restore is not
+permitted from active" tells an operator what happened where "version 4 is not version 5"
+tells them only that something did.
 
 ## Week 3 · Projection publication
 
