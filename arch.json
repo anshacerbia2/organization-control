@@ -16,7 +16,16 @@
 
   "internalEdges": {
     "cmd/organization-migrate": ["internal/controldb"],
-    "internal/controldb": []
+    "internal/controldb": [],
+
+    "_comment_db": [
+      "internal/db is the only package permitted to bind a transaction's isolation scope, per",
+      "TDD-organization-control-001. It has no internal edges on purpose: a package that could",
+      "reach a repository or a service could resolve a scope from something other than the",
+      "authenticated context, which is the substitution the RLS layer is a second line of",
+      "defence against. binding_test.go asserts the SQL side by walking the repository."
+    ],
+    "internal/db": []
   },
 
   "pureSegments": ["domain"],

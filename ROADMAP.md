@@ -37,13 +37,13 @@ Atlas migrations under ADR-GLB-004 and STD-GLB-002, run by `organization_migrato
   mirroring `USING`
 - ✅ `organization_rt` and `organization_provider_rt`, neither owning a table nor holding
   `SUPERUSER`, `BYPASSRLS`, `CREATEROLE`, or `LOGIN`; asserted against the catalog in CI
-- `db.WithTenantScope` and `db.WithProviderScope` as the only paths that set scope
+- ✅ `db.WithTenantScope` and `db.WithProviderScope` as the only paths that set scope
 
 **Exit:** cross-tenant denial proven by tests executed as `organization_rt`; an unset
 binding raises an error rather than returning an empty set; `SET LOCAL app.` appears in
 no package other than `db`.
 
-**Two of three met.** Twelve assertions run as the runtime login roles rather than on an
+**Met.** Twelve assertions run as the runtime login roles rather than on an
 owning connection, which is what `TDD-organization-control-001` requires and what makes them
 evidence: a read bound to Tenant A sees none of Tenant B and exactly one Tenant row, an insert
 carrying another Tenant's identifier is refused by `WITH CHECK`, an update cannot move a row
@@ -70,6 +70,12 @@ appears nowhere else.
 | The `tenant_security_version` column and the `workspace_tenant_scope_unique` constraint are each declared in two TDDs | Applied as SQL in the order the designs state, the second declaration fails. The declarative schema resolves it by construction — each is declared once in `schema.hcl` — and the duplication is recorded here rather than silently deduplicated |
 
 ### Departures from the designs, recorded
+
+**`WithTenantScope` and `WithProviderScope` carry `db.Tx`, not `pgx.Tx`.** The design writes both
+signatures as `fn func(pgx.Tx) error`. `arch.json` denies this repository any import of pgx, and
+foundation-platform's db package exists so a driver type never reaches a domain signature —
+replacing the driver is then one module's change rather than every consumer's. The departure is
+the type name; the shape is unchanged.
 
 **`operation.offboarding_obligation` carries `tenant_id`.** `TDD-organization-control-004`
 declares it without one. Adding it is the smaller change: the alternative was to exclude the

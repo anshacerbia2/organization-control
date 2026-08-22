@@ -220,7 +220,7 @@ jobs:
       # rather than against the SQL that produced them. Verbose because each assertion names a
       # control, and a reviewer reading a red build should see which one.
       - name: prove tenant isolation as the runtime role
-        run: go test ./internal/controldb/... -count=1 -v
+        run: go test ./internal/controldb/... ./internal/db/... -count=1 -v
 
       # Reused from foundation-platform rather than reimplemented. The rules live in arch.json
       # beside the code they constrain.
