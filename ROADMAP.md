@@ -15,8 +15,8 @@ cross-repository dependency is `foundation-platform`, which lands first.
 
 | TDD | Version | Subject | Status |
 | :-- | :-- | :-- | :-- |
-| `TDD-organization-control-001` | 0.2.0 | Tenant isolation and Row-Level Security | approved |
-| `TDD-organization-control-002` | 0.4.0 | Membership authority, revocation, projection publication | approved |
+| `TDD-organization-control-001` | 1.0.0 | Tenant isolation and Row-Level Security | approved |
+| `TDD-organization-control-002` | 1.0.0 | Membership authority, revocation, projection publication | approved |
 | `TDD-organization-control-003` | 1.2.0 | Organization, Tenant, and Workspace lifecycle | approved |
 | `TDD-organization-control-004` | 1.2.0 | Invitation, onboarding correlation, and offboarding obligations | approved |
 
@@ -38,9 +38,23 @@ Three implementation decisions the designs had not stated are now stated in them
 clears `suspended_at`, every Tenant transition is provider-scoped and why, and the
 provisioning transitions publish nothing by design.
 
-One item is **not** resolved and is not mine to resolve: 001 and 002 sit below `1.0.0`
-while carrying `status: approved`, and the production gate below requires all four at
-`1.0.0`. That is a review signature, not a content change.
+A sixth disagreement was closed in the governance repository, because it was not local to
+this one. 001 and 002 sat below `1.0.0` while carrying `status: approved`: Semantic
+Versioning, which GDC-000 §2.6 mandates, reserves major version zero for initial
+development where anything may change, and `approved` means approved for implementation.
+An implementer reading 0.4.0 was told the contract may move underneath their code while
+the same document's status told them it would not — and code was already written against
+both. Both are now `1.0.0`, along with the four other designs across `identity-control`
+and `identity-kernel` that carried the same contradiction.
+
+GDC-000 §2.6 states the rule as item 6, the Baseline Stability Mandate, and the
+`approved_version_not_stable` fitness function enforces it, so a baseline status at major
+version zero now fails CI rather than waiting to be noticed. `chartered`, `draft`, and
+`proposed` are deliberately left free to sit at `0.y.z` — twelve chartered SADs are
+correctly there, and a rule that moved them would destroy the signal it exists to protect.
+
+**The design gate is therefore met:** all four designs at `1.0.0`, all four
+non-contradicting, all four passing the governance linter.
 
 Design 003 closed the gap that blocked the first migration. Design 002 writes a
 composite foreign key against `workspace.workspace (tenant_id, workspace_id)` and carries
@@ -252,7 +266,8 @@ prohibition structural rather than procedural, and it is asserted by test.
 
 ## Gates
 
-**Design gate.** All four designs at `1.0.0`.
+**Design gate. Met.** All four designs at `1.0.0`, no design contradicting another or the
+implementation, and `approved_version_not_stable` now refuses a regression in CI.
 
 **Production gate.** The design gate, plus: restore evidence for the Organization
 Database including outbox and projection cursor state, cross-tenant denial proven as
