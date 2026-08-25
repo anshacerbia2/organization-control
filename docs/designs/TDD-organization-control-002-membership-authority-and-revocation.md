@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 0.4.0
+  version: 1.0.0
   status: approved
   classification: restricted
   review_cycle_days: 90

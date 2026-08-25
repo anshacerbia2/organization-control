@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 0.2.0
+  version: 1.0.0
   status: approved
   classification: restricted
   review_cycle_days: 90
