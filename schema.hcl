@@ -790,6 +790,20 @@ table "consumer" {
     type    = timestamptz
     default = sql("now()")
   }
+  // The high-water mark of the snapshot this consumer bootstrapped from.
+  //
+  // ADDITION to TDD-organization-control-002 §"Consumer Registry", which declares the table
+  // without it while §"Bootstrap Contract" requires the registry to refuse a progress report
+  // whose snapshot mark is absent. That rule needs somewhere to read the mark from, so the
+  // column is the enforcement of a rule the design already states rather than a new one.
+  //
+  // NULL means no snapshot has been taken. A consumer in that state has subscribed and holds
+  // everything that happened since it connected and nothing before, so accepting a position
+  // for it would record an incomplete model as a current one.
+  column "snapshot_mark" {
+    null = true
+    type = bigint
+  }
   column "last_reported_at" {
     null = true
     type = timestamptz

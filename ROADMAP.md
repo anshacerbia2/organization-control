@@ -225,14 +225,59 @@ with the check order and the evidence obligations the provider path carries.
 
 ## Week 3 · Projection publication
 
-- `projection.consumer` registry with declared freshness and stale behavior
-- Snapshot generation, high-water mark, paging, admission control
-- `GET /v1/projections/organization/snapshot`, `:reconcile`, consumer status
-- Bootstrap contract: a cursor without a snapshot mark is refused
-- Reconciliation comparing authority against reported projection state
+- ✅ `projection.consumer` registry with declared freshness and stale behavior
+- ✅ Snapshot generation, high-water mark, paging, admission control
+- ⏳ `GET /v1/projections/organization/snapshot`, `:reconcile`, consumer status — the
+  service layer is complete and asserted; the HTTP surface waits for the composition root
+  that Week 4 builds alongside the command surfaces
+- ✅ Bootstrap contract: a cursor without a snapshot mark is refused
+- ✅ Reconciliation comparing authority against reported projection state
 
 **Exit:** a consumer that has not registered receives no projection; a snapshot plus the
 events after its mark reconstruct the authoritative set with no gap and no duplicate.
+
+**Met, with one clause of the contract corrected rather than satisfied as written.** Twelve
+assertions run as `organization_provider_app`. An unregistered consumer is refused with
+`ErrNotRegistered` and a registered one is served, so the refusal is the registration check
+rather than a broken snapshot. A progress report before any snapshot is refused, and accepted
+immediately after `Bootstrap`. Keyset paging returns every seeded row exactly once, every page
+of one snapshot carries the same mark, and continuing without carrying that mark is refused
+rather than served with a fresh one.
+
+Each page is read in a read-only `REPEATABLE READ` transaction with the mark taken in the same
+transaction as the rows. Under `READ COMMITTED` each statement takes its own snapshot, so a
+mutation committing between the two reads would produce rows that omit a Membership and a mark
+claiming its event was already represented.
+
+### What building it found
+
+| Finding | Consequence |
+| :-- | :-- |
+| The bootstrap contract's "events at or below the mark are acknowledged as already represented by the snapshot" is unsound | `platform.outbox.sequence` is allocated by `nextval` at INSERT, not at COMMIT, so a transaction can hold sequence 103 while a later one takes 104 and commits first. A snapshot in that window reports mark 104 and cannot see the row at 103 — nor its Membership, same transaction. Discarding at the mark drops the only event that would ever deliver it, and nothing reports the loss. `TestAMutationInFlightDuringASnapshotIsNotSilentlyLost` holds a transaction open across a snapshot and reproduces it: mark 104, held sequence 103, row absent. TDD-002 v1.1.0 amends step 4 — the consumer applies every buffered event and decides by version comparison, which is the rule this design already stated everywhere else |
+| `projection.consumer` had no column to hold a snapshot mark, while the bootstrap contract required refusing a report without one | The rule had nowhere to read from. `snapshot_mark BIGINT` added to `schema.hcl` and to TDD-002; the migration is `20260826071822_add_projection_snapshot_mark.sql` |
+| `com.scnehaux.organization.projection.reconciled` has five segments; `event.ParseType` requires six or seven and reserves the fifth for the event's class | The design's name could not express a classification at all. Now `...projection.repair.reconciled`. `repair` and not `security`, because the fifth segment routes the dispatch lane and a large sweep on the reserved lane would delay the live revocations it exists for |
+| `SET TRANSACTION ISOLATION LEVEL` is refused once any statement has run, and the scope binding is a statement | The snapshot variant had to live in `internal/db` so isolation is set before the binding. `WithProviderSnapshot` also declares `READ ONLY`: a read-only transaction cannot take the mark and then write below it |
+| `db.Pool` exposes only `InTx`, and `arch.json` denies this repository the driver | Holding a transaction open across a snapshot needs a goroutine and two channels in the test. That is the correct trade — the one thing this test needs is the one thing production code must never do |
+| A snapshot mark of `0` is legitimate and indistinguishable from an omitted field on an `int64` | `SnapshotRequest.Mark` is a `*int64`. With a plain value, the second page of the first snapshot a deployment ever takes would be refused |
+
+### Departures from the designs, recorded in Week 3
+
+**The high-water mark is a progress coordinate, not a discard boundary.** Reasoning above and
+in TDD-002 §"Why the mark is not a discard boundary". Making the mark exact would take
+transaction-id arithmetic against the snapshot's `xmin` or a lock serialising every outbox
+append against every snapshot; the second buys a property nothing needs, at the price of a
+global serialisation point on the mutation path.
+
+**Reconciliation publishes one event per sweep, on a fresh aggregate.** A finding-per-event
+stream would let a consumer apply half a sweep and report itself reconciled. The aggregate is
+per sweep rather than derived from the consumer name, so sweeps for one consumer are not
+partition-ordered — ordering is carried by `mark` in the payload, the same rule that governs
+every other event here. Ordering nothing relies on is a constraint to maintain, not a
+guarantee to gain.
+
+**Findings are sorted, security first.** Go randomises map iteration deliberately, so an
+unsorted result would make two sweeps over identical state return different output — which
+breaks the idempotence this design requires and makes a diff of two runs meaningless.
 
 ## Week 4 · Lifecycle and offboarding
 

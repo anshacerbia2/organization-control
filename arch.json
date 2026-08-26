@@ -43,7 +43,16 @@
       "internal/offboarding, which will depend on both. An edge here would let a Tenant",
       "transition suspend Memberships without the offboarding record that makes it resumable."
     ],
-    "internal/tenant": ["internal/db", "internal/system"]
+    "internal/tenant": ["internal/db", "internal/system"],
+
+    "_comment_projection": [
+      "internal/projection publishes the projection and reconciles it. It depends on neither",
+      "internal/membership nor internal/tenant: it reads the authoritative tables directly in one",
+      "database snapshot, because a snapshot assembled from service calls would be several",
+      "instants and could not carry a single high-water mark. An edge to either would also put a",
+      "mutation path within reach of a read-only publisher."
+    ],
+    "internal/projection": ["internal/db", "internal/system"]
   },
 
   "pureSegments": ["domain"],

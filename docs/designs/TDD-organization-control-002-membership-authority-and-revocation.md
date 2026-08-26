@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.0.0
+  version: 1.1.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -218,6 +218,7 @@ CREATE TABLE projection.consumer (
     max_accepted_age   INTERVAL    NOT NULL,
     stale_behavior     TEXT        NOT NULL,
     registered_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    snapshot_mark      BIGINT,
     last_reported_at   TIMESTAMPTZ,
     last_reported_mark BIGINT,
     CONSTRAINT stale_behavior_check
@@ -228,6 +229,19 @@ CREATE TABLE projection.consumer (
 A consumer that has not registered receives no projection. `last_reported_*` records
 what the consumer said about its own progress; it is a report, not an authority, and
 the publisher never infers a position from it.
+
+`snapshot_mark` is what §"Bootstrap Contract" reads to refuse a progress report from a
+consumer that never took a snapshot. Version 0.4.0 of this design stated that refusal and
+declared the table without the column, so the rule had nowhere to read from; the column is
+the enforcement of a rule this design already made rather than a new one. `NULL` means no
+snapshot has been taken, which is precisely the condition that refuses the report.
+
+Re-registering a consumer replaces its declared terms and leaves `snapshot_mark`
+untouched. A consumer raising its freshness budget has not un-bootstrapped itself, and
+clearing the mark there would refuse its next progress report for a reason unrelated to
+what it changed. A re-bootstrap may move the mark forward and never backward: a lower mark
+would claim the consumer rebuilt from an older instant than one it has already reported
+progress against, which no sequence of correct operations produces.
 
 ### Context Claims Supplied to Token Issuance
 
@@ -277,8 +291,17 @@ com.scnehaux.organization.membership.security.suspended      (priority)
 com.scnehaux.organization.membership.security.revoked        (priority)
 com.scnehaux.organization.tenant.security.suspended          (priority)
 com.scnehaux.organization.tenant.lifecycle.activated
-com.scnehaux.organization.projection.reconciled
+com.scnehaux.organization.projection.repair.reconciled
 ```
+
+Version 0.4.0 of this design named the last one
+`com.scnehaux.organization.projection.reconciled`. `TDD-foundation-platform-001` requires six
+or seven segments and reserves the fifth for the event's class, so a five-segment name is not
+merely rejected by the validator — it has no room to say what kind of event it is. `repair`
+is that class, and it is deliberately not `security`: the fifth segment is what routes an
+event to the reserved dispatch lane, and a sweep corrects a divergence that has already been
+delivered, so a large sweep on that lane would delay the live revocations the lane exists
+for.
 
 Envelopes are CloudEvents 1.0 per `TDD-foundation-platform-001`. Priority events carry
 outbox priority `0` and occupy the reserved dispatch lane. Delivery is at-least-once
@@ -316,9 +339,9 @@ grant.
 3. Request a versioned snapshot. The endpoint reads authority and
    `MAX(platform.outbox.sequence)` in one repeatable-read database snapshot and returns
    that value as `high_water_mark`.
-4. Replace the local read model with the snapshot, then apply buffered events whose
-   `streamposition` is greater than the mark in ascending position order. Events at or
-   below the mark are acknowledged as already represented by the snapshot.
+4. Replace the local read model with the snapshot, then apply **every** buffered event,
+   deciding each one by version comparison. The mark is the position the consumer reports
+   as its starting point; it is not a boundary below which events may be discarded.
 5. Continue normal durable consumption and report the last applied `streamposition`
    and reconciliation status on the declared cadence.
 
@@ -326,6 +349,32 @@ Reading the stream without a snapshot yields an incomplete model, so the registr
 refuses a progress report whose snapshot mark is absent. Broker redelivery after
 bootstrap remains harmless because `event_id` is the deduplication identity; position
 orders the source stream and never replaces deduplication.
+
+#### Why the mark is not a discard boundary
+
+Version 0.4.0 of this design ended step 4 with "events at or below the mark are
+acknowledged as already represented by the snapshot". That is unsound, and the projection
+suite reproduces it against a real engine.
+
+`platform.outbox.sequence` is allocated by `nextval` at `INSERT`, not at `COMMIT`. So
+transaction A can take sequence 103 and still be open while transaction B takes 104 and
+commits. A snapshot taken in that window sees `MAX(sequence) = 104` and does not see A's
+row — nor A's Membership, because both are the same uncommitted transaction. A consumer
+that discarded everything at or below 104 would discard the only event that would ever
+have delivered that Membership, and nothing downstream would report the loss: authority
+holds a Membership, the consumer holds none, and both sides believe they are current until
+a reconciliation sweep happens to compare them.
+
+Making the mark exact would take either transaction-id arithmetic against the snapshot's
+`xmin` or a lock serialising every outbox append against every snapshot. The first is
+fragile; the second puts a global serialisation point on the mutation path to buy a
+property that is not needed, because this design already states the rule that closes the
+hole: **the versions, not delivery order or `streamposition`, decide which desired state is
+newer.** A consumer applying an event it already has either matches or is superseded, so
+applying a duplicate is free and discarding a straggler is not.
+
+The cost of the amendment is a bounded amount of redundant work once per bootstrap. The
+cost of the original wording is a silently missing context.
 
 ## Algorithms / Logic
 
@@ -458,10 +507,18 @@ the sum, because that is the number incident response works from.
 
 - A consumer that has not registered receives no snapshot.
 - A progress report without a snapshot mark is refused.
-- A mutation committed while a snapshot is being produced appears either in the
-  snapshot or in the buffered set above its mark, never in neither.
-- A snapshot and buffered events above its high-water mark reconstruct the authoritative
-  set with no gap; repeated `event_id` values do not apply twice.
+- A reported position below one already accepted is refused; re-reporting the same
+  position is accepted, because an idle consumer is still reporting liveness.
+- A mutation committed while a snapshot is being produced appears either in the snapshot
+  or in the buffered set, never in neither. It is **not** required to appear above the
+  mark: a transaction in flight when the mark is taken holds a lower sequence, which is
+  why §"Why the mark is not a discard boundary" exists and why a test holds a transaction
+  open across a snapshot to demonstrate it.
+- A snapshot plus the buffered set reconstructs the authoritative set with no gap;
+  repeated `event_id` values do not apply twice.
+- Every page of one snapshot reports the same high-water mark, and continuing a snapshot
+  without carrying its mark is refused rather than served with a fresh one.
+- Paging covers the set exactly once: keyset paging on `membership_id`, never `OFFSET`.
 - Gaps in `streamposition` caused by rolled-back transactions do not stall bootstrap.
 - Delivering Membership version 14 before version 13 leaves version 14 as desired state;
   the later delivery of version 13 is classified as superseded and cannot restore

@@ -222,6 +222,29 @@ func WithTenantScope(ctx context.Context, pool *TenantPool, fn Body) error {
 // cases that matter, because a transaction that panics or is killed mid-flight is the one an
 // investigation asks about.
 func WithProviderScope(ctx context.Context, pool *ProviderPool, reason string, fn Body) error {
+	return withProviderScope(ctx, pool, reason, false, fn)
+}
+
+// WithProviderSnapshot is WithProviderScope in a read-only REPEATABLE READ transaction.
+//
+// A projection snapshot must read the authoritative set and the outbox position it corresponds to
+// as one instant. Under READ COMMITTED each statement takes a fresh snapshot, so a mutation
+// committing between the two reads would produce a snapshot that omits a Membership and a mark
+// that claims to include it — and the consumer would discard the very event that carried it.
+//
+// The isolation level is set before the scope binding rather than after, because PostgreSQL
+// refuses `SET TRANSACTION ISOLATION LEVEL` once any statement has run and `set_config` is a
+// statement. That ordering is why this lives here instead of in the calling package: the binding
+// stays in the one file a reviewer can hold in their head.
+//
+// READ ONLY is declared as well. It is not defensive tidiness — a read-only transaction cannot
+// take the mark and then write something below it, which is the one way a snapshot could
+// contradict its own watermark.
+func WithProviderSnapshot(ctx context.Context, pool *ProviderPool, reason string, fn Body) error {
+	return withProviderScope(ctx, pool, reason, true, fn)
+}
+
+func withProviderScope(ctx context.Context, pool *ProviderPool, reason string, snapshot bool, fn Body) error {
 	if pool == nil {
 		return errors.New("db: a provider pool is required")
 	}
@@ -248,6 +271,12 @@ func WithProviderScope(ctx context.Context, pool *ProviderPool, reason string, f
 	}
 
 	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+		if snapshot {
+			if _, err := tx.Exec(ctx,
+				`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`); err != nil {
+				return fmt.Errorf("db: enter snapshot isolation: %w", err)
+			}
+		}
 		// The provider policy reads this rather than granting unconditional access, so an
 		// unbound provider connection fails closed the same way an unbound tenant one does.
 		// BYPASSRLS would have been simpler and would have made the access indistinguishable in
