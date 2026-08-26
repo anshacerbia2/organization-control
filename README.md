@@ -207,8 +207,19 @@ $env:TEST_DATABASE_URL      = 'postgres://postgres:…@127.0.0.1:5432/organizati
 $env:TEST_RUNTIME_PASSWORD  = '…'   # organization_app, inherits organization_rt
 $env:TEST_PROVIDER_PASSWORD = '…'   # organization_provider_app, inherits organization_provider_rt
 
-go test ./internal/controldb/... -v
+go test ./... -count=1 -p 1
 ```
+
+**`-p 1` is required, not preferred.** Every integration suite runs against one database, and
+`internal/controldb` deliberately weakens the isolation posture to prove its assertions catch
+weakening: it drops `membership_tenant_scope`, removes `FORCE`, and grants `organization_rt`
+`BYPASSRLS`, restoring each afterwards. Those changes are table-wide and cluster-wide, so any
+other package's RLS assertion that runs in that window observes a weakened database and fails
+for a reason unrelated to the code it tests. Without the flag `go test ./...` passes roughly
+three runs in four, which is the worst possible failure rate — often enough to be dismissed as
+flakiness and rare enough to survive review. An advisory lock does not close it, because
+`ALTER ROLE` races with every role-dependent assertion in the estate regardless of what locks
+the two suites hold.
 
 CI creates both login roles, seeds two Tenants, and sets `REQUIRE_INTEGRATION=1` so a service
 container that never came up fails the build rather than leaving every cross-tenant assertion

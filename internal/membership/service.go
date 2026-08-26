@@ -180,55 +180,71 @@ WHERE membership_id = $1
 RETURNING membership_version`
 
 func (s *Service) transition(ctx context.Context, action Action, membershipID id.UUID) (Result, error) {
-	if membershipID.IsNil() {
-		return Result{}, errors.New("membership: a membership identifier is required")
-	}
 	if _, ok := db.ScopeFrom(ctx); !ok {
 		return Result{}, db.ErrNoScope
 	}
 
-	acceptedAt := s.now().UTC()
-	var (
-		record          Membership
-		securityVersion int64
-	)
-
+	var result Result
 	if err := db.WithTenantScope(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
-		current, loadErr := load(ctx, tx, membershipID)
-		if loadErr != nil {
-			return loadErr
-		}
-
-		// Resolved before anything is written. A refused transition must leave no trace, and a
-		// check performed after the update would rely on the rollback rather than on not having
-		// tried.
-		next, _, resolveErr := Resolve(action, current.Status)
-		if resolveErr != nil {
-			return resolveErr
-		}
-
-		version, readErr := tenantSecurityVersion(ctx, tx, current.TenantID)
-		if readErr != nil {
-			return readErr
-		}
-		securityVersion = version
-
-		var updatedVersion int64
-		if scanErr := tx.QueryRow(ctx, updateStatement,
-			membershipID.String(), string(next)).Scan(&updatedVersion); scanErr != nil {
-			return fmt.Errorf("membership: update status: %w", scanErr)
-		}
-
-		current.Status = next
-		current.Version = updatedVersion
-		record = current
-
-		return s.appendEvent(ctx, tx, action, record, securityVersion, acceptedAt)
+		var err error
+		result, err = s.TransitionWithin(ctx, tx, action, membershipID)
+		return err
 	}); err != nil {
 		return Result{}, err
 	}
+	return result, nil
+}
 
-	return Result{Membership: record, AcceptedAt: acceptedAt, TenantSecurityVersion: securityVersion}, nil
+// TransitionWithin performs one Membership transition inside a transaction the caller owns.
+//
+// It exists for the offboarding freeze, which suspends every active Membership in a Tenant in
+// resumable batches. A batch is one transaction holding every changed row together with its
+// priority event, so a batch that fails leaves neither — the alternative is a Membership suspended
+// with no event, which is a context that authority has withdrawn and no consumer will ever hear
+// about.
+//
+// The rules are not relaxed for the bulk path. Every refusal, version increment, and event is the
+// same code a single suspension runs, because a bulk path with its own copy of the state machine is
+// a second state machine that will eventually disagree with the first.
+func (s *Service) TransitionWithin(ctx context.Context, tx db.Tx, action Action,
+	membershipID id.UUID) (Result, error) {
+	if membershipID.IsNil() {
+		return Result{}, errors.New("membership: a membership identifier is required")
+	}
+
+	acceptedAt := s.now().UTC()
+
+	current, err := load(ctx, tx, membershipID)
+	if err != nil {
+		return Result{}, err
+	}
+
+	// Resolved before anything is written. A refused transition must leave no trace, and a check
+	// performed after the update would rely on the rollback rather than on not having tried.
+	next, _, err := Resolve(action, current.Status)
+	if err != nil {
+		return Result{}, err
+	}
+
+	securityVersion, err := tenantSecurityVersion(ctx, tx, current.TenantID)
+	if err != nil {
+		return Result{}, err
+	}
+
+	var updatedVersion int64
+	if err := tx.QueryRow(ctx, updateStatement,
+		membershipID.String(), string(next)).Scan(&updatedVersion); err != nil {
+		return Result{}, fmt.Errorf("membership: update status: %w", err)
+	}
+
+	current.Status = next
+	current.Version = updatedVersion
+
+	if err := s.appendEvent(ctx, tx, action, current, securityVersion, acceptedAt); err != nil {
+		return Result{}, err
+	}
+
+	return Result{Membership: current, AcceptedAt: acceptedAt, TenantSecurityVersion: securityVersion}, nil
 }
 
 // appendEvent writes the event inside the caller's transaction.

@@ -213,14 +213,23 @@ jobs:
 
       # The race detector is the only thing separating correct synchronisation from
       # synchronisation that has been lucky.
+      #
+      # `-p 1` is not a performance concession. Every integration suite here runs against one
+      # database, and `internal/controldb` deliberately weakens the isolation posture to prove
+      # its assertions catch weakening: it drops `membership_tenant_scope`, removes FORCE, and
+      # grants `organization_rt` BYPASSRLS, restoring each afterwards. Those are cluster-wide
+      # and table-wide, so any other package's RLS assertion running in that window observes a
+      # weakened database and fails for a reason that has nothing to do with the code it tests.
+      # An advisory lock cannot fix it — `ALTER ROLE` races with every role-dependent assertion
+      # in the estate — so the suites must not run concurrently.
       - name: test with race detector
-        run: go test ./... -race -count=1
+        run: go test ./... -race -count=1 -p 1
 
       # This is the Week 1 exit criterion, asserted against the catalog and against the engine
       # rather than against the SQL that produced them. Verbose because each assertion names a
       # control, and a reviewer reading a red build should see which one.
       - name: prove tenant isolation as the runtime role
-        run: go test ./internal/controldb/... ./internal/db/... -count=1 -v
+        run: go test ./internal/controldb/... ./internal/db/... -count=1 -v -p 1
 
       # Reused from foundation-platform rather than reimplemented. The rules live in arch.json
       # beside the code they constrain.

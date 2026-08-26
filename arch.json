@@ -52,7 +52,16 @@
       "instants and could not carry a single high-water mark. An edge to either would also put a",
       "mutation path within reach of a read-only publisher."
     ],
-    "internal/projection": ["internal/db", "internal/system"]
+    "internal/projection": ["internal/db", "internal/system"],
+
+    "_comment_offboarding": [
+      "internal/offboarding is the one package permitted to reach both internal/tenant and",
+      "internal/membership, because it owns the two Tenant transitions that also touch Membership",
+      "rows. TDD-organization-control-004 assigns the freeze here: entering offboarding stops",
+      "Tenant-wide access and then suspends every Membership in the Tenant, and a version of that",
+      "living in either of those packages would move one aggregate and leave the other."
+    ],
+    "internal/offboarding": ["internal/db", "internal/system", "internal/tenant", "internal/membership"]
   },
 
   "pureSegments": ["domain"],

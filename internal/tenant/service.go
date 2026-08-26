@@ -109,57 +109,82 @@ func (s *Service) transition(ctx context.Context, action Action, cmd Command, ch
 		return Result{}, err
 	}
 
-	acceptedAt := s.now().UTC()
-	var (
-		record    Tenant
-		published bool
-	)
-
+	var result Result
 	if err := db.WithProviderScope(ctx, s.pool, cmd.Reason, func(ctx context.Context, tx db.Tx) error {
-		current, err := load(ctx, tx, cmd.TenantID)
-		if err != nil {
-			return err
-		}
-
-		// Resolved before anything is written. A refused transition must leave no trace, and a
-		// check performed after the update would be relying on the rollback rather than on not
-		// having tried.
-		next, err := Resolve(action, current.Status)
-		if err != nil {
-			return err
-		}
-
-		// The version check comes after the state check on purpose. A caller acting on a stale
-		// view most often gets both wrong, and "this transition is not permitted from suspended"
-		// tells an operator what happened; "version 4 is not version 5" tells them only that
-		// something did.
-		if current.Version != cmd.ExpectedVersion {
-			return fmt.Errorf("%w: expected %d, stored %d",
-				ErrVersionMismatch, cmd.ExpectedVersion, current.Version)
-		}
-
-		if check != nil {
-			if err := check(ctx, tx, current); err != nil {
-				return err
-			}
-		}
-
-		updated, err := apply(ctx, tx, action, cmd.TenantID, next, acceptedAt)
-		if err != nil {
-			return err
-		}
-		current.Status = next
-		current.Version = updated.version
-		current.SecurityVersion = updated.securityVersion
-		record = current
-
-		published, err = s.appendEvent(ctx, tx, action, record, acceptedAt)
+		var err error
+		result, err = s.transitionWithin(ctx, tx, action, cmd, check)
 		return err
 	}); err != nil {
 		return Result{}, err
 	}
+	return result, nil
+}
 
-	return Result{Tenant: record, AcceptedAt: acceptedAt, Published: published}, nil
+// TransitionWithin performs a Tenant transition inside a transaction the caller already owns.
+//
+// It exists for one caller: `internal/offboarding`, which owns transitions the Tenant service
+// deliberately does not expose as standalone commands. Entering or leaving offboarding must commit
+// together with the offboarding record and its own event, and a service that opened its own
+// transaction could not offer that — the two would be separately committable, and a Tenant could
+// sit in `offboarding` with no offboarding record to resume from.
+//
+// The transaction discipline is the caller's; the transition rules are not. Every refusal, version
+// increment, timestamp, and event on this path is the same code the standalone commands run, so an
+// action added to the machine cannot behave differently depending on who drove it.
+//
+// It takes no guard. The preconditions on the transitions this serves — obligations settled, no
+// legal hold — belong to the offboarding record, which this package cannot read.
+func (s *Service) TransitionWithin(ctx context.Context, tx db.Tx, action Action, cmd Command) (Result, error) {
+	if err := cmd.validate(); err != nil {
+		return Result{}, err
+	}
+	return s.transitionWithin(ctx, tx, action, cmd, nil)
+}
+
+func (s *Service) transitionWithin(ctx context.Context, tx db.Tx, action Action, cmd Command,
+	check guard) (Result, error) {
+	acceptedAt := s.now().UTC()
+
+	current, err := load(ctx, tx, cmd.TenantID)
+	if err != nil {
+		return Result{}, err
+	}
+
+	// Resolved before anything is written. A refused transition must leave no trace, and a check
+	// performed after the update would be relying on the rollback rather than on not having tried.
+	next, err := Resolve(action, current.Status)
+	if err != nil {
+		return Result{}, err
+	}
+
+	// The version check comes after the state check on purpose. A caller acting on a stale view
+	// most often gets both wrong, and "this transition is not permitted from suspended" tells an
+	// operator what happened; "version 4 is not version 5" tells them only that something did.
+	if current.Version != cmd.ExpectedVersion {
+		return Result{}, fmt.Errorf("%w: expected %d, stored %d",
+			ErrVersionMismatch, cmd.ExpectedVersion, current.Version)
+	}
+
+	if check != nil {
+		if err := check(ctx, tx, current); err != nil {
+			return Result{}, err
+		}
+	}
+
+	updated, err := apply(ctx, tx, action, cmd.TenantID, next, acceptedAt)
+	if err != nil {
+		return Result{}, err
+	}
+	current.Status = next
+	current.Version = updated.version
+	current.SecurityVersion = updated.securityVersion
+
+	published, err := s.appendEvent(ctx, tx, action, current, acceptedAt)
+	if err != nil {
+		return Result{}, err
+	}
+
+	return Result{Tenant: current, AcceptedAt: acceptedAt, Published: published}, nil
 }
 
 type versions struct {
