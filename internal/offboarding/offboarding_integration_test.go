@@ -186,6 +186,7 @@ func (f *fixture) seed(t *testing.T, memberCount int) (id.UUID, []id.UUID) {
 		f.exec(t, `DELETE FROM platform.outbox WHERE aggregate_id IN (
 		    SELECT offboarding_id FROM operation.offboarding WHERE tenant_id = $1)`, tenantID.String())
 		f.exec(t, `DELETE FROM operation.offboarding WHERE tenant_id = $1`, tenantID.String())
+		f.exec(t, `DELETE FROM tenant.provisioning_request WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM membership.membership WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM tenant.tenant WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM organization.organization WHERE organization_id = $1`, organizationID.String())
@@ -605,6 +606,137 @@ func TestLegalHoldBlocksDestructionAndNothingElse(t *testing.T) {
 	}
 }
 
+// TestAnAmbiguousDeprovisioningOutcomeHoldsRetirement is TDD-004's release-stage rule, and the one
+// bullet the first cut of this package left unimplemented.
+//
+// `unresolved` comes from a timeout rather than a rejection. A timeout is not proof the target did
+// nothing: the infrastructure may have been released or may not, and retiring on it destroys the
+// only record that could tell an operator which.
+func TestAnAmbiguousDeprovisioningOutcomeHoldsRetirement(t *testing.T) {
+	f := newFixture(t)
+	tenantID, _ := f.seed(t, 1)
+	record := f.begin(t, tenantID, false)
+	f.freezeAll(t, tenantID, 10)
+	if _, err := f.service.CompleteFreeze(f.providerCtx, record.OffboardingID); err != nil {
+		t.Fatalf("CompleteFreeze: %v", err)
+	}
+	if _, err := f.service.Release(f.providerCtx, record.OffboardingID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	// Still in flight: recorded, not realized.
+	_, version, _ := f.tenantRow(t, tenantID)
+	if _, err := f.service.Retire(f.providerCtx, record.OffboardingID, version); !errors.Is(err, ErrDeprovisioningIncomplete) {
+		t.Fatalf("a command still in flight returned %v, want ErrDeprovisioningIncomplete", err)
+	}
+
+	// A timeout reported back as unresolved.
+	if err := f.service.RecordDeprovisioning(f.providerCtx, DeprovisioningOutcome{
+		OffboardingID: record.OffboardingID, State: "unresolved",
+		Detail: "no status within the provisioning timeout",
+	}); err != nil {
+		t.Fatalf("RecordDeprovisioning: %v", err)
+	}
+	_, err := f.service.Retire(f.providerCtx, record.OffboardingID, version)
+	if !errors.Is(err, ErrAmbiguousOutcome) {
+		t.Fatalf("an unresolved outcome returned %v, want ErrAmbiguousOutcome", err)
+	}
+
+	// A failure holds too, and is distinguishable from ambiguity: one is investigated, the other
+	// is waited on or retried.
+	if err := f.service.RecordDeprovisioning(f.providerCtx, DeprovisioningOutcome{
+		OffboardingID: record.OffboardingID, State: "failed",
+		Detail: "the storage subsystem refused the release",
+	}); err != nil {
+		t.Fatalf("RecordDeprovisioning: %v", err)
+	}
+	if _, err := f.service.Retire(f.providerCtx, record.OffboardingID, version); !errors.Is(err, ErrDeprovisioningIncomplete) {
+		t.Fatalf("a failed outcome returned %v, want ErrDeprovisioningIncomplete", err)
+	}
+
+	// The stage never advanced through any of that.
+	held, err := f.service.Get(f.providerCtx, record.OffboardingID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if held.Stage != StageRelease {
+		t.Errorf("stage = %s, want release — an unconfirmed outcome advanced the process", held.Stage)
+	}
+
+	// Realized retires.
+	if err := f.service.RecordDeprovisioning(f.providerCtx, DeprovisioningOutcome{
+		OffboardingID: record.OffboardingID, State: "realized",
+	}); err != nil {
+		t.Fatalf("RecordDeprovisioning: %v", err)
+	}
+	retired, err := f.service.Retire(f.providerCtx, record.OffboardingID, version)
+	if err != nil {
+		t.Fatalf("Retire after a realized deprovisioning: %v", err)
+	}
+	if retired.Stage != StageRetired {
+		t.Errorf("stage = %s, want retired", retired.Stage)
+	}
+}
+
+// TestRecordDeprovisioningRefusesANonOutcome. `requested` is the state the command was recorded in;
+// reporting it back would be an outcome that says nothing, and a failure with no detail records
+// that something went wrong without recording what.
+func TestRecordDeprovisioningRefusesANonOutcome(t *testing.T) {
+	f := newFixture(t)
+	tenantID, _ := f.seed(t, 0)
+	record := f.begin(t, tenantID, false)
+	if _, err := f.service.CompleteFreeze(f.providerCtx, record.OffboardingID); err != nil {
+		t.Fatalf("CompleteFreeze: %v", err)
+	}
+	if _, err := f.service.Release(f.providerCtx, record.OffboardingID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	for _, outcome := range []DeprovisioningOutcome{
+		{OffboardingID: record.OffboardingID, State: "requested"},
+		{OffboardingID: record.OffboardingID, State: "done"},
+		{OffboardingID: record.OffboardingID, State: "failed"},
+		{OffboardingID: record.OffboardingID, State: "unresolved"},
+	} {
+		if err := f.service.RecordDeprovisioning(f.providerCtx, outcome); err == nil {
+			t.Errorf("%q with detail %q was accepted", outcome.State, outcome.Detail)
+		}
+	}
+}
+
+// TestADeprovisioningDoesNotBlockALaterProvisioning. Both directions share
+// `tenant.provisioning_request`, so without the operation filter a failed deprovisioning would be
+// the most recent request for the Tenant and would refuse an activation on an unrelated flow.
+func TestADeprovisioningDoesNotBlockALaterProvisioning(t *testing.T) {
+	f := newFixture(t)
+	tenantID, _ := f.seed(t, 0)
+
+	// A realized provisioning, then a failed deprovisioning recorded afterwards.
+	f.exec(t, `INSERT INTO tenant.provisioning_request
+	    (request_id, tenant_id, desired_profile, state, correlation_id, requested_at)
+	    VALUES ($1, $2, jsonb_build_object('operation','provision'), 'realized', $3, now() - interval '2 hours')`,
+		mustID(t).String(), tenantID.String(), mustID(t).String())
+	f.exec(t, `INSERT INTO tenant.provisioning_request
+	    (request_id, tenant_id, desired_profile, state, correlation_id, requested_at)
+	    VALUES ($1, $2, jsonb_build_object('operation','deprovision','offboarding_id',$3::text), 'failed', $4, now())`,
+		mustID(t).String(), tenantID.String(), mustID(t).String(), mustID(t).String())
+
+	// Move the Tenant to provisioning so activation is reachable, then activate: the provisioning
+	// check must read the realized provisioning and ignore the failed deprovisioning.
+	f.exec(t, `UPDATE tenant.tenant SET status = 'provisioning' WHERE tenant_id = $1`, tenantID.String())
+	_, version, _ := f.tenantRow(t, tenantID)
+
+	tenants, err := tenant.New(f.provider)
+	if err != nil {
+		t.Fatalf("tenant.New: %v", err)
+	}
+	if _, err := tenants.Activate(f.providerCtx, tenant.Command{
+		TenantID: tenantID, Reason: "asserted by the offboarding suite", ExpectedVersion: version,
+	}); err != nil {
+		t.Fatalf("a failed deprovisioning blocked activation: %v", err)
+	}
+}
+
 // TestRetirementRechecksTheGatesAtTheMomentOfTheAct.
 //
 // Retirement is the irreversible half, and both a hold and an obligation can arrive between release
@@ -620,6 +752,13 @@ func TestRetirementRechecksTheGatesAtTheMomentOfTheAct(t *testing.T) {
 	}
 	if _, err := f.service.Release(f.providerCtx, record.OffboardingID); err != nil {
 		t.Fatalf("Release: %v", err)
+	}
+	// The deprovisioning gate is asserted on its own above; confirm it here so this test measures
+	// the two gates it is about rather than failing on a third.
+	if err := f.service.RecordDeprovisioning(f.providerCtx, DeprovisioningOutcome{
+		OffboardingID: record.OffboardingID, State: "realized",
+	}); err != nil {
+		t.Fatalf("RecordDeprovisioning: %v", err)
 	}
 
 	// A hold placed after release blocks retirement.

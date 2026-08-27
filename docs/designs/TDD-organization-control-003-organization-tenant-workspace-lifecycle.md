@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.2.0
+  version: 1.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -469,6 +469,16 @@ A Tenant with no provisioning request at all is refused for the same reason and 
 same error as one whose request is unrealized. From the caller's side "provisioning has not
 confirmed" is true either way, and the distinction between "never requested" and "requested
 and pending" belongs in the operator's view of the Tenant rather than in the refusal.
+
+**The check reads provisioning requests only.** `tenant.provisioning_request` carries desired
+state in both directions — `TDD-organization-control-004` records its deprovisioning command
+here, because a deprovisioning is desired provisioning state sent outward and a realized
+status reported back, and that design's release stage needs exactly the `unresolved` outcome
+this table already models. Both flows therefore write to one table, and the predicate filters
+`desired_profile->>'operation'`: without it a failed deprovisioning would be the most recent
+request for the Tenant and would refuse an activation on an unrelated flow. Rows written
+before the field existed read as `provision`, which is what every historical row in this
+table is.
 
 ### Organization Retirement Refusal
 

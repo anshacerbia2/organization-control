@@ -251,21 +251,46 @@ func (s *Service) CompleteFreeze(ctx context.Context, offboardingID id.UUID) (Of
 	})
 }
 
-// Release advances from obligations to release.
+// insertDeprovisioning records the command sent outward, so the realized status can be correlated
+// back to it.
+//
+// It reuses `tenant.provisioning_request`, which `TDD-organization-control-003` describes as the
+// desired provisioning state sent outward and the realized state reported back. A deprovisioning is
+// exactly that, and its `state` enum already carries the distinction this stage turns on:
+// `unresolved` is an outcome that is neither success nor failure. A second table would duplicate
+// the correlation machinery and then need its own ambiguity vocabulary.
+//
+// `desired_profile.operation` separates the two directions. Without it, a failed deprovisioning
+// would be the most recent request for the Tenant and would refuse a later provisioning attempt on
+// a flow that has nothing to do with this one.
+const insertDeprovisioning = `INSERT INTO tenant.provisioning_request
+    (request_id, tenant_id, desired_profile, state, correlation_id, requested_at)
+VALUES ($1, $2, jsonb_build_object('operation', 'deprovision', 'offboarding_id', $3::text),
+        'requested', $4, $5)`
+
+// Release advances from obligations to release and publishes the deprovisioning command.
 //
 // Refused while any obligation is unresolved and while a legal hold is set. Those are the two gates
 // that make completion something the registry states rather than something a caller asserts.
+//
+// The command is recorded in the same transaction that advances the stage. Recorded afterwards, a
+// crash in between would leave an offboarding at `release` with nothing to correlate against — and
+// the ambiguity gate below would then hold it forever with no way to tell that from a genuinely
+// slow deprovisioning.
 func (s *Service) Release(ctx context.Context, offboardingID id.UUID) (Offboarding, error) {
+	requestID, err := s.newID()
+	if err != nil {
+		return Offboarding{}, fmt.Errorf("offboarding: mint deprovisioning identifier: %w", err)
+	}
+
 	return s.advance(ctx, offboardingID, StageObligations, func(ctx context.Context, tx db.Tx, record Offboarding) error {
-		if record.LegalHold {
-			return fmt.Errorf("%w: %s", ErrLegalHold, record.OffboardingID)
-		}
-		outstanding, err := outstandingObligations(ctx, tx, record.OffboardingID)
-		if err != nil {
+		if err := s.releaseGates(ctx, tx, record); err != nil {
 			return err
 		}
-		if len(outstanding) > 0 {
-			return fmt.Errorf("%w: %s", ErrObligationsOutstanding, strings.Join(outstanding, ", "))
+		if _, err := tx.Exec(ctx, insertDeprovisioning,
+			requestID.String(), record.TenantID.String(), record.OffboardingID.String(),
+			record.CorrelationID.String(), s.now().UTC()); err != nil {
+			return fmt.Errorf("offboarding: record deprovisioning command: %w", err)
 		}
 		return nil
 	})
@@ -273,28 +298,149 @@ func (s *Service) Release(ctx context.Context, offboardingID id.UUID) (Offboardi
 
 // Retire advances from release to retired, and transitions the Tenant with it.
 //
-// Both gates are rechecked. An obligation can be reopened and a hold can be placed between release
-// and retirement, and retirement is the irreversible half — so the checks run against the state at
-// the moment of the act rather than the state that permitted the previous stage.
+// Three gates, all rechecked at the moment of the act rather than trusted from the stage that
+// permitted release. An obligation can be reopened and a hold can be placed in between, and
+// retirement is the irreversible half.
+//
+// The third gate is the deprovisioning outcome. Retirement is the point at which the estate stops
+// tracking the Tenant, so retiring on an unconfirmed deprovisioning would release the last record
+// of infrastructure that may still exist.
 func (s *Service) Retire(ctx context.Context, offboardingID id.UUID, expectedTenantVersion int64) (Offboarding, error) {
 	return s.advance(ctx, offboardingID, StageRelease, func(ctx context.Context, tx db.Tx, record Offboarding) error {
-		if record.LegalHold {
-			return fmt.Errorf("%w: %s", ErrLegalHold, record.OffboardingID)
-		}
-		outstanding, err := outstandingObligations(ctx, tx, record.OffboardingID)
-		if err != nil {
+		if err := s.releaseGates(ctx, tx, record); err != nil {
 			return err
 		}
-		if len(outstanding) > 0 {
-			return fmt.Errorf("%w: %s", ErrObligationsOutstanding, strings.Join(outstanding, ", "))
+		if err := deprovisioningConfirmed(ctx, tx, record); err != nil {
+			return err
 		}
-		_, err = s.tenants.TransitionWithin(ctx, tx, tenant.ActionRetire, tenant.Command{
+		_, err := s.tenants.TransitionWithin(ctx, tx, tenant.ActionRetire, tenant.Command{
 			TenantID:        record.TenantID,
 			Reason:          "offboarding " + record.OffboardingID.String() + " retiring the Tenant",
 			ExpectedVersion: expectedTenantVersion,
 		})
 		return err
 	})
+}
+
+// releaseGates are the two conditions shared by release and retirement.
+//
+// Shared rather than written twice, because a gate that exists at one stage and not the next is a
+// gate somebody can wait out.
+func (s *Service) releaseGates(ctx context.Context, tx db.Tx, record Offboarding) error {
+	if record.LegalHold {
+		return fmt.Errorf("%w: %s", ErrLegalHold, record.OffboardingID)
+	}
+	outstanding, err := outstandingObligations(ctx, tx, record.OffboardingID)
+	if err != nil {
+		return err
+	}
+	if len(outstanding) > 0 {
+		return fmt.Errorf("%w: %s", ErrObligationsOutstanding, strings.Join(outstanding, ", "))
+	}
+	return nil
+}
+
+// deprovisioningStatement reads the most recent deprovisioning attempt for this offboarding.
+//
+// The most recent rather than any: a failed attempt followed by a successful retry must retire, and
+// a realized attempt followed by a later failure must not.
+const deprovisioningStatement = `SELECT state, coalesce(detail, '')
+FROM tenant.provisioning_request
+WHERE tenant_id = $1
+  AND desired_profile->>'operation' = 'deprovision'
+  AND desired_profile->>'offboarding_id' = $2
+ORDER BY requested_at DESC, request_id DESC
+LIMIT 1`
+
+// deprovisioningConfirmed holds retirement until the deprovisioning is realized.
+//
+// `unresolved` is reported as ambiguous and is the case this gate exists for.
+// `TDD-organization-control-003` produces it from a timeout rather than from a rejection, and a
+// timeout is not proof the target did nothing — the infrastructure may have been released, or may
+// not, and retiring on it would destroy the only record that could tell an operator which.
+//
+// `requested` and `failed` hold too, with their own message. A caller does not need them
+// distinguished to know it cannot proceed, but an operator reading why does.
+func deprovisioningConfirmed(ctx context.Context, tx db.Tx, record Offboarding) error {
+	var state, detail string
+	if err := tx.QueryRow(ctx, deprovisioningStatement,
+		record.TenantID.String(), record.OffboardingID.String()).Scan(&state, &detail); err != nil {
+		// No command recorded at all. Reported as ambiguous rather than as an internal error: from
+		// the caller's side nothing has confirmed, and an offboarding at `release` with no command
+		// is a coordination failure an operator must look at either way.
+		return fmt.Errorf("%w: no deprovisioning command is recorded for %s",
+			ErrAmbiguousOutcome, record.OffboardingID)
+	}
+
+	switch state {
+	case "realized":
+		return nil
+	case "unresolved":
+		return fmt.Errorf("%w: the deprovisioning of %s is unresolved (%s)",
+			ErrAmbiguousOutcome, record.TenantID, detail)
+	default:
+		return fmt.Errorf("%w: the deprovisioning of %s is %s (%s)",
+			ErrDeprovisioningIncomplete, record.TenantID, state, detail)
+	}
+}
+
+// DeprovisioningOutcome is the realized status reported back for a deprovisioning command.
+type DeprovisioningOutcome struct {
+	OffboardingID id.UUID
+
+	// State is `realized`, `failed`, or `unresolved`. `requested` is refused: it is the state the
+	// command was recorded in, and reporting it back would be an outcome that says nothing.
+	State string
+
+	Detail string
+}
+
+const resolveDeprovisioning = `UPDATE tenant.provisioning_request
+SET state = $3, resolved_at = $4, detail = $5
+WHERE request_id = (
+    SELECT request_id FROM tenant.provisioning_request
+    WHERE tenant_id = $1
+      AND desired_profile->>'operation' = 'deprovision'
+      AND desired_profile->>'offboarding_id' = $2
+    ORDER BY requested_at DESC, request_id DESC
+    LIMIT 1
+)`
+
+// RecordDeprovisioning correlates a realized status back to the command Release sent.
+//
+// It records and never advances. An outcome arriving here does not retire a Tenant — retirement
+// stays a deliberate act, because the alternative is infrastructure reporting success and a Tenant
+// disappearing from the estate with nobody having decided that it should.
+func (s *Service) RecordDeprovisioning(ctx context.Context, outcome DeprovisioningOutcome) error {
+	switch outcome.State {
+	case "realized", "failed", "unresolved":
+	default:
+		return fmt.Errorf("offboarding: %q is not a deprovisioning outcome", outcome.State)
+	}
+	if outcome.State != "realized" && strings.TrimSpace(outcome.Detail) == "" {
+		return fmt.Errorf("offboarding: a %s deprovisioning outcome requires a detail", outcome.State)
+	}
+
+	at := s.now().UTC()
+	return db.WithProviderScope(ctx, s.provider,
+		"record deprovisioning outcome for "+outcome.OffboardingID.String(),
+		func(ctx context.Context, tx db.Tx) error {
+			record, err := load(ctx, tx, outcome.OffboardingID)
+			if err != nil {
+				return err
+			}
+			tag, err := tx.Exec(ctx, resolveDeprovisioning,
+				record.TenantID.String(), record.OffboardingID.String(),
+				outcome.State, at, outcome.Detail)
+			if err != nil {
+				return fmt.Errorf("offboarding: record deprovisioning outcome: %w", err)
+			}
+			if tag.RowsAffected() == 0 {
+				return fmt.Errorf("%w: no deprovisioning command is recorded for %s",
+					ErrNotFound, outcome.OffboardingID)
+			}
+			return nil
+		})
 }
 
 // gate is a precondition evaluated inside the advancing transaction, after the row is locked.

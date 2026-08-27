@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.2.0
+  version: 1.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -341,13 +341,46 @@ obligations
 
 release
     permitted only when no obligation is open and no legal hold is set
-    publish the deprovisioning command
+    record the deprovisioning command and publish it, in the same transaction
     an ambiguous provisioning outcome holds the stage; it never advances it
 
 retired
+    permitted only when the deprovisioning is realized, no obligation is open,
+    and no legal hold is set — all three rechecked at this moment
     Tenant transitions to retired
     increment tenant_security_version
 ```
+
+#### Where the deprovisioning outcome is recorded
+
+The command is recorded in `tenant.provisioning_request`, which
+`TDD-organization-control-003` describes as the desired provisioning state sent outward
+and the realized state reported back. A deprovisioning is exactly that, and that table's
+`state` enum already carries the distinction this stage turns on: `unresolved` is an
+outcome that is neither success nor failure. A separate table would duplicate the
+correlation machinery and then need its own vocabulary for ambiguity.
+
+`desired_profile.operation` separates the two directions, and the separation is load-
+bearing rather than descriptive. Both flows write to one table, so without it a failed
+deprovisioning would be the most recent request for the Tenant and would refuse a later
+activation on a flow that has nothing to do with this one. §"Tenant Activation" in 003
+filters on the same field for the same reason.
+
+The command is recorded in the transaction that advances the stage. Recorded afterwards, a
+crash in between would leave an offboarding at `release` with nothing to correlate against,
+and the gate below would hold it forever with no way to distinguish that from a genuinely
+slow deprovisioning.
+
+Three states hold retirement and they are not collapsed into one refusal. `unresolved` is
+ambiguous — a timeout, per 003, rather than a rejection, so the infrastructure may have
+been released or may not. `requested` is still in flight. `failed` was refused. A caller
+does not need them distinguished to know it cannot proceed, but the operator reading why
+responds differently to each: one is waited on, one is retried, one is investigated.
+
+A realized outcome does not retire the Tenant. It records that the deprovisioning
+completed, and retirement stays a deliberate act — the alternative is infrastructure
+reporting success and a Tenant disappearing from the estate with nobody having decided
+that it should.
 
 Access stops at the first stage and data release happens at the third. That ordering is
 the design: freezing is reversible and immediate, release is neither, and putting them

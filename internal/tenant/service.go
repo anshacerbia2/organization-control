@@ -315,9 +315,18 @@ func load(ctx context.Context, tx db.Tx, tenantID id.UUID) (Tenant, error) {
 // The most recent rather than any: a failed attempt followed by a successful retry must activate,
 // and a realized attempt followed by a later failure must not. `EXISTS ... AND state = 'realized'`
 // would satisfy the first case and get the second one wrong in the permissive direction.
+// The operation filter is not cosmetic. `internal/offboarding` records its deprovisioning command
+// in this same table, which is what `TDD-organization-control-003` describes it as — desired
+// provisioning state sent outward and realized state reported back, in either direction. Without
+// the filter a failed deprovisioning would be the most recent request for the Tenant and would
+// refuse a later activation on a flow that has nothing to do with it.
+//
+// `coalesce(..., 'provision')` so a request written before the field existed still reads as what it
+// was: every historical row in this table is a provisioning.
 const provisioningStatement = `SELECT state
 FROM tenant.provisioning_request
 WHERE tenant_id = $1
+  AND coalesce(desired_profile->>'operation', 'provision') = 'provision'
 ORDER BY requested_at DESC, request_id DESC
 LIMIT 1`
 

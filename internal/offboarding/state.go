@@ -144,9 +144,15 @@ var (
 	ErrAlreadyResolved = errors.New("offboarding: obligation is already resolved")
 
 	// ErrAmbiguousOutcome reports a deprovisioning result that is neither success nor failure. It
-	// holds the release stage. A timeout is not proof the target rejected the request, and
-	// advancing on one would retire a Tenant whose data may still exist.
+	// holds retirement. A timeout is not proof the target rejected the request, and advancing on
+	// one would retire a Tenant whose infrastructure may still exist — destroying the only record
+	// that could tell an operator which.
 	ErrAmbiguousOutcome = errors.New("offboarding: the deprovisioning outcome is ambiguous")
+
+	// ErrDeprovisioningIncomplete reports a deprovisioning that is recorded and not realized:
+	// still in flight, or reported as failed. Separate from the ambiguous case because the two
+	// need different operator responses — one is waited on or retried, the other is investigated.
+	ErrDeprovisioningIncomplete = errors.New("offboarding: the deprovisioning is not realized")
 )
 
 // Offboarding is one row of operation.offboarding.
