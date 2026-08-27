@@ -88,7 +88,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
 
-      - uses: ariga/setup-atlas@e181c50e3c1e8b7fbe10617f2a4a0fbc0d2b9c4a # v0
+      - uses: ariga/setup-atlas@2f3c785c89a15e1c0d07bcae3900fb5feb969eea # v0.3
         with:
           version: latest
 
