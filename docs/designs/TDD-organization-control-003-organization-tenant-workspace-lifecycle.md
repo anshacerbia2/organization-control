@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.3.0
+  version: 1.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -364,6 +364,7 @@ not version 5" tells them only that something did.
 ```text
 com.scnehaux.organization.organization.registry.created
 com.scnehaux.organization.organization.registry.suspended
+com.scnehaux.organization.organization.registry.restored
 com.scnehaux.organization.organization.registry.retired
 com.scnehaux.organization.tenant.lifecycle.requested
 com.scnehaux.organization.tenant.lifecycle.activated
@@ -372,8 +373,16 @@ com.scnehaux.organization.tenant.security.suspended     (priority)
 com.scnehaux.organization.tenant.security.restored      (priority)
 com.scnehaux.organization.workspace.lifecycle.created
 com.scnehaux.organization.workspace.lifecycle.archived
+com.scnehaux.organization.workspace.lifecycle.restored
 com.scnehaux.organization.workspace.lifecycle.retired
 ```
+
+`registry.restored` and `workspace.lifecycle.restored` are additions to the original list,
+which gave both aggregates a way in to their withdrawn state and no way back. An archive or a
+suspension that could not be undone would make the reversibility the lifecycles are shaped
+around theoretical — it is the property that makes starting one safe, and it only holds if the
+return path exists and is published. Neither row carries history a restore would corrupt, and
+both events travel the standard lane for the same reason as their counterparts.
 
 Suspension and restoration are priority events because both invalidate cached context:
 suspension removes it, restoration makes a cached denial wrong.

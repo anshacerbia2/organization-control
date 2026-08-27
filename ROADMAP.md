@@ -281,14 +281,48 @@ breaks the idempotence this design requires and makes a diff of two runs meaning
 
 ## Week 4 · Lifecycle and offboarding
 
-- Organization, Tenant, and Workspace command surfaces
-- Invitation intent, expiry, and identity-onboarding correlation
-- Offboarding: access freeze, obligation tracking, staged retirement
-- Provider administration paths with reason, approval, and evidence
-- `GET /v1/context/{tenant_id}/{principal_id}:verify` with its rate signal
+- ✅ Organization, Tenant, and Workspace command surfaces — the services and their state
+  machines; the HTTP routes wait with the composition root below
+- ⬜ Invitation intent, expiry, and identity-onboarding correlation — `internal/invitation` is
+  not built. It is the only package any design names that does not exist
+- ✅ Offboarding: access freeze, obligation tracking, staged retirement
+- ✅ Provider administration paths with reason, approval, and evidence — every cross-Tenant
+  path runs through `db.WithProviderScope`, which refuses a blank reason and refuses to
+  proceed when the access record cannot be written
+- ✅ `:verify` with its rate signal — the service and the measurement; the route waits
+- ⬜ Composition root and the HTTP surface — no `cmd/organization-control` and no
+  `internal/httpapi` yet. Every endpoint in all four designs is unrouted
 
 **Exit:** offboarding is resumable and infers completion from no single response;
 `:verify` call rate is measured per consumer.
+
+**Both met at the service layer.** Resumability is asserted by failing between a stage's work
+and the column that records it: the stage does not move, the timestamp stays null, no event is
+published, and the retry succeeds — then a second advance from a stage that has moved on is
+refused. Completion comes from the obligation registry and from a recorded deprovisioning
+outcome, never from one response: `unresolved` and `failed` both hold retirement, and they are
+distinguished because an operator waits on one and investigates the other. The `:verify` rate is
+per consumer and per interval, with the numerator counted here and the denominator arriving in
+the consumer's own progress report.
+
+**What is not done, stated plainly:** there is no running service. Nothing in this repository
+listens on a port. Fifteen packages of authority exist and are asserted against a real database;
+the composition root that wires them to HTTP, and the invitation flow, are the two remaining
+Week 4 items.
+
+### Where the designs and the implementation disagree — audited 2026-08-28
+
+Checked mechanically rather than asserted: every `com.scnehaux.*` event type in the designs
+against every one in the code, every `internal/*` package the designs name against the packages
+on disk, and every column the designs declare against `schema.hcl`.
+
+| Finding | Resolution |
+| :-- | :-- |
+| Three events published by code and declared by no design: `organization.registry.restored`, `workspace.lifecycle.restored`, `tenant.offboarding.released` | Added to the Published Events lists in 003 and 004 with the reasoning. A consumer reading the design would not have known to expect them, which is the whole purpose of that list |
+| Four events declared and not published: three `membership.invitation.*`, and `tenant.lifecycle.requested` | Correct — the invitation flow and the Tenant create path are the unbuilt Week 4 items above |
+| `internal/db`, `internal/controldb`, and `internal/system` exist and appeared in no component table | Added to TDD-001 §"Packages". A reader who met `TenantPool` in a service signature had no design that mentioned it |
+| `internal/invitation` named by 004 and absent from disk | Correct, and tracked above |
+| Every schema column the designs declare | Present in `schema.hcl`; no drift |
 
 ## Waiting on nothing
 

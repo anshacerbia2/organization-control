@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.3.0
+  version: 1.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -245,8 +245,15 @@ com.scnehaux.organization.tenant.security.suspended          (priority)
 com.scnehaux.organization.membership.security.suspended      (priority, one per Membership)
 com.scnehaux.organization.tenant.offboarding.frozen
 com.scnehaux.organization.tenant.offboarding.obligation-raised
+com.scnehaux.organization.tenant.offboarding.released
 com.scnehaux.organization.tenant.lifecycle.retired
 ```
+
+`offboarding.released` is an addition to the original list, which named an event for entering
+every stage except the one that sends the deprovisioning command. That stage is the boundary
+between reversible and irreversible, and it is the stage an obligation consumer most needs to
+observe: after it, the data those obligations were about is being released. A stage that
+advances silently is a stage nothing downstream can react to or audit.
 
 The security events are what stop access and therefore occupy the priority lane.
 `offboarding.started` and `offboarding.frozen` describe process progress for obligation

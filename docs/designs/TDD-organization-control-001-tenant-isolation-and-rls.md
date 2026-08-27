@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.0.0
+  version: 1.1.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -71,6 +71,24 @@ application, and STD-GLB-002 prohibits relying on ad-hoc tenant `WHERE` clauses 
 the authoritative control. Both layers are required; neither substitutes.
 
 ## Component Design
+
+### Packages
+
+| Package | Responsibility |
+| :-- | :-- |
+| `internal/db` | The only package permitted to bind a transaction's isolation scope. Holds `TenantPool`, `ProviderPool`, and the three entry points below |
+| `internal/controldb` | The SQL this design applies — roles, policies, grants — and `AssertIsolation`, which reads the catalog back and refuses a database whose posture has drifted |
+| `internal/system` | One constant: the CloudEvents source naming this system in every envelope it publishes |
+
+These three carry no domain authority and appear in no other design's component table, which is
+why they are listed here rather than left implicit. A reader who found `TenantPool` in a service
+signature and no design that mentions it would have to infer the isolation model from the code
+that depends on it.
+
+`internal/system` sits here for a different reason than the other two: it is the published
+identity of this service, shared by every package that appends to the outbox, and a constant
+declared in each of them would be the same string written six times — whose failure mode is not a
+compile error but two sources appearing in a consumer's stream for one system.
 
 ### Table Classification
 
