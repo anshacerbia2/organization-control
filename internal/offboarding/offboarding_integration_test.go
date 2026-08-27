@@ -509,6 +509,112 @@ func TestReleaseIsRefusedWhileAnyObligationIsOutstanding(t *testing.T) {
 	}
 }
 
+// TestOutstandingAnswersWithoutProvokingARefusal.
+//
+// The release and retirement refusals name what is outstanding, but reading them requires
+// attempting an advance. An operator asking "what is this waiting on" should not have to trigger a
+// refusal to find out, and a dashboard polling it certainly should not.
+//
+// Same list as the gates use, deliberately. A separate query would eventually disagree with the one
+// that actually blocks, and then the screen and the refusal would say different things.
+func TestOutstandingAnswersWithoutProvokingARefusal(t *testing.T) {
+	f := newFixture(t)
+	tenantID, _ := f.seed(t, 0)
+	record := f.begin(t, tenantID, false)
+	if _, err := f.service.CompleteFreeze(f.providerCtx, record.OffboardingID); err != nil {
+		t.Fatalf("CompleteFreeze: %v", err)
+	}
+
+	// Nothing raised yet: outstanding is empty, and release would succeed.
+	empty, err := f.service.Outstanding(f.providerCtx, record.OffboardingID)
+	if err != nil {
+		t.Fatalf("Outstanding: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("outstanding = %v with nothing raised", empty)
+	}
+
+	open, err := f.service.Raise(f.providerCtx, RaiseRequest{
+		OffboardingID: record.OffboardingID, Domain: "product", Type: "data-export",
+	})
+	if err != nil {
+		t.Fatalf("Raise: %v", err)
+	}
+	failing, err := f.service.Raise(f.providerCtx, RaiseRequest{
+		OffboardingID: record.OffboardingID, Domain: "billing", Type: "final-invoice",
+	})
+	if err != nil {
+		t.Fatalf("Raise: %v", err)
+	}
+	settled, err := f.service.Raise(f.providerCtx, RaiseRequest{
+		OffboardingID: record.OffboardingID, Domain: "audit", Type: "log-archive",
+	})
+	if err != nil {
+		t.Fatalf("Raise: %v", err)
+	}
+	if _, err := f.service.Resolve(f.providerCtx, Resolution{
+		ObligationID: failing.ObligationID, Domain: "billing",
+		State: ObligationFailed, Detail: "the invoicing run rejected the period",
+	}); err != nil {
+		t.Fatalf("Resolve as failed: %v", err)
+	}
+	if _, err := f.service.Resolve(f.providerCtx, Resolution{
+		ObligationID: settled.ObligationID, Domain: "audit", State: ObligationCompleted,
+	}); err != nil {
+		t.Fatalf("Resolve as completed: %v", err)
+	}
+
+	outstanding, err := f.service.Outstanding(f.providerCtx, record.OffboardingID)
+	if err != nil {
+		t.Fatalf("Outstanding: %v", err)
+	}
+	if len(outstanding) != 2 {
+		t.Fatalf("outstanding = %v, want the open one and the failed one", outstanding)
+	}
+	// Sorted, so a dashboard polling this does not reorder between refreshes for no reason.
+	if outstanding[0] != "billing/final-invoice (failed)" {
+		t.Errorf("outstanding[0] = %q", outstanding[0])
+	}
+	if outstanding[1] != "product/data-export (open)" {
+		t.Errorf("outstanding[1] = %q", outstanding[1])
+	}
+	// The completed one is absent, and the failed one is present with its state named — an
+	// operator reading this needs to know which of the two it is.
+	for _, entry := range outstanding {
+		if strings.Contains(entry, "log-archive") {
+			t.Errorf("a completed obligation is still listed as outstanding: %q", entry)
+		}
+	}
+
+	// And it agrees with the gate: the same two names appear in the refusal.
+	_, refusal := f.service.Release(f.providerCtx, record.OffboardingID)
+	if !errors.Is(refusal, ErrObligationsOutstanding) {
+		t.Fatalf("Release returned %v, want ErrObligationsOutstanding", refusal)
+	}
+	for _, entry := range outstanding {
+		if !strings.Contains(refusal.Error(), entry) {
+			t.Errorf("the refusal does not name %q that Outstanding reported", entry)
+		}
+	}
+
+	if _, err := f.service.Resolve(f.providerCtx, Resolution{
+		ObligationID: open.ObligationID, Domain: "product", State: ObligationCompleted,
+	}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if _, err := f.service.Resolve(f.providerCtx, Resolution{
+		ObligationID: failing.ObligationID, Domain: "billing",
+		State: ObligationWaived, Detail: "billing waived the final invoice",
+	}); err != nil {
+		t.Fatalf("Resolve as waived: %v", err)
+	}
+	if remaining, err := f.service.Outstanding(f.providerCtx, record.OffboardingID); err != nil {
+		t.Fatalf("Outstanding: %v", err)
+	} else if len(remaining) != 0 {
+		t.Errorf("outstanding = %v after every obligation resolved", remaining)
+	}
+}
+
 // TestAnObligationCannotBeResolvedByAnotherDomain, and cannot be resolved twice.
 func TestAnObligationCannotBeResolvedByAnotherDomain(t *testing.T) {
 	f := newFixture(t)
