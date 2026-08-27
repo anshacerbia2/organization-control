@@ -69,7 +69,17 @@
       "edge to internal/membership would put a mutation path behind a read that sits on the request",
       "path of every high-risk operation in the estate."
     ],
-    "internal/context": ["internal/db"]
+    "internal/context": ["internal/db"],
+
+    "_comment_registry": [
+      "internal/organization and internal/workspace are the two remaining lifecycle aggregates.",
+      "Neither reaches internal/membership. Organization retirement and Workspace retirement are",
+      "both refused while something still references them, and both refusals read the referencing",
+      "rows directly: an edge would give a registry change a path to mutate the authority it is",
+      "only permitted to be blocked by."
+    ],
+    "internal/organization": ["internal/db", "internal/system"],
+    "internal/workspace": ["internal/db", "internal/system"]
   },
 
   "pureSegments": ["domain"],
