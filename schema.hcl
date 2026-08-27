@@ -813,11 +813,47 @@ table "consumer" {
     type = bigint
   }
 
+  // The three columns below carry the `:verify` misuse signal.
+  //
+  // ADDITION to TDD-organization-control-002, which requires the rate to be measured per
+  // consumer and declares neither the counter nor the denominator. The signal is calls *per
+  // request*, and that ratio cannot be computed by either side alone: this service is the only
+  // party that knows how many fresh checks a consumer made, and the consumer is the only party
+  // that knows how many requests it served. So the numerator is counted here and the
+  // denominator arrives with the progress report the consumer already sends on its declared
+  // cadence — no new mechanism, one number from each side.
+  //
+  // Both counters reset at every report, which makes the ratio per-interval rather than
+  // lifetime. A lifetime ratio dilutes forever: a consumer that misused the path for a day and
+  // then fixed it would read as healthy a month later, and one running for years could never
+  // trip the threshold at all.
+  column "verify_calls_since_report" {
+    null    = false
+    type    = bigint
+    default = 0
+  }
+  column "last_reported_requests" {
+    null    = true
+    type    = bigint
+    comment = "Requests the consumer served in the interval it last reported. The denominator."
+  }
+  column "last_verify_ratio" {
+    null    = true
+    type    = sql("double precision")
+    comment = "verify_calls_since_report / last_reported_requests at the last report. NULL until a report supplies a denominator."
+  }
+
   primary_key {
     columns = [column.consumer_id]
   }
 
   check "stale_behavior_check" {
     expr = "stale_behavior IN ('use_with_marker', 'revalidate', 'fail_closed')"
+  }
+
+  // A negative count is not a low ratio, it is a broken counter. Constrained here so a defect
+  // surfaces as a refused write rather than as a consumer that looks well behaved.
+  check "verify_counters_non_negative" {
+    expr = "verify_calls_since_report >= 0 AND (last_reported_requests IS NULL OR last_reported_requests >= 0)"
   }
 }

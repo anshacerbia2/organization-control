@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.1.0
+  version: 1.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -278,6 +278,57 @@ PUT    /v1/projections/organization/consumers/{consumer_id}
 never placed on an ordinary request path. Its use is measured: a consumer whose
 `:verify` rate approaches its request rate has misclassified its operations, and that
 is treated as a defect rather than as load.
+
+### How the verify rate is measured
+
+The signal is calls *per request*, and neither side can compute that alone. This service is
+the only party that knows how many fresh checks a consumer made; the consumer is the only
+party that knows how many requests it served. So the numerator is counted here and the
+denominator arrives with the progress report the consumer already sends on its declared
+cadence — one number from each side, and no new mechanism.
+
+`projection.consumer` carries three columns for it: `verify_calls_since_report`,
+`last_reported_requests`, and `last_verify_ratio`. Version 1.1.0 of this design required
+the measurement and declared none of them, which left the signal stated and uncomputable.
+
+Both counters reset at every report, which makes the ratio per-interval rather than
+lifetime. A lifetime ratio dilutes forever: a consumer that misused the path for a day and
+then corrected itself would read as healthy a month later, and one that has run for years
+could never trip the threshold at all.
+
+An interval with zero reported requests leaves the ratio `NULL` rather than dividing. A
+consumer that served nothing and checked nothing is misusing nothing, and one that served
+nothing and checked repeatedly has a ratio of infinity, which no threshold comparison
+handles usefully. The call counter still clears, so the next interval measures the next
+interval.
+
+Every check is metered, including a refused one. A consumer probing contexts it does not
+hold would otherwise be the one consumer the signal cannot see. The meter and the
+authoritative read commit together, and the meter is an `UPDATE` on the consumer's own row —
+so a consumer's checks serialise against each other. That cost is accepted rather than
+worked around: a consumer generating enough fresh-check traffic to contend on its own
+counter row is exactly the consumer this signal exists to flag, and the contention is
+confined to it rather than shared with the estate.
+
+An unregistered caller cannot use the path at all. The rate is per consumer, so a caller
+that cannot be metered would have an unmetered route to the authoritative read, which is
+precisely the route that becomes an ordinary read.
+
+### What a verify refusal discloses
+
+A refused check reports one of two reasons. `tenant-not-active` is returned only when an
+active Membership exists, so it discloses nothing to a caller who holds nothing, and it is
+separate because it is the refusal an operator can fix and a user can be told about.
+Everything else — no Membership, a suspended or revoked Membership, a Tenant that does not
+exist — answers identically as `no-membership`.
+
+That uniformity is deliberate. Distinguishing a suspended Membership would be truthful and
+would disclose that this Principal once held access in this Tenant, to a caller that holds
+nothing there now; distinguishing an absent Tenant would let a caller enumerate which Tenant
+identifiers exist. In both cases the caller's next move is the same, so the disclosure buys
+nothing it is entitled to. A refusal also carries no Membership identifier and no versions:
+those describe a context the caller may not assert, and a caller that logged them would be
+recording the shape of the access it was denied.
 
 Errors are RFC 7807 problem documents from `foundation-platform`. Mutations require an
 `Idempotency-Key`, an optimistic version, an actor, and a reason.

@@ -1,3 +1,4 @@
-h1:70CtOBKILU5QebDcW0E6Xdx03GgO3c6SBSGOxlmPze0=
+h1:Owm9yqLM55uE3CVHhU7NFPfCM9wEOAgnu5uM/V95gSo=
 20260821202322_baseline_organization_schema.sql h1:iLX771m6Nv6GkIXeIDTQcEmWAMlMd3Rod+l1e3GiydA=
 20260826071822_add_projection_snapshot_mark.sql h1:NEpR7ckeg3Cr3hLh0H8f6hUBkBanqkPuwiIIEoezmMQ=
+20260827143343_add_verify_rate_signal.sql h1:IoZCJOcErFuME9vNN+FzIr9elyLD+viqIkIu5V56ayA=
