@@ -283,8 +283,7 @@ breaks the idempotence this design requires and makes a diff of two runs meaning
 
 - ✅ Organization, Tenant, and Workspace command surfaces — the services and their state
   machines; the HTTP routes wait with the composition root below
-- ⬜ Invitation intent, expiry, and identity-onboarding correlation — `internal/invitation` is
-  not built. It is the only package any design names that does not exist
+- ✅ Invitation intent, expiry, and identity-onboarding correlation
 - ✅ Offboarding: access freeze, obligation tracking, staged retirement
 - ✅ Provider administration paths with reason, approval, and evidence — every cross-Tenant
   path runs through `db.WithProviderScope`, which refuses a blank reason and refuses to
@@ -306,9 +305,16 @@ per consumer and per interval, with the numerator counted here and the denominat
 the consumer's own progress report.
 
 **What is not done, stated plainly:** there is no running service. Nothing in this repository
-listens on a port. Fifteen packages of authority exist and are asserted against a real database;
-the composition root that wires them to HTTP, and the invitation flow, are the two remaining
-Week 4 items.
+listens on a port. Ten packages of authority exist and are asserted against a real database; the
+composition root that wires them to HTTP is the one remaining Week 4 item, and with it every
+endpoint in all four designs.
+
+The invitation flow closed the second-to-last item. Its exit property is SAD-004 §5.5 — Membership
+activates on the join of two independent facts and neither alone activates anything — and the suite
+takes that sentence apart: a valid token presented before verification is refused, a verification
+for an identifier other than the invited one is refused, a verification correlated to no invitation
+is refused, and only both together produce a Membership. Failure injected between the invitation's
+state change and the grant rolls back both, and the retry succeeds.
 
 ### Where the designs and the implementation disagree — audited 2026-08-28
 

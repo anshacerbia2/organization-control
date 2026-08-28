@@ -90,6 +90,31 @@ VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8)`
 // grant a Membership in a Tenant it is not administering — and the RLS `WITH CHECK` refuses the
 // row as a second line of defence if this check is ever removed.
 func (s *Service) Grant(ctx context.Context, req GrantRequest) (Result, error) {
+	if _, ok := db.ScopeFrom(ctx); !ok {
+		return Result{}, db.ErrNoScope
+	}
+
+	var result Result
+	if err := db.WithTenantScope(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
+		var err error
+		result, err = s.GrantWithin(ctx, tx, req)
+		return err
+	}); err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
+// GrantWithin creates a Membership inside a transaction the caller owns.
+//
+// It exists for `internal/invitation`, whose acceptance must create the Membership together with
+// the invitation's own state change. Separately committable, an accepted invitation could exist
+// with no Membership — an intent recorded as fulfilled that granted nothing — or a Membership could
+// exist against an invitation still open for a second acceptance.
+//
+// The rules are the same ones `Grant` applies, including the refusal of a Tenant other than the
+// bound one. A caller composing this into its own transaction gets no relaxation for doing so.
+func (s *Service) GrantWithin(ctx context.Context, tx db.Tx, req GrantRequest) (Result, error) {
 	scope, ok := db.ScopeFrom(ctx)
 	if !ok {
 		return Result{}, db.ErrNoScope
@@ -115,25 +140,20 @@ func (s *Service) Grant(ctx context.Context, req GrantRequest) (Result, error) {
 		ValidUntil:   req.ValidUntil,
 		Provenance:   req.Provenance,
 	}
-
 	acceptedAt := s.now().UTC()
-	var securityVersion int64
 
-	if err := db.WithTenantScope(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
-		version, readErr := tenantSecurityVersion(ctx, tx, scope.TenantID())
-		if readErr != nil {
-			return readErr
-		}
-		securityVersion = version
+	securityVersion, err := tenantSecurityVersion(ctx, tx, scope.TenantID())
+	if err != nil {
+		return Result{}, err
+	}
 
-		if _, execErr := tx.Exec(ctx, insertStatement,
-			record.MembershipID.String(), record.PrincipalID.String(), record.TenantID.String(),
-			nullableUUID(record.WorkspaceID), record.SubjectType,
-			record.ValidFrom, nullableTime(record.ValidUntil), record.Provenance); execErr != nil {
-			return fmt.Errorf("membership: insert: %w", execErr)
-		}
-		return s.appendEvent(ctx, tx, ActionGrant, record, securityVersion, acceptedAt)
-	}); err != nil {
+	if _, err := tx.Exec(ctx, insertStatement,
+		record.MembershipID.String(), record.PrincipalID.String(), record.TenantID.String(),
+		nullableUUID(record.WorkspaceID), record.SubjectType,
+		record.ValidFrom, nullableTime(record.ValidUntil), record.Provenance); err != nil {
+		return Result{}, fmt.Errorf("membership: insert: %w", err)
+	}
+	if err := s.appendEvent(ctx, tx, ActionGrant, record, securityVersion, acceptedAt); err != nil {
 		return Result{}, err
 	}
 

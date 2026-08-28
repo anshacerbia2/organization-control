@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.4.0
+  version: 1.5.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -110,6 +110,7 @@ CREATE TABLE invitation.invitation (
     workspace_id      UUID,
     target_identifier TEXT        NOT NULL,
     target_hash       TEXT        NOT NULL,
+    token_hash        TEXT        NOT NULL,
     subject_type      TEXT        NOT NULL,
     invited_by        UUID        NOT NULL,
     reason            TEXT,
@@ -135,10 +136,23 @@ CREATE UNIQUE INDEX invitation_pending_unique
 `expires_at` is not nullable. An invitation without expiry is a standing grant that
 nobody revokes, and it will be found years later still valid.
 
-`target_hash` carries the lookup, and `target_identifier` carries the display value.
+`target_hash` carries the correlation, and `target_identifier` carries the display value.
 The unique index is built on the hash so a pending invitation can be found without a
 scan over identifiers, and the same index prevents two pending invitations for the same
 person and context.
+
+`token_hash` is what the invitee presents, and is an addition to the original table. That
+table declared only `target_hash`, while §"Acceptance, and Enumeration Resistance" states
+that the token space is the only thing protecting the flow — and an identifier is not a
+token space. Without the column, the thing carried in the invitation link would have to be
+`invitation_id`, which is a UUIDv7 and therefore time-ordered: an attacker who knows
+roughly when a Tenant issued invitations can narrow that space sharply. A uniform response
+closes the information leak; it does not close a successful guess.
+
+The token is high-entropy, generated at creation, returned exactly once to the caller, and
+never stored — only its hash is. `token_hash` is unique across the whole table rather than
+per Tenant, because a token is resolved before any Tenant is known and must therefore
+identify at most one invitation on its own.
 
 The composite foreign key mirrors `membership.membership`: an invitation cannot name a
 Workspace belonging to a different Tenant, so the Membership it eventually produces
@@ -238,6 +252,7 @@ POST   /v1/offboardings/{offboarding_id}:finalise
 
 ```text
 com.scnehaux.organization.membership.invitation.requested
+com.scnehaux.organization.membership.invitation.accepted
 com.scnehaux.organization.membership.invitation.revoked
 com.scnehaux.organization.membership.invitation.expired
 com.scnehaux.organization.tenant.offboarding.started
@@ -248,6 +263,23 @@ com.scnehaux.organization.tenant.offboarding.obligation-raised
 com.scnehaux.organization.tenant.offboarding.released
 com.scnehaux.organization.tenant.lifecycle.retired
 ```
+
+`invitation.accepted` is an addition to the original list, which published an event for every way
+an invitation can close except the one that succeeds. `revoked` and `expired` were named and
+`accepted` was not, leaving the terminal happy path as the only outcome nothing downstream hears
+about — and it is the outcome a dashboard tracking invitation conversion most needs. The
+Membership's own `membership.lifecycle.granted` announces the access, but a consumer of invitation
+events would have to subscribe to Membership events and correlate to infer that the invitation
+closed, which is work the publisher can do once instead.
+
+`verify-identity` remains deliberately silent. It records that one of the two required facts
+arrived, and no consumer outside this service can act on half a join; the actionable event is the
+Membership that follows.
+
+No invitation event carries the target identifier or the display name. STD-GLB-007 makes the
+identifier Tier-2 PII, and an event stream is read by consumers with no business knowing who was
+invited — they need to know that an intent exists, changed, or lapsed, keyed by identifiers they
+can correlate.
 
 `offboarding.released` is an addition to the original list, which named an event for entering
 every stage except the one that sends the deprovisioning command. That stage is the boundary
@@ -298,6 +330,20 @@ only thing protecting the flow.
 The response discloses nothing about the Tenant either. A valid token proves someone
 was invited; it does not entitle the holder to learn the organization's name before
 they have authenticated.
+
+**The uniform response has a consequence worth stating, because it decides how the endpoint
+is built.** If the answer is identical in every case, then no part of the response derives
+from the row — so the anonymous path performs no authoritative read at all. It validates the
+token's shape and renders the same page either way. That is what keeps an unauthenticated
+endpoint off the provider-scoped pool: `invitation.invitation` is Row-Level Security
+protected, an anonymous caller can bind neither a Tenant scope nor an actor, and
+`db.WithProviderScope` requires both plus recorded evidence. An anonymous lookup that read
+the row would have to hold cross-Tenant authority to do it.
+
+Resolution by token therefore happens on the authenticated path, where the caller has an
+identity and the correlation from the identity flow. Response-time uniformity follows from
+the same property: with no row read, there is no query whose duration could separate a
+valid token from an absent one.
 
 ### Membership Activation
 

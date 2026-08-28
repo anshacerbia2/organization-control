@@ -521,9 +521,26 @@ table "invitation" {
     type    = text
     comment = "Tier-2 identifiable PII under STD-GLB-007, encrypted at rest with the database."
   }
-  // The lookup key, so acceptance does not require querying by the plaintext identifier.
-  // Enumeration resistance is a property of the acceptance path rather than of this column.
+  // The correlation key, so acceptance does not require querying by the plaintext identifier.
+  // It is not what the invitee presents: see token_hash below.
   column "target_hash" {
+    null = false
+    type = text
+  }
+  // The hash of the token the invitee carries. The token itself is returned once, at creation,
+  // and is never stored.
+  //
+  // ADDITION to TDD-organization-control-004, whose table declared only target_hash while its
+  // §"Acceptance, and Enumeration Resistance" states that "the token space is the only thing
+  // protecting the flow". An identifier is not a token space, so without this column the thing
+  // the invitee presents would have to be `invitation_id` — a UUIDv7, which is time-ordered.
+  // An attacker who knows roughly when a Tenant issued invitations can narrow that space
+  // sharply, and a uniform response closes the information leak without closing a successful
+  // guess.
+  //
+  // Unique across the table rather than per Tenant: a token is resolved before any Tenant is
+  // known, so it must identify at most one invitation on its own.
+  column "token_hash" {
     null = false
     type = text
   }
@@ -606,6 +623,12 @@ table "invitation" {
       expr = "COALESCE(workspace_id, tenant_id)"
     }
     where = "state IN ('pending', 'identity_verified')"
+  }
+
+  // A token resolves to at most one invitation, and it is resolved before any Tenant is known.
+  index "invitation_token_hash_unique" {
+    unique  = true
+    columns = [column.token_hash]
   }
 
   // The expiry sweep reads by state and expiry inside a Tenant.

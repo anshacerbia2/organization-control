@@ -79,7 +79,16 @@
       "only permitted to be blocked by."
     ],
     "internal/organization": ["internal/db", "internal/system"],
-    "internal/workspace": ["internal/db", "internal/system"]
+    "internal/workspace": ["internal/db", "internal/system"],
+
+    "_comment_invitation": [
+      "internal/invitation reaches internal/membership because acceptance is the join: the",
+      "invitation state change and the Membership it produces must commit together, or an",
+      "accepted invitation exists that granted nothing. It does not reach internal/tenant --",
+      "the Tenant recheck is a status read inside the acceptance transaction, and an edge would",
+      "give the invitation flow a path to move a Tenant."
+    ],
+    "internal/invitation": ["internal/db", "internal/system", "internal/membership"]
   },
 
   "pureSegments": ["domain"],
