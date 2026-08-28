@@ -58,6 +58,11 @@ var registry = map[string]error{
 	"tenant.ErrProvisioningNotRealized": tenant.ErrProvisioningNotRealized,
 	"tenant.ErrSponsorNotActive":        tenant.ErrSponsorNotActive,
 
+	"tenant.ErrNoProvisioningRequest":    tenant.ErrNoProvisioningRequest,
+	"tenant.ErrAmbiguousCorrelation":     tenant.ErrAmbiguousCorrelation,
+	"tenant.ErrOutcomeAlreadyRecorded":   tenant.ErrOutcomeAlreadyRecorded,
+	"tenant.ErrProvisioningNotRequested": tenant.ErrProvisioningNotRequested,
+
 	"organization.ErrUnknownAction":     organization.ErrUnknownAction,
 	"organization.ErrTransitionRefused": organization.ErrTransitionRefused,
 	"organization.ErrRetired":           organization.ErrRetired,

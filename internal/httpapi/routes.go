@@ -34,8 +34,15 @@ type Prober interface {
 // because a field was nil, and nothing would report which — a surface that looks complete and is
 // not. `Routes` refuses to build instead.
 type Services struct {
-	Memberships   *membership.Service
-	Tenants       *tenant.Service
+	Memberships *membership.Service
+	Tenants     *tenant.Service
+
+	// Provisioning owns the three transitions between `requested` and `provisioning`, which
+	// `Tenants` deliberately does not expose. Separate here because it is a separate component in
+	// TDD-organization-control-003 §"Component Design", and because the routes it serves are driven
+	// by the provisioning system rather than by an operator.
+	Provisioning *tenant.Coordinator
+
 	Organizations *organization.Service
 	Workspaces    *workspace.Service
 	Invitations   *invitation.Service
@@ -158,9 +165,27 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/organizations/{organization_id}/restore", h.restoreOrganization)
 	api.HandleFunc("POST /v1/organizations/{organization_id}/retire", h.retireOrganization)
 
+	api.HandleFunc("POST /v1/tenants", h.requestTenant)
+	api.HandleFunc("GET /v1/tenants/{tenant_id}", h.getTenant)
 	api.HandleFunc("POST /v1/tenants/{tenant_id}/activate", h.activateTenant)
 	api.HandleFunc("POST /v1/tenants/{tenant_id}/suspend", h.suspendTenant)
 	api.HandleFunc("POST /v1/tenants/{tenant_id}/restore", h.restoreTenant)
+
+	// The provisioning correlation surface.
+	//
+	// Two of these are driven by the external system that owns the isolation boundary rather than by
+	// a person, and they are on the authenticated provider surface all the same. A callback route
+	// exempted from authentication would let anyone who learned a correlation identifier declare a
+	// Tenant's boundary built, and activation reads exactly that statement.
+	//
+	// The design's API list names none of these, which is an omission rather than a prohibition: it
+	// mandates realized-status correlation, gives this service no inbound transport but HTTP, and
+	// `POST /v1/offboardings/{id}/deprovisioning` already reports the other direction's outcome the
+	// same way. These mirror it.
+	api.HandleFunc("POST /v1/tenants/{tenant_id}/provisioning", h.provisionTenant)
+	api.HandleFunc("POST /v1/provisioning/realized", h.realizeProvisioning)
+	api.HandleFunc("POST /v1/provisioning/failed", h.failProvisioning)
+	api.HandleFunc("POST /v1/provisioning/sweep-unresolved", h.sweepProvisioning)
 
 	api.HandleFunc("POST /v1/offboardings", h.beginOffboarding)
 	api.HandleFunc("GET /v1/offboardings/{offboarding_id}", h.getOffboarding)
@@ -195,6 +220,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the membership service is required")
 	case s.Tenants == nil:
 		return errors.New("httpapi: the tenant service is required")
+	case s.Provisioning == nil:
+		return errors.New("httpapi: the provisioning coordinator is required")
 	case s.Organizations == nil:
 		return errors.New("httpapi: the organization service is required")
 	case s.Workspaces == nil:

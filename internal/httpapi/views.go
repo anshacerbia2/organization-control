@@ -80,6 +80,94 @@ type tenantResultView struct {
 	Published bool `json:"published"`
 }
 
+// tenantRecordView is the whole Tenant, as `GET /v1/tenants/{tenant_id}` answers it.
+//
+// The four lifecycle stamps are omitted when nil rather than sent as null, so a reader can tell "has
+// never been suspended" from "is suspended" without comparing a timestamp against zero.
+type tenantRecordView struct {
+	TenantID         id.UUID `json:"tenant_id"`
+	OrganizationID   id.UUID `json:"organization_id"`
+	DisplayName      string  `json:"display_name"`
+	Status           string  `json:"status"`
+	IsolationProfile string  `json:"isolation_profile"`
+	ResidencyRegion  string  `json:"residency_region,omitempty"`
+
+	Version         int64 `json:"version"`
+	SecurityVersion int64 `json:"security_version"`
+
+	ActivatedAt          *time.Time `json:"activated_at,omitempty"`
+	SuspendedAt          *time.Time `json:"suspended_at,omitempty"`
+	OffboardingStartedAt *time.Time `json:"offboarding_started_at,omitempty"`
+	RetiredAt            *time.Time `json:"retired_at,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func viewTenantRecord(t tenant.Record) tenantRecordView {
+	return tenantRecordView{
+		TenantID: t.TenantID, OrganizationID: t.OrganizationID,
+		DisplayName: t.DisplayName, Status: string(t.Status),
+		IsolationProfile: string(t.IsolationProfile), ResidencyRegion: t.ResidencyRegion,
+		Version: t.Version, SecurityVersion: t.SecurityVersion,
+		ActivatedAt: t.ActivatedAt, SuspendedAt: t.SuspendedAt,
+		OffboardingStartedAt: t.OffboardingStartedAt, RetiredAt: t.RetiredAt,
+		CreatedAt: t.CreatedAt,
+	}
+}
+
+// requestedView answers `POST /v1/tenants`.
+//
+// It carries the correlation identifier back to the caller. That is not decoration: it is what
+// `POST /v1/provisioning/realized` matches on, so a caller that could not see it would have started
+// a flow it had no way to finish.
+type requestedView struct {
+	Tenant tenantRecordView `json:"tenant"`
+
+	ProvisioningRequestID id.UUID `json:"provisioning_request_id"`
+	CorrelationID         id.UUID `json:"correlation_id"`
+
+	AcceptedAt time.Time `json:"accepted_at"`
+}
+
+func viewRequested(r tenant.Requested) requestedView {
+	return requestedView{
+		Tenant:                viewTenantRecord(r.Tenant),
+		ProvisioningRequestID: r.RequestID,
+		CorrelationID:         r.CorrelationID,
+		AcceptedAt:            r.AcceptedAt,
+	}
+}
+
+// resolutionView answers the two outcome routes.
+type resolutionView struct {
+	ProvisioningRequestID id.UUID    `json:"provisioning_request_id"`
+	TenantID              id.UUID    `json:"tenant_id"`
+	State                 string     `json:"state"`
+	Tenant                tenantView `json:"tenant"`
+
+	// Replay says the outcome was already recorded and this call changed nothing. On the response
+	// because a provisioning system retrying a delivery has no other way to learn that its first
+	// attempt did arrive.
+	Replay bool `json:"replay"`
+
+	ResolvedAt time.Time `json:"resolved_at"`
+}
+
+func viewResolution(r tenant.Resolution) resolutionView {
+	return resolutionView{
+		ProvisioningRequestID: r.RequestID,
+		TenantID:              r.TenantID,
+		State:                 string(r.State),
+		Tenant: tenantView{
+			TenantID: r.Tenant.TenantID, OrganizationID: r.Tenant.OrganizationID,
+			Status: string(r.Tenant.Status), Version: r.Tenant.Version,
+			SecurityVersion: r.Tenant.SecurityVersion,
+		},
+		Replay:     r.Replay,
+		ResolvedAt: r.ResolvedAt,
+	}
+}
+
 func viewTenantResult(r tenant.Result) tenantResultView {
 	return tenantResultView{
 		Tenant: tenantView{

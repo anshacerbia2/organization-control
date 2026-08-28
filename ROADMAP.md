@@ -290,10 +290,11 @@ breaks the idempotence this design requires and makes a diff of two runs meaning
   proceed when the access record cannot be written
 - ✅ `:verify` with its rate signal — the service, the measurement, and the routes
 - ✅ Composition root and the HTTP surface — `cmd/organization-control` listens, and
-  `internal/httpapi` routes 47 endpoints: 44 authenticated, one anonymous, two probes.
-  One endpoint is
-  outstanding: `POST /v1/tenants`, which needs a Tenant create path in
-  `internal/tenant` that does not exist yet — see below
+  `internal/httpapi` routes 53 endpoints: 50 authenticated, one anonymous, two probes
+- ✅ Tenant intake and the `ProvisioningCoordinator` — `POST /v1/tenants` creates a Tenant
+  in `requested`, records its desired provisioning state, and publishes it in one
+  transaction; the coordinator owns the three transitions between `requested` and
+  `provisioning` and correlates the realized status back by correlation identifier
 
 **Exit:** offboarding is resumable and infers completion from no single response;
 `:verify` call rate is measured per consumer.
@@ -314,12 +315,15 @@ running it rather than by reading it — `/healthz` and `/readyz` answer 200 wit
 unauthenticated `POST /v1/memberships` answers 401, and `POST /v1/invitations/lookup` answers 200
 with a body identical for two different tokens and 400 for a malformed one.
 
+**The Tenant lifecycle is now whole.** `internal/tenant` declared `requested`, `provisioning`,
+`failed` and the `provision` and `fail` transitions, and `Service` exposed only `Activate`,
+`Suspend`, and `Restore` — so the front half of the state machine was reachable in `Resolve` and
+unreachable in practice, which is why `tenant.lifecycle.requested` was declared and never
+published. `Service.Request` and `Coordinator` close it, and the path is asserted end to end:
+intake → dispatch → realized → activation, with two events published across the whole of it.
+
 **What is not done, stated plainly:**
 
-- `POST /v1/tenants` is unrouted, because `tenant.Service` has no create path. `Activate`,
-  `Suspend`, and `Restore` move a Tenant that already exists; nothing inserts one. This is why
-  `tenant.lifecycle.requested` is still declared and never published — it is the last event drift,
-  and it is a missing domain capability rather than a missing route.
 - **Mutations are not idempotent.** There is deliberately no `Idempotency-Key` on this surface.
   foundation-platform's `idempotency.Claim` takes a `db.Tx` because the claim has to commit with
   the effect it guards, and the services here open their own transactions and accept no claim, so a
@@ -345,7 +349,7 @@ on disk, and every column the designs declare against `schema.hcl`.
 | Finding | Resolution |
 | :-- | :-- |
 | Three events published by code and declared by no design: `organization.registry.restored`, `workspace.lifecycle.restored`, `tenant.offboarding.released` | Added to the Published Events lists in 003 and 004 with the reasoning. A consumer reading the design would not have known to expect them, which is the whole purpose of that list |
-| Four events declared and not published: three `membership.invitation.*`, and `tenant.lifecycle.requested` | Correct — the invitation flow and the Tenant create path are the unbuilt Week 4 items above |
+| Four events declared and not published: three `membership.invitation.*`, and `tenant.lifecycle.requested` | All four now published. The three invitation events came with the invitation flow; `tenant.lifecycle.requested` came with Tenant intake, where it doubles as the desired-state publication — no event drift remains in either direction |
 | `internal/db`, `internal/controldb`, and `internal/system` exist and appeared in no component table | Added to TDD-001 §"Packages". A reader who met `TenantPool` in a service signature had no design that mentioned it |
 | `internal/invitation` named by 004 and absent from disk | Correct, and tracked above |
 | Every schema column the designs declare | Present in `schema.hcl`; no drift |
@@ -366,6 +370,24 @@ A fifth was caught by an existing control rather than by me: the evidence table 
 schema carries a non-nullable `tenant_id`. The rule's own hint prescribed the fix — a table that is
 not tenant-scoped belongs in a schema outside the RLS set — so the table moved to a new `audit`
 schema rather than the invariant growing a carve-out. That check had never fired before.
+
+### What building the provisioning path found
+
+One live defect and four places where the design stops short of what an implementation has to decide.
+All five are recorded rather than resolved quietly, because four of them are design amendments and
+that is not this repository's call to make alone.
+
+| Finding | Resolution |
+| :-- | :-- |
+| **`unresolved` was never produced by any code.** `internal/offboarding` refuses retirement on an unresolved deprovisioning — SAD-004 §7.5, because a timeout is not proof the target did nothing — and nothing in the repository could ever set the state. The gate was correct, tested against a hand-written row, and unreachable in production | `Coordinator.SweepUnresolved` ages unanswered requests in **both** directions, since the timeout is a property of the correlation table rather than of one flow. The offboarding gate is now reachable by the mechanism that is supposed to reach it |
+| **The design's API list names no provisioning-correlation route**, while requiring realized-status correlation and giving this service no inbound transport but HTTP | Four routes added, mirroring `POST /v1/offboardings/{id}/deprovisioning`, which already reports the other direction's outcome. All four are on the authenticated provider surface: a callback exempted for an external system's convenience would let anyone holding a correlation identifier declare a Tenant's boundary built, and activation reads exactly that statement |
+| **The machine has no `requested -> failed` edge**, but a provisioning system can refuse before the dispatch was recorded | The refusal walks the declared path, `provision` then `fail`, which is safe precisely because both are silent and neither increments the security version. Adding the missing edge would have been the smaller diff and the larger change: the machine is asserted as one table, and an edge added for one caller is inherited by every other |
+| **The shared `Payload` cannot carry a desired profile**, and `tenant.lifecycle.requested` is the desired-state publication — the event by which the external system learns what to build | `RequestedPayload` embeds `Payload` so the five common fields are unchanged for any consumer projecting Tenants, and adds the profile, the region, and the two correlation identifiers. Widening the shared payload instead would have made every lifecycle event carry an empty display name |
+| **"Match by correlation identifier" does not say what happens when it matches two Tenants**, which it does whenever one call creates two | Refused as ambiguous rather than resolved by taking the most recent. Resolving the newest would silently mark the wrong Tenant's boundary as built |
+
+**The design amendments this implies**, for 003: the four provisioning routes in §"API / Interface",
+the `requested -> failed` question in §"Tenant State Machine", the desired-state payload in
+§"Published Events", and the ambiguous-correlation rule in §"Provisioning Correlation".
 
 ## Waiting on nothing
 

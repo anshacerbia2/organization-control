@@ -77,6 +77,20 @@ var mapping = []struct {
 	{tenant.ErrSponsorNotActive, platform.PreconditionUnmet},
 	{tenant.ErrUnknownAction, platform.Internal},
 
+	// Provisioning correlation.
+	//
+	// `ErrNoProvisioningRequest` is 404 rather than 400: the correlation identifier is well formed
+	// and this service simply has no record of the command it names, which is the fact the reporting
+	// system needs. `ErrOutcomeAlreadyRecorded` is 409 because an attempt has one result and no retry
+	// of a contradicting report changes that. The other two are 412 — each is a well-formed report
+	// the estate is not in a position to accept, and neither is fixable by editing the request:
+	// an ambiguous correlation needs an operator, and a Tenant with nothing outstanding needs a
+	// provisioning command first.
+	{tenant.ErrNoProvisioningRequest, platform.NotFound},
+	{tenant.ErrOutcomeAlreadyRecorded, platform.StateTransitionRefused},
+	{tenant.ErrAmbiguousCorrelation, platform.PreconditionUnmet},
+	{tenant.ErrProvisioningNotRequested, platform.PreconditionUnmet},
+
 	// Organization.
 	{organization.ErrInvalid, platform.ValidationFailed},
 	{organization.ErrNotFound, platform.NotFound},

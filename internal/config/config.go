@@ -74,6 +74,19 @@ type Config struct {
 	TenantClaim  string
 	ProviderRole string
 
+	// The three provisioning bounds of TDD-organization-control-003 §Configuration.
+	//
+	// ProvisioningTimeout is the age at which a request with no realized status becomes
+	// `unresolved` — an ambiguous outcome, never inferred as success. ProvisioningReconcileInterval
+	// is the cadence at which the sweep runs. TenantNameMax bounds the Tenant display name.
+	//
+	// All three are defaulted, unlike the credentials and the token terms above. Each has a value
+	// the design states, none of them decides who may call this service, and a process that refused
+	// to start without a sweep cadence would be harder to operate for no gain in safety.
+	ProvisioningTimeout           time.Duration
+	ProvisioningReconcileInterval time.Duration
+	TenantNameMax                 int
+
 	LogLevel string
 }
 
@@ -142,6 +155,23 @@ func Load() (Config, error) {
 	cfg.HTTPMaxInFlight = int64(intOr("HTTP_MAX_IN_FLIGHT", 256, &problems))
 	cfg.HTTPShutdownGrace = durationOr("HTTP_SHUTDOWN_GRACE", 20*time.Second, &problems)
 	cfg.ReadinessTimeout = durationOr("ORGANIZATION_READINESS_TIMEOUT", 2*time.Second, &problems)
+
+	cfg.ProvisioningTimeout = durationOr("ORGANIZATION_PROVISIONING_TIMEOUT", 30*time.Minute, &problems)
+	cfg.ProvisioningReconcileInterval = durationOr(
+		"ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL", 15*time.Minute, &problems)
+	cfg.TenantNameMax = intOr("ORGANIZATION_TENANT_NAME_MAX", 120, &problems)
+
+	// A sweep that runs less often than the timeout is the normal configuration; one that runs more
+	// often than the timeout is wasteful but harmless. The relationship worth refusing is neither:
+	// it is a reconcile interval so long that a request sits unanswered for multiples of the timeout
+	// before anybody looks, which turns "ambiguous after 30 minutes" into a statement about nothing.
+	if cfg.ProvisioningReconcileInterval > cfg.ProvisioningTimeout {
+		problems = append(problems, fmt.Errorf(
+			"ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL (%s) is longer than "+
+				"ORGANIZATION_PROVISIONING_TIMEOUT (%s), so a request would stay `requested` well past "+
+				"the age at which its outcome is meant to be declared unknown",
+			cfg.ProvisioningReconcileInterval, cfg.ProvisioningTimeout))
+	}
 
 	if len(problems) > 0 {
 		return Config{}, errors.Join(problems...)

@@ -76,6 +76,128 @@ func (h *handlers) restoreTenant(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// requestTenantRequest carries no expected version, unlike every other body on this surface.
+//
+// Nothing exists yet for the caller to have been shown a version of, so requiring one would be a
+// field with no honest value to put in it.
+type requestTenantRequest struct {
+	OrganizationID   id.UUID `json:"organization_id"`
+	DisplayName      string  `json:"display_name"`
+	IsolationProfile string  `json:"isolation_profile"`
+	ResidencyRegion  string  `json:"residency_region,omitempty"`
+}
+
+func (h *handlers) requestTenant(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	body, ok := decode[requestTenantRequest](w, r)
+	if !ok {
+		return
+	}
+	requested, err := h.services.Tenants.Request(r.Context(), tenant.RequestTenant{
+		OrganizationID:   body.OrganizationID,
+		DisplayName:      body.DisplayName,
+		IsolationProfile: tenant.IsolationProfile(body.IsolationProfile),
+		ResidencyRegion:  body.ResidencyRegion,
+		Reason:           reason(r),
+	})
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond(w, http.StatusCreated, viewRequested(requested))
+}
+
+func (h *handlers) getTenant(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	tenantID, ok := pathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	record, err := h.services.Tenants.Get(r.Context(), tenantID)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond(w, http.StatusOK, viewTenantRecord(record))
+}
+
+// provisionTenant records that the desired state has left, and retries a failed attempt.
+//
+// One route for both edges `ActionProvision` serves, because they are one act: the request has gone
+// out and the Tenant is now waiting on it. Two routes would have made "retry" a different operation
+// from "dispatch" and left a caller to decide which state the Tenant was in before choosing.
+func (h *handlers) provisionTenant(w http.ResponseWriter, r *http.Request) {
+	h.tenantTransition(w, r, func(r *http.Request, cmd tenant.Command) (tenant.Result, error) {
+		return h.services.Provisioning.Provision(r.Context(), cmd)
+	})
+}
+
+// provisioningOutcomeRequest is what the provisioning system reports back.
+//
+// The correlation identifier is in the body rather than in the path. It is not this service's
+// identifier for a resource — it is the handle the desired-state publication carried outward — and a
+// path segment would have made it look addressable, inviting a GET that has no meaning.
+type provisioningOutcomeRequest struct {
+	CorrelationID id.UUID `json:"correlation_id"`
+	Detail        string  `json:"detail,omitempty"`
+}
+
+func (h *handlers) realizeProvisioning(w http.ResponseWriter, r *http.Request) {
+	h.provisioningOutcome(w, r, func(r *http.Request, outcome tenant.Outcome) (tenant.Resolution, error) {
+		return h.services.Provisioning.Realize(r.Context(), outcome)
+	})
+}
+
+func (h *handlers) failProvisioning(w http.ResponseWriter, r *http.Request) {
+	h.provisioningOutcome(w, r, func(r *http.Request, outcome tenant.Outcome) (tenant.Resolution, error) {
+		return h.services.Provisioning.Fail(r.Context(), outcome)
+	})
+}
+
+func (h *handlers) provisioningOutcome(w http.ResponseWriter, r *http.Request,
+	apply func(*http.Request, tenant.Outcome) (tenant.Resolution, error)) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	body, ok := decode[provisioningOutcomeRequest](w, r)
+	if !ok {
+		return
+	}
+	resolution, err := apply(r, tenant.Outcome{
+		CorrelationID: body.CorrelationID,
+		Detail:        body.Detail,
+		Reason:        reason(r),
+	})
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	// 200 on a replay as well as on a first delivery. A provisioning system retrying a report it is
+	// unsure arrived is behaving correctly, and the response says which happened in `replay` rather
+	// than in a status code the retry logic would read as a failure.
+	respond(w, http.StatusOK, viewResolution(resolution))
+}
+
+func (h *handlers) sweepProvisioning(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	body, ok := decode[batchRequest](w, r)
+	if !ok {
+		return
+	}
+	affected, err := h.services.Provisioning.SweepUnresolved(r.Context(), body.Size)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond(w, http.StatusOK, batchResponse{Affected: int(affected)})
+}
+
 type registerOrganizationRequest struct {
 	DisplayName    string   `json:"display_name"`
 	Classification string   `json:"classification"`

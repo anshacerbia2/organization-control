@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/observability"
@@ -72,6 +73,8 @@ func testSurface(t *testing.T) Surface {
 	must(err, "membership service")
 	tenants, err := tenant.New(providerPool)
 	must(err, "tenant service")
+	provisioning, err := tenant.NewCoordinator(providerPool, tenants, 30*time.Minute)
+	must(err, "provisioning coordinator")
 	organizations, err := organization.New(providerPool)
 	must(err, "organization service")
 	workspaces, err := workspace.New(tenantPool)
@@ -91,8 +94,9 @@ func testSurface(t *testing.T) Surface {
 
 	surface, err := Routes(RoutesConfig{
 		Services: Services{
-			Memberships: memberships, Tenants: tenants, Organizations: organizations,
-			Workspaces: workspaces, Invitations: invitations, Offboardings: offboardings,
+			Memberships: memberships, Tenants: tenants, Provisioning: provisioning,
+			Organizations: organizations,
+			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 		},
 		Database: okProber{},
@@ -491,6 +495,7 @@ func testSurfaceServices(t *testing.T) Services {
 
 	memberships, _ := membership.New(tenantPool)
 	tenants, _ := tenant.New(providerPool)
+	provisioning, _ := tenant.NewCoordinator(providerPool, tenants, 30*time.Minute)
 	organizations, _ := organization.New(providerPool)
 	workspaces, _ := workspace.New(tenantPool)
 	invitations, _ := invitation.New(tenantPool, providerPool, memberships)
@@ -501,8 +506,9 @@ func testSurfaceServices(t *testing.T) Services {
 	contexts, _ := occontext.New(providerPool)
 
 	return Services{
-		Memberships: memberships, Tenants: tenants, Organizations: organizations,
-		Workspaces: workspaces, Invitations: invitations, Offboardings: offboardings,
+		Memberships: memberships, Tenants: tenants, Provisioning: provisioning,
+		Organizations: organizations,
+		Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 		Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 	}
 }

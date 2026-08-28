@@ -183,6 +183,14 @@ misconfigured process start and fail later.
 | `ORGANIZATION_PROVIDER_ROLE` | yes | The realm role conferring cross-Tenant authority |
 | `ORGANIZATION_LISTEN_ADDRESS` | no | Defaults to `:8080` |
 | `ORGANIZATION_TOKEN_MAX_SKEW` | no | 30s; capped at 60s by STD-IAM-002 §3.5 |
+| `ORGANIZATION_PROVISIONING_TIMEOUT` | no | 30m. Age at which a provisioning request becomes `unresolved` |
+| `ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL` | no | 15m. Cadence for the unresolved sweep |
+| `ORGANIZATION_TENANT_NAME_MAX` | no | 120. Tenant display-name bound |
+
+**A reconcile interval longer than the provisioning timeout is refused at startup.** A sweep slower
+than the timeout leaves a request sitting `requested` well past the age at which its outcome is meant
+to be declared unknown, which turns "ambiguous after thirty minutes" into a statement about nothing.
+It is the misconfiguration that produces no error anywhere else.
 
 **The two DSNs must differ, and startup refuses them if they are identical.** They are two
 credentials for two PostgreSQL login roles with different policies, and the whole isolation posture
@@ -219,6 +227,46 @@ service.
 The anonymous route reads nothing. SAD-004 §5.5 requires an invitation lookup to answer identically
 for an absent, expired, revoked, accepted, and valid token, and the only construction where that
 holds for the status code, the body, *and* the response time is one that looks nothing up.
+
+### Tenant intake and provisioning correlation
+
+A Tenant is created in `requested` and reaches `active` only through the provisioning system. Six
+routes cover the path:
+
+| Route | Driven by | Effect |
+| :-- | :-- | :-- |
+| `POST /v1/tenants` | operator | Tenant in `requested`, a provisioning request, and `tenant.lifecycle.requested` — one transaction |
+| `POST /v1/tenants/{id}/provisioning` | operator | `requested → provisioning`, or a retry from `failed` with a new request row |
+| `POST /v1/provisioning/realized` | provisioning system | Marks the request `realized`. Does **not** activate |
+| `POST /v1/provisioning/failed` | provisioning system | Marks the request `failed` and moves the Tenant to `failed` |
+| `POST /v1/provisioning/sweep-unresolved` | scheduler | Ages unanswered requests to `unresolved`. Never retries |
+| `POST /v1/tenants/{id}/activate` | operator | `provisioning → active`, once realized and the sponsor is active |
+
+Four properties are worth naming because each is a decision rather than a detail.
+
+**The creation event is the desired-state publication.** TDD-organization-control-003 ends intake with
+"publish desired state" and names exactly one event at creation, so they are the same event:
+`tenant.lifecycle.requested` carries the isolation profile, the residency region, and the correlation
+identifier the realized status comes back on. A separate internal channel would have given the estate
+two records of one intention.
+
+**A realized status does not activate.** Activation also checks the sponsoring Organization, which is
+a decision about the customer relationship rather than about infrastructure — and the provisioning
+system has no view of it. It stays a deliberate act.
+
+**A timeout produces `unresolved`, never `failed`, and never a retry.** SAD-004 §7.5 requires an
+ambiguous outcome to remain pending or failed and never to be inferred as success. The target may have
+built the boundary or may not; treating that as a refusal and retrying is how a Tenant gets
+provisioned twice. The sweep ages deprovisioning requests too, which is what finally makes
+`internal/offboarding`'s ambiguity gate reachable — nothing produced the state before.
+
+**The two callback routes are authenticated like everything else.** A route exempted so an external
+system could reach it more easily would let anyone who learned a correlation identifier declare a
+Tenant's boundary built, and activation reads exactly that statement before letting Memberships in.
+The design's API list names none of these four provisioning routes; that is an omission rather than a
+prohibition, since it mandates realized-status correlation, gives this service no inbound transport
+but HTTP, and `POST /v1/offboardings/{id}/deprovisioning` already reports the other direction's
+outcome the same way.
 
 ### Mutations are not idempotent yet
 

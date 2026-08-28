@@ -136,9 +136,13 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("membership service: %w", err)
 	}
-	tenants, err := tenant.New(providerPool)
+	tenants, err := tenant.New(providerPool, tenant.WithDisplayNameMax(cfg.TenantNameMax))
 	if err != nil {
 		return fmt.Errorf("tenant service: %w", err)
+	}
+	provisioning, err := tenant.NewCoordinator(providerPool, tenants, cfg.ProvisioningTimeout)
+	if err != nil {
+		return fmt.Errorf("provisioning coordinator: %w", err)
 	}
 	organizations, err := organization.New(providerPool)
 	if err != nil {
@@ -179,8 +183,9 @@ func run() error {
 	// unreachable can still serve every tenant-scoped route.
 	surface, err := httpapi.Routes(httpapi.RoutesConfig{
 		Services: httpapi.Services{
-			Memberships: memberships, Tenants: tenants, Organizations: organizations,
-			Workspaces: workspaces, Invitations: invitations, Offboardings: offboardings,
+			Memberships: memberships, Tenants: tenants, Provisioning: provisioning,
+			Organizations: organizations,
+			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 		},
 		Database:         tenantConns,
