@@ -1,5 +1,6 @@
-h1:TaYZ2QLvNlXtWVaFYhrkXE0mvdjoOGJMOFtB1HE5x9A=
+h1:P+vsl3I9kmoR946C7M2d+7F4rMEcbFxfj+Xj4zQOhX8=
 20260821202322_baseline_organization_schema.sql h1:iLX771m6Nv6GkIXeIDTQcEmWAMlMd3Rod+l1e3GiydA=
 20260826071822_add_projection_snapshot_mark.sql h1:NEpR7ckeg3Cr3hLh0H8f6hUBkBanqkPuwiIIEoezmMQ=
 20260827143343_add_verify_rate_signal.sql h1:IoZCJOcErFuME9vNN+FzIr9elyLD+viqIkIu5V56ayA=
 20260828071528_add_invitation_token_hash.sql h1:b9rN50eY+WpCOSD3QRiI/+IGulxHvl3TMcBPLhzdLJ8=
+20260828082728_add_privileged_access_audit.sql h1:JrfgP1Z/tB1W38whwWwal9IV8Vuqzjd5GxxDc2TlHAQ=

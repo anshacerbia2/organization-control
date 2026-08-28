@@ -50,6 +50,28 @@ BEGIN
 END
 $$;
 
+-- `audit` is absent from the schema list above and below, and that is why the schema exists.
+--
+-- audit.privileged_access records provider access taken *across* Tenants, so it carries no
+-- tenant_id. Placed in `operation`, it would fail the modelling rule asserted next — every table in
+-- an RLS schema has a non-nullable tenant_id — and that rule should not grow an exception: a
+-- predicate keyed on an invented tenant_id would either attribute a cross-Tenant action to one
+-- arbitrary Tenant or hide the row from every Tenant's view. The rule's own HINT prescribes the
+-- answer taken here, which is to move the table rather than to carve it out.
+--
+-- This was found by running the pipeline rather than by reading it. The table was written into
+-- `operation` first, and `-stage=post` refused the deploy naming the table — the check working
+-- exactly as intended, on the first table that had ever violated it.
+--
+-- Its boundary is the grant instead: grants.sql revokes everything in `audit` from
+-- `organization_rt`, so the tenant-scoped role cannot read or write the evidence at all, and
+-- provider traffic reaches it through a role whose access is attributable at the connection level.
+--
+-- A policy would not have worked in any case. The recorder writes OUTSIDE the transaction it
+-- describes — db.withProviderScope records evidence before opening the domain transaction, which is
+-- what makes the evidence survive a rollback — so `app.provider_scope` is unset at that moment and a
+-- policy keyed on it would refuse every insert.
+
 -- The modelling rule, checked BEFORE any policy is created.
 --
 -- TDD-organization-control-001: every table carrying RLS has a non-nullable tenant_id, and a

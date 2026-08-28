@@ -229,7 +229,7 @@ func (s *Service) transition(ctx context.Context, action Action, membershipID id
 func (s *Service) TransitionWithin(ctx context.Context, tx db.Tx, action Action,
 	membershipID id.UUID) (Result, error) {
 	if membershipID.IsNil() {
-		return Result{}, errors.New("membership: a membership identifier is required")
+		return Result{}, fmt.Errorf("%w: a membership identifier is required", ErrInvalid)
 	}
 
 	acceptedAt := s.now().UTC()
@@ -352,24 +352,24 @@ func tenantSecurityVersion(ctx context.Context, tx db.Tx, tenantID id.UUID) (int
 func validateGrant(req GrantRequest, boundTenant id.UUID) error {
 	switch {
 	case req.PrincipalID.IsNil():
-		return errors.New("membership: a principal identifier is required")
+		return fmt.Errorf("%w: a principal identifier is required", ErrInvalid)
 	case req.SubjectType != "human" && req.SubjectType != "workload":
-		return fmt.Errorf("membership: subject_type %q is not human or workload", req.SubjectType)
+		return fmt.Errorf("%w: subject_type %q is not human or workload", ErrInvalid, req.SubjectType)
 	case req.Provenance == "":
 		// PAD-PLT-002 §3.2 defines provenance as how the Membership came to exist. A row without
 		// it cannot answer whether access arrived by invitation, migration, or provider grant,
 		// which is the first question an access review asks.
-		return errors.New("membership: provenance is required")
+		return fmt.Errorf("%w: provenance is required", ErrInvalid)
 	case req.ValidFrom.IsZero():
-		return errors.New("membership: valid_from is required")
+		return fmt.Errorf("%w: valid_from is required", ErrInvalid)
 	case !req.ValidUntil.IsZero() && !req.ValidUntil.After(req.ValidFrom):
-		return errors.New("membership: valid_until must be after valid_from")
+		return fmt.Errorf("%w: valid_until must be after valid_from", ErrInvalid)
 	}
 	// A request naming a Tenant other than the bound one is refused here rather than left to the
 	// policy. SAD-004 §8.3: a Tenant identifier arriving with a request is a *requested* scope,
 	// and the mismatch is refused before any statement runs.
 	if !req.TenantID.IsNil() && req.TenantID != boundTenant {
-		return fmt.Errorf("membership: the request names Tenant %s and the bound scope is %s", req.TenantID, boundTenant)
+		return fmt.Errorf("%w: the request names Tenant %s and the bound scope is %s", ErrInvalid, req.TenantID, boundTenant)
 	}
 	return nil
 }

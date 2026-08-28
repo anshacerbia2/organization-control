@@ -288,9 +288,12 @@ breaks the idempotence this design requires and makes a diff of two runs meaning
 - ✅ Provider administration paths with reason, approval, and evidence — every cross-Tenant
   path runs through `db.WithProviderScope`, which refuses a blank reason and refuses to
   proceed when the access record cannot be written
-- ✅ `:verify` with its rate signal — the service and the measurement; the route waits
-- ⬜ Composition root and the HTTP surface — no `cmd/organization-control` and no
-  `internal/httpapi` yet. Every endpoint in all four designs is unrouted
+- ✅ `:verify` with its rate signal — the service, the measurement, and the routes
+- ✅ Composition root and the HTTP surface — `cmd/organization-control` listens, and
+  `internal/httpapi` routes 47 endpoints: 44 authenticated, one anonymous, two probes.
+  One endpoint is
+  outstanding: `POST /v1/tenants`, which needs a Tenant create path in
+  `internal/tenant` that does not exist yet — see below
 
 **Exit:** offboarding is resumable and infers completion from no single response;
 `:verify` call rate is measured per consumer.
@@ -304,10 +307,27 @@ distinguished because an operator waits on one and investigates the other. The `
 per consumer and per interval, with the numerator counted here and the denominator arriving in
 the consumer's own progress report.
 
-**What is not done, stated plainly:** there is no running service. Nothing in this repository
-listens on a port. Ten packages of authority exist and are asserted against a real database; the
-composition root that wires them to HTTP is the one remaining Week 4 item, and with it every
-endpoint in all four designs.
+**There is now a running service.** `cmd/organization-control` opens two pools as two login roles,
+builds the ten services and the privileged-access recorder, and serves three muxes: probes with no
+authentication, one anonymous route, and the authenticated API behind scope resolution. Verified by
+running it rather than by reading it — `/healthz` and `/readyz` answer 200 with no credential, an
+unauthenticated `POST /v1/memberships` answers 401, and `POST /v1/invitations/lookup` answers 200
+with a body identical for two different tokens and 400 for a malformed one.
+
+**What is not done, stated plainly:**
+
+- `POST /v1/tenants` is unrouted, because `tenant.Service` has no create path. `Activate`,
+  `Suspend`, and `Restore` move a Tenant that already exists; nothing inserts one. This is why
+  `tenant.lifecycle.requested` is still declared and never published — it is the last event drift,
+  and it is a missing domain capability rather than a missing route.
+- **Mutations are not idempotent.** There is deliberately no `Idempotency-Key` on this surface.
+  foundation-platform's `idempotency.Claim` takes a `db.Tx` because the claim has to commit with
+  the effect it guards, and the services here open their own transactions and accept no claim, so a
+  middleware could only claim outside them. Accepting the header without honouring it would tell a
+  client its retries are safe at exactly the moment they are not. Closing this means giving the
+  services a seam for the claim, the same shape as `TransitionWithin` and `GrantWithin`.
+- Request validation happens inside the domain transaction, so a malformed request opens one before
+  being refused. Correct, and wasteful.
 
 The invitation flow closed the second-to-last item. Its exit property is SAD-004 §5.5 — Membership
 activates on the join of two independent facts and neither alone activates anything — and the suite
@@ -329,6 +349,23 @@ on disk, and every column the designs declare against `schema.hcl`.
 | `internal/db`, `internal/controldb`, and `internal/system` exist and appeared in no component table | Added to TDD-001 §"Packages". A reader who met `TenantPool` in a service signature had no design that mentioned it |
 | `internal/invitation` named by 004 and absent from disk | Correct, and tracked above |
 | Every schema column the designs declare | Present in `schema.hcl`; no drift |
+
+### What building the HTTP surface found
+
+Four defects, each of which would have shipped as something that looked like it worked.
+
+| Finding | Resolution |
+| :-- | :-- |
+| **`db.PrivilegedRecorder` had no implementation.** The interface makes a recorder a mandatory argument to `NewProviderPool`, which reads as an enforced control — but every implementation in the repository was a test fake that discarded its argument. PAD-PLT-002 §3.3 invariant 22 was satisfied by the type system and by nothing that survived a restart | `internal/access` writes `audit.privileged_access` in its own transaction, so evidence survives a domain rollback. Asserted against the engine as the provider login role |
+| **Every validation failure was an unclassified 500.** The services returned bare `errors.New` for a missing field, so a caller who omitted `provenance` was told the service was broken rather than that the request was | An `ErrInvalid` sentinel per package, 54 sites wrapped. Constructor guards and stored-value decoders deliberately keep their 500s: those are a process built wrong and a row that should not exist |
+| **The provider role could rewrite and delete its own audit trail.** `grants.sql` grants DML on every table in every owned schema, which on the evidence table hands the role being audited the ability to amend the evidence | `REVOKE SELECT, UPDATE, DELETE` on `audit` from `organization_provider_rt`, leaving INSERT. Found by querying `has_table_privilege` after the first clean deploy, not by reading the file |
+| **The composition root would not have started.** `verify.New` refuses to build without a `ClaimRequirement`, and the first version of `main.go` passed none | `httpapi.Requirement` applies the same function the middleware uses to build the caller, so the verifier and the mapper cannot drift apart |
+
+A fifth was caught by an existing control rather than by me: the evidence table was first written into
+`operation`, and `-stage=post` refused the deploy because `rls.sql` checks that every table in an RLS
+schema carries a non-nullable `tenant_id`. The rule's own hint prescribed the fix — a table that is
+not tenant-scoped belongs in a schema outside the RLS set — so the table moved to a new `audit`
+schema rather than the invariant growing a carve-out. That check had never fired before.
 
 ## Waiting on nothing
 

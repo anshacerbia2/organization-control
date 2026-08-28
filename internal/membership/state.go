@@ -75,6 +75,16 @@ var transitions = map[Action]struct {
 }
 
 var (
+	// ErrInvalid is a malformed request: a required field absent, a value outside its permitted
+	// set, or two fields that contradict each other.
+	//
+	// It exists so the HTTP surface can answer 400. Before it, every validation failure here was
+	// a bare errors.New, indistinguishable at the transport boundary from a failed statement --
+	// so a caller who omitted a field received 500, which says the service is broken rather than
+	// that the request is. Constructor guards and stored-value decoders deliberately do NOT carry
+	// it: those are a process built wrong and a row that should not exist, and both are 500.
+	ErrInvalid = errors.New("membership: the request is invalid")
+
 	// ErrUnknownAction reports an action outside the state machine. It is a programming error:
 	// the HTTP surface maps a route to an Action, so an unknown one means a route was added
 	// without a transition.

@@ -78,6 +78,16 @@ var transitions = map[Action]struct {
 }
 
 var (
+	// ErrInvalid is a malformed request: a required field absent, a value outside its permitted
+	// set, or two fields that contradict each other.
+	//
+	// It exists so the HTTP surface can answer 400. Before it, every validation failure here was
+	// a bare errors.New, indistinguishable at the transport boundary from a failed statement --
+	// so a caller who omitted a field received 500, which says the service is broken rather than
+	// that the request is. Constructor guards and stored-value decoders deliberately do NOT carry
+	// it: those are a process built wrong and a row that should not exist, and both are 500.
+	ErrInvalid = errors.New("workspace: the request is invalid")
+
 	// ErrUnknownAction reports an action outside the machine.
 	ErrUnknownAction = errors.New("workspace: action is not in the state machine")
 
@@ -226,9 +236,9 @@ RETURNING version, created_at`
 func (s *Service) Create(ctx context.Context, req CreateRequest) (Workspace, error) {
 	switch {
 	case strings.TrimSpace(req.DisplayName) == "":
-		return Workspace{}, errors.New("workspace: a display name is required")
+		return Workspace{}, fmt.Errorf("%w: a display name is required", ErrInvalid)
 	case strings.TrimSpace(req.Type) == "":
-		return Workspace{}, errors.New("workspace: a workspace type is required")
+		return Workspace{}, fmt.Errorf("%w: a workspace type is required", ErrInvalid)
 	}
 
 	scope, ok := db.ScopeFrom(ctx)
@@ -278,9 +288,9 @@ type Command struct {
 func (c Command) validate() error {
 	switch {
 	case c.WorkspaceID.IsNil():
-		return errors.New("workspace: a workspace identifier is required")
+		return fmt.Errorf("%w: a workspace identifier is required", ErrInvalid)
 	case c.ExpectedVersion <= 0:
-		return errors.New("workspace: the expected version the caller was shown is required")
+		return fmt.Errorf("%w: the expected version the caller was shown is required", ErrInvalid)
 	}
 	return nil
 }

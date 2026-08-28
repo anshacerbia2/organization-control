@@ -51,6 +51,16 @@ func (s StaleBehavior) Valid() bool {
 }
 
 var (
+	// ErrInvalid is a malformed request: a required field absent, a value outside its permitted
+	// set, or two fields that contradict each other.
+	//
+	// It exists so the HTTP surface can answer 400. Before it, every validation failure here was
+	// a bare errors.New, indistinguishable at the transport boundary from a failed statement --
+	// so a caller who omitted a field received 500, which says the service is broken rather than
+	// that the request is. Constructor guards and stored-value decoders deliberately do NOT carry
+	// it: those are a process built wrong and a row that should not exist, and both are 500.
+	ErrInvalid = errors.New("projection: the request is invalid")
+
 	// ErrNotRegistered means the consumer has no registry row. A consumer that has not registered
 	// receives no projection: without a declared freshness budget and stale behavior, nothing can
 	// state what its copy of the projection is allowed to be used for.
@@ -99,17 +109,17 @@ type Registration struct {
 func (r Registration) validate() error {
 	switch {
 	case strings.TrimSpace(r.ConsumerID) == "":
-		return errors.New("projection: a consumer identifier is required")
+		return fmt.Errorf("%w: a consumer identifier is required", ErrInvalid)
 	case strings.TrimSpace(r.ProjectionVersion) == "":
 		// The projection is a contract, and a consumer that cannot name the version it reads
 		// cannot be told that the contract changed under it.
-		return errors.New("projection: a projection version is required")
+		return fmt.Errorf("%w: a projection version is required", ErrInvalid)
 	case r.MaxAcceptedAge <= 0:
 		// Zero would read as "no staleness is acceptable" and behave as "no budget is declared".
 		// The two are opposite, so neither is inferred from an absent value.
-		return errors.New("projection: a positive max_accepted_age is required")
+		return fmt.Errorf("%w: a positive max_accepted_age is required", ErrInvalid)
 	case !r.StaleBehavior.Valid():
-		return fmt.Errorf("projection: stale_behavior %q is not a declared behavior", r.StaleBehavior)
+		return fmt.Errorf("%w: stale_behavior %q is not a declared behavior", ErrInvalid, r.StaleBehavior)
 	}
 	return nil
 }
@@ -236,7 +246,7 @@ type Progress struct {
 // accepting a position for it would record that model as current.
 func (r *Registry) RecordProgress(ctx context.Context, report Progress) (Consumer, error) {
 	if strings.TrimSpace(report.ConsumerID) == "" {
-		return Consumer{}, errors.New("projection: a consumer identifier is required")
+		return Consumer{}, fmt.Errorf("%w: a consumer identifier is required", ErrInvalid)
 	}
 
 	var consumer Consumer

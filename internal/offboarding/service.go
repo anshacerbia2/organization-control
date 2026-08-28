@@ -89,9 +89,9 @@ VALUES ($1, $2, 'freeze', $3, $4, $5, $6, $7)`
 func (s *Service) Begin(ctx context.Context, req BeginRequest) (Offboarding, error) {
 	switch {
 	case req.TenantID.IsNil():
-		return Offboarding{}, errors.New("offboarding: a tenant identifier is required")
+		return Offboarding{}, fmt.Errorf("%w: a tenant identifier is required", ErrInvalid)
 	case strings.TrimSpace(req.Reason) == "":
-		return Offboarding{}, errors.New("offboarding: a reason is required")
+		return Offboarding{}, fmt.Errorf("%w: a reason is required", ErrInvalid)
 	}
 
 	scope, ok := db.ScopeFrom(ctx)
@@ -167,10 +167,10 @@ FOR UPDATE SKIP LOCKED`
 // machine refuses a suspension of a suspended Membership.
 func (s *Service) FreezeBatch(ctx context.Context, tenantID id.UUID, size int) (int, error) {
 	if tenantID.IsNil() {
-		return 0, errors.New("offboarding: a tenant identifier is required")
+		return 0, fmt.Errorf("%w: a tenant identifier is required", ErrInvalid)
 	}
 	if size <= 0 {
-		return 0, errors.New("offboarding: a positive batch size is required")
+		return 0, fmt.Errorf("%w: a positive batch size is required", ErrInvalid)
 	}
 
 	var frozen int
@@ -245,7 +245,11 @@ func (s *Service) CompleteFreeze(ctx context.Context, offboardingID id.UUID) (Of
 			return fmt.Errorf("offboarding: count active memberships: %w", err)
 		}
 		if remaining > 0 {
-			return fmt.Errorf("offboarding: %d active Memberships remain in the Tenant", remaining)
+			// ErrStageRefused, not ErrInvalid. The request is well formed and the freeze is simply
+			// not finished, so the caller's move is to run more freeze batches and try again —
+			// which is what 409 tells them and what 400 would not.
+			return fmt.Errorf("%w: %d active Memberships remain in the Tenant",
+				ErrStageRefused, remaining)
 		}
 		return nil
 	})
@@ -415,10 +419,10 @@ func (s *Service) RecordDeprovisioning(ctx context.Context, outcome Deprovisioni
 	switch outcome.State {
 	case "realized", "failed", "unresolved":
 	default:
-		return fmt.Errorf("offboarding: %q is not a deprovisioning outcome", outcome.State)
+		return fmt.Errorf("%w: %q is not a deprovisioning outcome", ErrInvalid, outcome.State)
 	}
 	if outcome.State != "realized" && strings.TrimSpace(outcome.Detail) == "" {
-		return fmt.Errorf("offboarding: a %s deprovisioning outcome requires a detail", outcome.State)
+		return fmt.Errorf("%w: a %s deprovisioning outcome requires a detail", ErrInvalid, outcome.State)
 	}
 
 	at := s.now().UTC()
@@ -448,7 +452,7 @@ type gate func(ctx context.Context, tx db.Tx, record Offboarding) error
 
 func (s *Service) advance(ctx context.Context, offboardingID id.UUID, from Stage, check gate) (Offboarding, error) {
 	if offboardingID.IsNil() {
-		return Offboarding{}, errors.New("offboarding: an offboarding identifier is required")
+		return Offboarding{}, fmt.Errorf("%w: an offboarding identifier is required", ErrInvalid)
 	}
 	next, ok := Next(from)
 	if !ok {

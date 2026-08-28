@@ -32,6 +32,7 @@ BEGIN
               ('invitation.invitation'),
               ('operation.offboarding'),
               ('operation.offboarding_obligation'),
+              ('audit.privileged_access'),
               ('projection.consumer'),
               ('platform.outbox'),
               ('platform.processed_event'),
@@ -60,6 +61,7 @@ ALTER SCHEMA membership   OWNER TO organization_migrator;
 ALTER SCHEMA invitation   OWNER TO organization_migrator;
 ALTER SCHEMA operation    OWNER TO organization_migrator;
 ALTER SCHEMA projection   OWNER TO organization_migrator;
+ALTER SCHEMA audit        OWNER TO organization_migrator;
 ALTER SCHEMA platform     OWNER TO organization_migrator;
 
 -- CREATE on a schema is a DDL privilege. PostgreSQL grants it to the schema owner only, but
@@ -70,7 +72,7 @@ DECLARE
     target TEXT;
 BEGIN
     FOREACH target IN ARRAY ARRAY['organization','tenant','workspace','membership',
-                                  'invitation','operation','projection','platform']
+                                  'invitation','operation','projection','audit','platform']
     LOOP
         EXECUTE format('REVOKE ALL ON SCHEMA %I FROM PUBLIC', target);
         EXECUTE format('GRANT USAGE ON SCHEMA %I TO organization_rt, organization_provider_rt', target);
@@ -106,6 +108,40 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA platform FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA organization FROM organization_rt;
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA organization
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_rt;
+
+-- The tenant-scoped role holds nothing in `audit`.
+--
+-- The evidence there records actions taken across Tenants, so it carries no tenant_id and sits
+-- outside the RLS set by construction — that is why it is its own schema rather than a table in
+-- `operation`. See schema.hcl and rls.sql. That leaves the grant as the only boundary, exactly as it
+-- is for `organization`: a tenant-scoped caller with SELECT here could read which provider operators
+-- touched which correlations across the whole estate, and one with INSERT could write evidence
+-- attributing an access to somebody else.
+--
+-- Whole-schema rather than per-table, so a second evidence table added later is covered without
+-- anyone remembering to extend a list — the same reasoning rls.sql uses for its policy set.
+REVOKE ALL ON ALL TABLES IN SCHEMA audit FROM organization_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA audit
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_rt;
+
+-- The provider role may append evidence and may not change it.
+--
+-- The loop above grants SELECT, INSERT, UPDATE, and DELETE on every table in every owned schema,
+-- which on this schema hands the role being audited the ability to rewrite or erase its own audit
+-- trail. That is the one place a uniform grant is wrong: evidence whose writer can amend it is not
+-- evidence, and an operator investigating a cross-Tenant access would have no way to tell a missing
+-- row from an access that never happened.
+--
+-- Found by querying has_table_privilege after the first clean deploy rather than by reading this
+-- file — the same way identity-control found Atlas's revision table sitting inside a schema the
+-- runtime could write.
+--
+-- SELECT goes too, on least privilege: internal/access only inserts, and nothing in the repository
+-- reads this table. A read surface for an investigation would come with its own grant and its own
+-- role, rather than being available in advance to the role under investigation.
+REVOKE SELECT, UPDATE, DELETE ON ALL TABLES IN SCHEMA audit FROM organization_provider_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA audit
+    REVOKE SELECT, UPDATE, DELETE ON TABLES FROM organization_provider_rt;
 
 -- The provider role holds nothing on the outbox.
 --

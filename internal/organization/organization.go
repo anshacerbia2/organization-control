@@ -101,6 +101,16 @@ var transitions = map[Action]struct {
 }
 
 var (
+	// ErrInvalid is a malformed request: a required field absent, a value outside its permitted
+	// set, or two fields that contradict each other.
+	//
+	// It exists so the HTTP surface can answer 400. Before it, every validation failure here was
+	// a bare errors.New, indistinguishable at the transport boundary from a failed statement --
+	// so a caller who omitted a field received 500, which says the service is broken rather than
+	// that the request is. Constructor guards and stored-value decoders deliberately do NOT carry
+	// it: those are a process built wrong and a row that should not exist, and both are 500.
+	ErrInvalid = errors.New("organization: the request is invalid")
+
 	// ErrUnknownAction reports an action outside the machine. A programming error: a route exists
 	// without a transition behind it.
 	ErrUnknownAction = errors.New("organization: action is not in the state machine")
@@ -263,12 +273,12 @@ RETURNING version, created_at`
 func (s *Service) Register(ctx context.Context, req RegisterRequest) (Organization, error) {
 	switch {
 	case strings.TrimSpace(req.DisplayName) == "":
-		return Organization{}, errors.New("organization: a display name is required")
+		return Organization{}, fmt.Errorf("%w: a display name is required", ErrInvalid)
 	case !req.Classification.Valid():
-		return Organization{}, fmt.Errorf("organization: classification %q is not a declared classification",
+		return Organization{}, fmt.Errorf("%w: classification %q is not a declared classification", ErrInvalid,
 			req.Classification)
 	case strings.TrimSpace(req.Reason) == "":
-		return Organization{}, errors.New("organization: a reason is required")
+		return Organization{}, fmt.Errorf("%w: a reason is required", ErrInvalid)
 	}
 
 	organizationID, err := s.newID()
@@ -331,11 +341,11 @@ type Command struct {
 func (c Command) validate() error {
 	switch {
 	case c.OrganizationID.IsNil():
-		return errors.New("organization: an organization identifier is required")
+		return fmt.Errorf("%w: an organization identifier is required", ErrInvalid)
 	case strings.TrimSpace(c.Reason) == "":
-		return errors.New("organization: a reason is required")
+		return fmt.Errorf("%w: a reason is required", ErrInvalid)
 	case c.ExpectedVersion <= 0:
-		return errors.New("organization: the expected version the caller was shown is required")
+		return fmt.Errorf("%w: the expected version the caller was shown is required", ErrInvalid)
 	}
 	return nil
 }

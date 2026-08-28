@@ -52,7 +52,7 @@ ALTER ROLE organization_provider_rt NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE 
 --
 -- identity-control scopes Atlas to one schema through `search_path`, and a schema-scoped plan
 -- may not modify the schema it is scoped to, so `identity` had to exist first. This service
--- declares seven schemas, and Atlas rejects a multi-schema HCL source against a schema-scoped
+-- declares eight schemas, and Atlas rejects a multi-schema HCL source against a schema-scoped
 -- dev URL, so it necessarily works in database scope — where it can own the schema objects.
 --
 -- Creating them here as well would break the pipeline rather than merely duplicate it: Atlas

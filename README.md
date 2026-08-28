@@ -82,6 +82,11 @@ every other consumer uses; sharing a foundation grants no privileged interface.
 | Path | Contents |
 | :-- | :-- |
 | `cmd/organization-control/` | Deployable entrypoint and composition root |
+| `cmd/organization-migrate/` | Schema stages: roles, then platform, RLS, and privileges |
+| `internal/config/` | Environment configuration, read once at startup |
+| `internal/httpapi/` | Routing, request decoding, and the domain-error-to-problem mapping |
+| `internal/access/` | The privileged-access recorder: evidence for cross-Tenant work |
+| `internal/db/` | The single scope-binding path and the two pool types |
 | `internal/organization/` | Organization registry |
 | `internal/tenant/` | Tenant lifecycle and security version |
 | `internal/workspace/` | Workspace lifecycle |
@@ -119,7 +124,7 @@ Four sources build one database, and each is owned by whoever owns the SQL:
 | Source | Owner | What it applies |
 | :-- | :-- | :-- |
 | `internal/controldb/roles.sql` | this repository | The three cluster roles |
-| `schema.hcl` via Atlas | this repository | The seven owned schemas and their tables |
+| `schema.hcl` via Atlas | this repository | The eight owned schemas and their tables |
 | `foundation-platform/migrations/platform` | the shared module | The `platform` schema |
 | `internal/controldb/rls.sql`, `grants.sql` | this repository | Policies, then privileges |
 
@@ -133,6 +138,22 @@ atlas migrate apply --env local                 # the owned schemas and their ta
 go run ./cmd/organization-migrate -stage=post   # platform schema, RLS, privileges
 ```
 
+**`roles.sql` creates the three group roles and no login role.** `organization_migrator`,
+`organization_rt`, and `organization_provider_rt` are all `NOLOGIN`: they carry privileges and
+nobody authenticates as them. The login roles that inherit them are a deployment concern, because
+their passwords are, so the pipeline creates them and this repository does not. Locally and in CI
+that means:
+
+```sql
+CREATE ROLE organization_app LOGIN PASSWORD '…';
+CREATE ROLE organization_provider_app LOGIN PASSWORD '…';
+GRANT organization_rt          TO organization_app;
+GRANT organization_provider_rt TO organization_provider_app;
+```
+
+Without them the integration suites skip when `TEST_DATABASE_URL` is unset and fail to authenticate
+when it is set — see `.github/workflows/ci.yml` for the exact block CI runs.
+
 **The order differs from identity-control's, and the reason is Atlas rather than preference.**
 
 Atlas refuses to apply against a database it considers unclean, and in database scope any
@@ -141,10 +162,70 @@ the clean check does not consult. Roles are cluster objects, so creating them le
 database clean; that is what makes this order possible at all.
 
 Database scope is itself forced. identity-control bounds Atlas to one schema with a
-`search_path` on both URLs, and this service declares seven: Atlas rejects a multi-schema HCL
+`search_path` on both URLs, and this service declares eight: Atlas rejects a multi-schema HCL
 source against a schema-scoped dev URL. `atlas.hcl` bounds the scope with `schemas` and
 `exclude` instead, and `public` is declared and managed empty — without it, the first generated
 plan ended in `DROP SCHEMA "public" CASCADE`.
+
+## Running the service
+
+Every value comes from the environment, per STD-GLB-009. Nothing is defaulted that would let a
+misconfigured process start and fail later.
+
+| Variable | Required | Purpose |
+| :-- | :-- | :-- |
+| `ORGANIZATION_TENANT_DATABASE_URL` | yes | Connects as `organization_app` → `organization_rt` |
+| `ORGANIZATION_PROVIDER_DATABASE_URL` | yes | Connects as `organization_provider_app` → `organization_provider_rt` |
+| `ORGANIZATION_TOKEN_ISSUER` | yes | Compared for exact equality |
+| `ORGANIZATION_TOKEN_AUDIENCE` | yes | This resource's registered identifier |
+| `ORGANIZATION_JWKS_URL` | yes | Key source. Never read from a token |
+| `ORGANIZATION_TENANT_CLAIM` | yes | The claim carrying the Tenant a caller administers |
+| `ORGANIZATION_PROVIDER_ROLE` | yes | The realm role conferring cross-Tenant authority |
+| `ORGANIZATION_LISTEN_ADDRESS` | no | Defaults to `:8080` |
+| `ORGANIZATION_TOKEN_MAX_SKEW` | no | 30s; capped at 60s by STD-IAM-002 §3.5 |
+
+**The two DSNs must differ, and startup refuses them if they are identical.** They are two
+credentials for two PostgreSQL login roles with different policies, and the whole isolation posture
+rests on ordinary tenant traffic being unable to authenticate as the cross-Tenant role. One DSN
+reused for both would compile, pass every test that does not inspect `current_user`, and silently run
+the estate's tenant traffic under the role that can read every Tenant.
+
+```powershell
+$env:ORGANIZATION_TENANT_DATABASE_URL   = 'postgres://organization_app:…@localhost:5432/organization_control_dev?sslmode=disable'
+$env:ORGANIZATION_PROVIDER_DATABASE_URL = 'postgres://organization_provider_app:…@localhost:5432/organization_control_dev?sslmode=disable'
+$env:ORGANIZATION_TOKEN_ISSUER   = 'https://…/realms/scnehaux'
+$env:ORGANIZATION_TOKEN_AUDIENCE = 'organization-control'
+$env:ORGANIZATION_JWKS_URL       = 'https://…/realms/scnehaux/protocol/openid-connect/certs'
+$env:ORGANIZATION_TENANT_CLAIM   = 'tenant_id'
+$env:ORGANIZATION_PROVIDER_ROLE  = 'organization-provider'
+
+go run ./cmd/organization-control
+```
+
+### Three muxes, not one with an exemption list
+
+| Mux | Authentication | Scope resolution | Holds |
+| :-- | :-- | :-- | :-- |
+| `Probes` | none, ever | none | `GET /healthz`, `GET /readyz` |
+| `Anonymous` | none | none | `POST /v1/invitations/lookup` |
+| `API` | required | required | everything else |
+
+An exemption list is edited by whoever adds a route, and the failure mode of forgetting is an
+unauthenticated mutation. Here a route is unauthenticated only if its author writes it into
+`Anonymous`. identity-control learned the other half of this in an outage: one mux meant the
+authentication middleware also wrapped `/readyz`, every probe answered 401, and no replica entered
+service.
+
+The anonymous route reads nothing. SAD-004 §5.5 requires an invitation lookup to answer identically
+for an absent, expired, revoked, accepted, and valid token, and the only construction where that
+holds for the status code, the body, *and* the response time is one that looks nothing up.
+
+### Mutations are not idempotent yet
+
+There is deliberately no `Idempotency-Key` header. foundation-platform's `idempotency.Claim` takes a
+`db.Tx` because the claim must commit with the effect it guards; the services here open their own
+transactions and accept no claim, so a middleware could only claim outside them. Accepting the header
+without honouring it would tell a client its retries are safe at exactly the moment they are not.
 
 ## Row-Level Security is not in `schema.hcl`, and that is a vendor limitation rather than a design choice
 
