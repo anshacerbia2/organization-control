@@ -139,7 +139,7 @@ func scanInt(t *testing.T, ctx context.Context, tx db.Tx, statement string, args
 // way it reconciles a column — a policy dropped by hand stays dropped while the schema still
 // matches its declared state, and this test is the only thing that notices.
 func TestEveryTenantScopedTableIsProtected(t *testing.T) {
-	pool, ctx := openAs(t, "postgres", passwordFromEnv())
+	pool, ctx := openAdmin(t)
 
 	type protection struct {
 		name     string
@@ -203,7 +203,7 @@ func TestEveryTenantScopedTableIsProtected(t *testing.T) {
 // asserts the outcome, because a table could be added to an RLS schema by a path that did not run
 // that stage — a restored dump, or a hand-run CREATE TABLE during an incident.
 func TestEveryProtectedTableCarriesTenantID(t *testing.T) {
-	pool, ctx := openAs(t, "postgres", passwordFromEnv())
+	pool, ctx := openAdmin(t)
 
 	var offending int
 	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
@@ -232,7 +232,7 @@ func TestEveryProtectedTableCarriesTenantID(t *testing.T) {
 // A role holding SUPERUSER or BYPASSRLS makes every policy in this database inert while the
 // catalog still reports RLS as enabled — a control that reads as present and is not.
 func TestRuntimeRolesHoldNothingDangerous(t *testing.T) {
-	pool, ctx := openAs(t, "postgres", passwordFromEnv())
+	pool, ctx := openAdmin(t)
 
 	for _, role := range []string{tenantRole, providerRole} {
 		if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
@@ -267,7 +267,7 @@ func TestRuntimeRolesHoldNothingDangerous(t *testing.T) {
 // insufficient: an owner can ALTER and DROP its own tables regardless of which privileges were
 // granted, and — absent FORCE — is exempt from its own table's policies.
 func TestRuntimeRolesOwnNothing(t *testing.T) {
-	pool, ctx := openAs(t, "postgres", passwordFromEnv())
+	pool, ctx := openAdmin(t)
 
 	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		tables := scanInt(t, ctx, tx,
@@ -304,7 +304,7 @@ func TestRuntimeRolesOwnNothing(t *testing.T) {
 // which makes the grant the only boundary: a tenant-scoped caller with SELECT here could read
 // every customer in the estate.
 func TestTenantRoleHoldsNothingOnOrganization(t *testing.T) {
-	pool, ctx := openAs(t, "postgres", passwordFromEnv())
+	pool, ctx := openAdmin(t)
 
 	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		for _, privilege := range []string{"SELECT", "INSERT", "UPDATE", "DELETE"} {
@@ -546,21 +546,36 @@ func TestProviderRoleCannotReadAsATenant(t *testing.T) {
 	}
 }
 
-func passwordFromEnv() string {
-	// The administrative password is only used by the structural assertions, which read the
-	// catalog. Every isolation assertion connects as a runtime role instead — a catalog read on
-	// an administrative connection is evidence about the schema, and evidence about isolation has
-	// to come from the role that carries traffic.
-	base := os.Getenv("TEST_DATABASE_URL")
-	rest := base
-	if index := strings.Index(base, "://"); index >= 0 {
-		rest = base[index+3:]
-	}
-	if at := strings.Index(rest, "@"); at >= 0 {
-		credential := rest[:at]
-		if colon := strings.Index(credential, ":"); colon >= 0 {
-			return credential[colon+1:]
+// openAdmin uses TEST_DATABASE_URL exactly as given, rather than rewriting it.
+//
+// The structural assertions need whatever role owns the schema, and that role's name is part of
+// the credential the environment hands us: `postgres` locally, `organization` in CI. Rewriting the
+// user to a hardcoded `postgres` while keeping the password from the DSN produced
+// "password authentication failed for user postgres" in CI — a message about a credential, for a
+// test that had invented the role name. Every other pool here rewrites the user on purpose,
+// because connecting as a specific runtime role IS the assertion; this one has no such reason.
+func openAdmin(t *testing.T) (*db.Pool, context.Context) {
+	t.Helper()
+
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		if os.Getenv("REQUIRE_INTEGRATION") != "" {
+			t.Fatal("REQUIRE_INTEGRATION is set and TEST_DATABASE_URL is empty: the database this suite asserts against never came up")
 		}
+		t.Skip("TEST_DATABASE_URL is unset; set it to run isolation assertions against a real server")
 	}
-	return ""
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	pool, err := db.Open(ctx, db.Config{Name: "controldb-test-admin", DSN: dsn, MaxConns: 2})
+	if err != nil {
+		t.Fatalf("open administrative pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool, ctx
 }
+
+// The administrative password used to be parsed back out of TEST_DATABASE_URL and paired with a
+// hardcoded user. openAdmin uses the DSN whole instead, so there is nothing left to parse: the
+// owner's name and password travel together, which is what a DSN is.

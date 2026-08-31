@@ -24,7 +24,7 @@ import (
 // that distinction is the point of that file and is not what this one tests.
 func adminPool(t *testing.T) (*db.Pool, context.Context) {
 	t.Helper()
-	return openAs(t, "postgres", passwordFromEnv())
+	return openAdmin(t)
 }
 
 func TestAssertIsolationAcceptsAnIntactDatabase(t *testing.T) {
