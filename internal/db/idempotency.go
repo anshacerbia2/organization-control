@@ -73,6 +73,17 @@ func (c Claim) valid() bool {
 // genuinely concurrent retry, and a first attempt whose response was never recorded. Both answers
 // are the same — do not retry, re-read the resource — and both are the safe direction.
 
+// A replay returns the same response, not the same bytes.
+//
+// `platform.idempotency_key.response_body` is `jsonb`, so PostgreSQL normalises what is stored:
+// object keys come back sorted and insignificant whitespace is gone. The document is equal, the
+// encoding is not. That is worth stating rather than discovering, because anything hashing or
+// signing a response body has to canonicalise first — and a client comparing bytes to decide whether
+// a retry returned the same thing would conclude it did not.
+//
+// The column type is foundation-platform's and is the right choice: `jsonb` rejects a malformed
+// document at the store, which `text` would accept and replay verbatim.
+
 // Replayed is returned when a claim matched a completed request.
 //
 // An error rather than a result, because it has to travel out through `Body`, whose signature is
@@ -102,6 +113,14 @@ func (r *Replayed) Error() string {
 type pending struct {
 	claim    Claim
 	consumed atomic.Bool
+
+	// made records that the claim was newly reserved, as opposed to skipped or replayed.
+	//
+	// It exists so the HTTP surface knows whether it owes the store a completion. Without it the
+	// surface would call `Complete` on every claimed request including replays, where the key is
+	// already complete and the update matches no row — an error on a correct request, logged on
+	// every retry a well-behaved client makes.
+	made atomic.Bool
 }
 
 type claimKey struct{}
@@ -125,6 +144,22 @@ func ClaimFrom(ctx context.Context) (Claim, bool) {
 		return Claim{}, false
 	}
 	return held.claim, true
+}
+
+// ClaimMade reports whether the claim in this context was newly reserved by a scoped transaction
+// that then committed.
+//
+// It is how the caller knows it owes the store a completion. False for a request carrying no claim,
+// for one whose claim was replayed, and for one whose transaction rolled back — the last because a
+// rollback takes the key with it, so there is nothing to complete.
+//
+// It is read after the transaction returns, and it reports what the claim attempt decided rather
+// than whether the commit succeeded. A transaction that claimed and then failed to commit reports
+// true here; the completion that follows finds no claimed row and reports `ErrNotClaimed`, which is
+// the correct outcome and the reason completion failures are logged rather than surfaced.
+func ClaimMade(ctx context.Context) bool {
+	held, ok := ctx.Value(claimKey{}).(*pending)
+	return ok && held.made.Load()
 }
 
 // claimWithin makes the pending claim inside the caller's transaction.
@@ -156,6 +191,7 @@ func claimWithin(ctx context.Context, tx Tx) error {
 	case idempotency.StateReplay:
 		return &Replayed{Status: result.Status, Body: result.Body}
 	case idempotency.StateClaimed:
+		held.made.Store(true)
 		return nil
 	default:
 		// StateInProgress arrives as ErrInProgress above, so reaching here means the foundation

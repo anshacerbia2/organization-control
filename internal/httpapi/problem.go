@@ -15,6 +15,7 @@ import (
 	"net/http"
 
 	platform "github.com/anshacerbia2/foundation-platform/httpapi"
+	"github.com/anshacerbia2/foundation-platform/idempotency"
 
 	"github.com/anshacerbia2/organization-control/internal/context"
 	"github.com/anshacerbia2/organization-control/internal/db"
@@ -59,6 +60,20 @@ var mapping = []struct {
 	{db.ErrNoScope, platform.Internal},
 	{db.ErrWrongScope, platform.Internal},
 	{db.ErrReasonRequired, platform.ValidationFailed},
+
+	// Idempotency. Both are 409 and they are different conflicts, so they get the two problem types
+	// foundation-platform declares for exactly this pair rather than being folded into
+	// `VersionConflict`.
+	//
+	// The distinction is on the wire, not just in the code. `VersionConflict` titles itself "The
+	// record changed since it was read", which for a reused key is false and points a caller at
+	// re-reading the resource — the wrong fix. `IdempotencyKeyConflict` says the key was reused with
+	// a different request, which names what the caller did; `RequestInProgress` says an identical
+	// request is still in flight, which is either a genuinely concurrent retry or a first attempt
+	// whose response was never recorded. A caller cannot tell those two apart and does not need to:
+	// the answer to both is stop retrying and re-read.
+	{idempotency.ErrConflict, platform.IdempotencyKeyConflict},
+	{idempotency.ErrInProgress, platform.RequestInProgress},
 
 	// Membership.
 	{membership.ErrInvalid, platform.ValidationFailed},
@@ -168,6 +183,21 @@ func problemFor(err error) (platform.ProblemType, bool) {
 // suppressing it would leave a 409 with nothing to act on. An internal failure's message is not:
 // it may carry a statement, a constraint name, or a path, and none of that is the caller's.
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
+	// A replay is not an error, and it arrives as one because it has to travel out through a
+	// service's `error` return — the services know nothing about idempotency, which is what keeps
+	// them from being able to forget it. Handled first: every branch below turns an error into a
+	// problem document, and a replay is the stored success response instead.
+	var replayed *db.Replayed
+	if errors.As(err, &replayed) {
+		w.Header().Set("Content-Type", "application/json")
+		// The header says the response was not produced again. Without it a caller cannot tell a
+		// replay from a fresh execution, which is exactly the question a retrying client is asking.
+		w.Header().Set("Idempotent-Replay", "true")
+		w.WriteHeader(replayed.Status)
+		_, _ = w.Write(replayed.Body)
+		return
+	}
+
 	problem, mapped := problemFor(err)
 	if !mapped || problem == platform.Internal {
 		platform.Problem(w, r, platform.Internal, "The request could not be completed")

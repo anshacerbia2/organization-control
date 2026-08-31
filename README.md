@@ -302,12 +302,49 @@ prohibition, since it mandates realized-status correlation, gives this service n
 but HTTP, and `POST /v1/offboardings/{id}/deprovisioning` already reports the other direction's
 outcome the same way.
 
-### Mutations are not idempotent yet
+### `Idempotency-Key`
 
-There is deliberately no `Idempotency-Key` header. foundation-platform's `idempotency.Claim` takes a
-`db.Tx` because the claim must commit with the effect it guards; the services here open their own
-transactions and accept no claim, so a middleware could only claim outside them. Accepting the header
-without honouring it would tell a client its retries are safe at exactly the moment they are not.
+Supply the header on a mutation and a retry of the identical request returns the first response
+instead of executing again. The response carries `Idempotent-Replay: true` so a client can tell which
+happened.
+
+**The claim is made inside the service's own transaction, not by the middleware.**
+`idempotency.Claim` takes a `db.Tx` because the claim has to commit with the effect it guards, so
+`internal/db` makes it inside the scoped transaction every service already opens — the middleware only
+attaches it to the context. A middleware claiming in a transaction of its own would commit
+separately, and a key held by a mutation that then rolled back refuses every retry of a request that
+never happened, reported as "already in progress". That sends whoever is debugging to look for a
+concurrent request that does not exist. `TestAFailedMutationReleasesItsKey` fails if the claim is
+moved out of that transaction — it was written by moving it out and watching it fail.
+
+Threading it through the scope binding rather than through the services was the alternative to a
+`Within` variant on some thirty service methods across eight packages. The services never see a
+claim, which is what stops one of them being written without honouring it.
+
+| Situation | Answer |
+| :-- | :-- |
+| No header | Passes through untouched |
+| Identical retry of a completed request | The stored response, `Idempotent-Replay: true` |
+| Same key, different request | 409 `idempotency-key-conflict` |
+| Same key, first use not yet completed | 409 `request-in-progress` |
+| Header on a `GET` or `HEAD` | 400 — a key spent on a read would answer the caller's later mutation |
+| Body over 1 MiB | 400 — refused rather than silently unclaimed |
+
+**Two things it does not do.**
+
+The header is honoured when present and not yet *required*. TDD-organization-control-003 §"API /
+Interface" says every mutation requires it; making it mandatory changes the client contract rather
+than this mechanism, and belongs in one deliberate step.
+
+There is a window. `Complete` needs the status and body, which do not exist until the handler has
+rendered them, so the response is recorded after the domain transaction commits. A process dying in
+between leaves a key claimed and uncompleted, and later retries are refused rather than replayed. The
+mutation still happened exactly once; what is lost is being told what it returned. Closing it
+entirely is the thirty-method refactor above.
+
+**A replay returns the same response, not the same bytes.**
+`platform.idempotency_key.response_body` is `jsonb`, so PostgreSQL sorts object keys and drops
+insignificant whitespace. Anything hashing or signing a response body has to canonicalise first.
 
 ## Row-Level Security is not in `schema.hcl`, and that is a vendor limitation rather than a design choice
 

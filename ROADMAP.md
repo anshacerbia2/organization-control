@@ -324,12 +324,15 @@ intake → dispatch → realized → activation, with two events published acros
 
 **What is not done, stated plainly:**
 
-- **Mutations are not idempotent.** There is deliberately no `Idempotency-Key` on this surface.
-  foundation-platform's `idempotency.Claim` takes a `db.Tx` because the claim has to commit with
-  the effect it guards, and the services here open their own transactions and accept no claim, so a
-  middleware could only claim outside them. Accepting the header without honouring it would tell a
-  client its retries are safe at exactly the moment they are not. Closing this means giving the
-  services a seam for the claim, the same shape as `TransitionWithin` and `GrantWithin`.
+- **`Idempotency-Key` is honoured but not yet required.** TDD-organization-control-003 §"API /
+  Interface" says every mutation requires it. Making it mandatory changes the client contract rather
+  than the mechanism, so it is one deliberate step rather than a side effect of adding the mechanism.
+- **The response is recorded after the domain transaction, not inside it.** `idempotency.Complete`
+  needs the status and body, and neither exists until the handler has rendered them. A process dying
+  between the commit and the completion leaves a key claimed and uncompleted, and later retries are
+  refused as in progress rather than replayed — the mutation happened exactly once, and what is lost
+  is being told what it returned. Closing the window means the handler owning the transaction, which
+  is a `Within` variant on some thirty service methods across eight packages.
 - Request validation happens inside the domain transaction, so a malformed request opens one before
   being refused. Correct, and wasteful.
 
@@ -388,6 +391,16 @@ that is not this repository's call to make alone.
 **The design amendments this implies**, for 003: the four provisioning routes in §"API / Interface",
 the `requested -> failed` question in §"Tenant State Machine", the desired-state payload in
 §"Published Events", and the ambiguous-correlation rule in §"Provisioning Correlation".
+
+### What wiring idempotency found
+
+| Finding | Resolution |
+| :-- | :-- |
+| **The claim had nowhere correct to live in the obvious design.** A middleware can only claim in a transaction of its own, which commits separately — so a key held by a mutation that then rolled back refuses every retry of a request that never happened, and says "already in progress" while doing it | The claim travels in the context and is made by `internal/db` inside the scoped transaction every service already opens. The services never see it, which is what stops one being written without honouring it. Proven by moving the claim out and watching `TestAFailedMutationReleasesItsKey` fail with exactly that message |
+| **`Complete` needs the HTTP response, which the service layer does not have.** The two halves of one guarantee sit in two layers | The claim is transactional and the completion is not. Documented as a window rather than hidden: a crash in between refuses later retries instead of replaying them, and the mutation still happened once. The alternative was a `Within` variant on thirty methods |
+| **A replay is not byte-identical.** `platform.idempotency_key.response_body` is `jsonb`, so PostgreSQL sorts object keys and drops whitespace | Asserted semantically rather than by bytes, and stated in the README. Changing the column to `text` to make a byte comparison pass would trade the store's rejection of a malformed document for a guarantee no client should rely on |
+| **The two conflicts were first mapped to `VersionConflict`**, whose title is "The record changed since it was read" — false for a reused key, and it points the caller at re-reading the resource, which is the wrong fix | foundation-platform already declares `IdempotencyKeyConflict` and `RequestInProgress`. Found by reading the response body in the by-hand walkthrough rather than by reading the mapping table |
+| **One request can open two scoped transactions.** `internal/invitation` binds a tenant pool and a provider pool, and the second claim would read its own uncommitted first claim and refuse the request as in progress | The claim carries a consumption flag: the first transaction to reach it claims, the rest skip. Asserted by `TestOneRequestOpeningTwoScopesClaimsOnce` |
 
 ## Waiting on nothing
 

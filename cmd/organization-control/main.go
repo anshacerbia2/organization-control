@@ -132,6 +132,19 @@ func run() error {
 		return fmt.Errorf("provider scope pool: %w", err)
 	}
 
+	// The claim store writes `platform.idempotency_key` and nothing else, so it takes the raw
+	// transactor rather than a scoped pool: that table carries no tenant_id and no Row-Level
+	// Security policy — its `scope` column is its isolation — so there is no binding for the write
+	// to need, and routing it through the provider scope would file a privileged-access record for a
+	// bookkeeping update.
+	//
+	// The tenant connections, because that is the pool ordinary traffic already uses and both
+	// runtime roles hold the same privileges on the table.
+	claims, err := db.NewClaimStore(tenantConns)
+	if err != nil {
+		return fmt.Errorf("idempotency claim store: %w", err)
+	}
+
 	memberships, err := membership.New(tenantPool)
 	if err != nil {
 		return fmt.Errorf("membership service: %w", err)
@@ -240,13 +253,23 @@ func run() error {
 	// is this service's own step. It must come after authentication — it reads the caller
 	// authentication established — and before any handler, which is exactly where wrapping the mux
 	// puts it.
+	// The idempotency middleware sits inside scope resolution, and the nesting is forced rather
+	// than stylistic. It builds a claim scoped per authenticated caller, so it must run after
+	// authentication has established one; and the claim it attaches is made by the service's own
+	// transaction, so it must run before the handler. Between ResolveScope and the mux is the only
+	// position that satisfies both.
+	idempotent, err := httpapi.Idempotent(claims, telemetry)
+	if err != nil {
+		return fmt.Errorf("idempotency middleware: %w", err)
+	}
+
 	apiChain := func(next http.Handler) http.Handler {
 		return fhttp.Chain(fhttp.Options{
 			Telemetry:      telemetry,
 			Timeout:        cfg.HTTPRequestTimeout,
 			MaxInFlight:    cfg.HTTPMaxInFlight,
 			Authentication: authentication,
-		})(httpapi.ResolveScope(next))
+		})(httpapi.ResolveScope(idempotent(next)))
 	}
 
 	// The anonymous chain carries observability, timeout, and shedding, and neither authentication
