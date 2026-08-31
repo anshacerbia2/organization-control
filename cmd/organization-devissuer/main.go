@@ -279,13 +279,39 @@ func banner(kid string) {
 	fmt.Fprint(out, "   # read it back\n")
 	fmt.Fprint(out, "   Invoke-RestMethod -Uri \"http://127.0.0.1:8099/v1/tenants/$($t1.tenant.tenant_id)\" -Headers $h\n\n")
 
-	fmt.Fprintf(out, "3. Refusals worth seeing for yourself:\n\n")
+	fmt.Fprint(out, "3. Retry the same mutation safely -- send it twice with one Idempotency-Key:\n\n")
+	fmt.Fprint(out, "   $key = [guid]::NewGuid().ToString()\n")
+	fmt.Fprint(out, "   $hk = $h + @{ 'Idempotency-Key' = $key }\n")
+	fmt.Fprint(out, "   $b2 = @{ organization_id = $org.organization_id; display_name = 'Retried'\n")
+	fmt.Fprint(out, "            isolation_profile = 'pooled' } | ConvertTo-Json\n")
+	fmt.Fprint(out, "   $a = Invoke-RestMethod -Uri 'http://127.0.0.1:8099/v1/tenants' -Method POST -Headers $hk `\n")
+	fmt.Fprint(out, "     -ContentType 'application/json' -Body $b2\n")
+	fmt.Fprint(out, "   $b = Invoke-RestMethod -Uri 'http://127.0.0.1:8099/v1/tenants' -Method POST -Headers $hk `\n")
+	fmt.Fprint(out, "     -ContentType 'application/json' -Body $b2\n")
+	fmt.Fprint(out, "   $a.tenant.tenant_id -eq $b.tenant.tenant_id   # True: one Tenant, not two\n\n")
+	fmt.Fprint(out, "   The second response carries 'Idempotent-Replay: true'. The same key with a\n")
+	fmt.Fprint(out, "   different body is 409 rather than a replay, and a key on a GET is 400.\n\n")
+
+	fmt.Fprint(out, "4. Refusals worth seeing for yourself:\n\n")
 	fmt.Fprintf(out, "   role=tenant on a provider route  -> 403\n")
 	fmt.Fprintf(out, "     $tt = (Invoke-WebRequest 'http://%s/token?role=tenant&tenant_id=11111111-1111-4111-8111-11111111111a' -UseBasicParsing).Content.Trim()\n", listen)
-	fmt.Fprintf(out, "   role=both                        -> 401, the two scopes are not resolved to either\n")
+
+	// 403, not 401, and the difference is the point: the token is authentic, so "we do not know who
+	// you are" would be false. Its claims confer no scope. Asserted by
+	// TestAuthenticateRefusesBothAuthorities, and this line said 401 until the by-hand walkthrough
+	// disagreed with it.
+	fmt.Fprintf(out, "   role=both                        -> 403: the token is authentic, and its\n")
+	fmt.Fprintf(out, "                                      claims confer no scope. Cross-Tenant\n")
+	fmt.Fprintf(out, "                                      authority and authority over one Tenant\n")
+	fmt.Fprintf(out, "                                      are refused rather than resolved to either\n")
 	fmt.Fprintf(out, "     $tb = (Invoke-WebRequest 'http://%s/token?role=both' -UseBasicParsing).Content.Trim()\n", listen)
 	fmt.Fprintf(out, "   provider token, no reason header -> 400 naming the header\n")
-	fmt.Fprintf(out, "   a body with an unknown field     -> 400, because DisallowUnknownFields is on\n\n")
+	fmt.Fprintf(out, "   a body with an unknown field     -> 400, because DisallowUnknownFields is on\n")
+	fmt.Fprintf(out, "   activating a 'requested' Tenant  -> 409: the state machine is consulted\n")
+	fmt.Fprintf(out, "                                      before the preconditions, so the answer\n")
+	fmt.Fprintf(out, "                                      names the transition rather than a check\n")
+	fmt.Fprintf(out, "                                      that never ran. 412 is what you get once\n")
+	fmt.Fprintf(out, "                                      it IS provisioning and unconfirmed\n\n")
 
 	fmt.Fprintf(out, "%s\n", line)
 }
