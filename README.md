@@ -83,6 +83,8 @@ every other consumer uses; sharing a foundation grants no privileged interface.
 | :-- | :-- |
 | `cmd/organization-control/` | Deployable entrypoint and composition root |
 | `cmd/organization-migrate/` | Schema stages: roles, then platform, RLS, and privileges |
+| `cmd/organization-devissuer/` | Local token issuer, `//go:build devissuer` only |
+| `Makefile`, `.env.example` | Development entry points and the local environment |
 | `internal/config/` | Environment configuration, read once at startup |
 | `internal/httpapi/` | Routing, request decoding, and the domain-error-to-problem mapping |
 | `internal/access/` | The privileged-access recorder: evidence for cross-Tenant work |
@@ -198,33 +200,36 @@ rests on ordinary tenant traffic being unable to authenticate as the cross-Tenan
 reused for both would compile, pass every test that does not inspect `current_user`, and silently run
 the estate's tenant traffic under the role that can read every Tenant.
 
-In `cmd.exe` — which is what cmder gives you — the same thing, with `set "NAME=value"` quoted so a
-trailing space on the line cannot become part of a DSN:
+### Locally: `.env` and the Makefile
 
-```bat
-set "ORGANIZATION_TENANT_DATABASE_URL=postgres://organization_app:…@localhost:5432/organization_control_dev?sslmode=disable"
-set "ORGANIZATION_PROVIDER_DATABASE_URL=postgres://organization_provider_app:…@localhost:5432/organization_control_dev?sslmode=disable"
-set "ORGANIZATION_TOKEN_ISSUER=https://…/realms/scnehaux"
-set "ORGANIZATION_TOKEN_AUDIENCE=organization-control"
-set "ORGANIZATION_JWKS_URL=https://…/realms/scnehaux/protocol/openid-connect/certs"
-set "ORGANIZATION_TENANT_CLAIM=tenant_id"
-set "ORGANIZATION_PROVIDER_ROLE=organization-provider"
-go run ./cmd/organization-control
+Nothing above needs to be typed. `.env.example` carries a working local set; the `Makefile` loads
+`.env` and exports it to the child process.
+
+```text
+make env      copy .env.example to .env, once, without overwriting an existing one
+make issuer   terminal 1: the dev token issuer on 127.0.0.1:8098
+make run      terminal 2: the service on 127.0.0.1:8099
+make token    save a provider token to .token
+make api P=/v1/tenants/<id>
+make api M=POST P=/v1/organizations B=body.json
+make gates    everything CI runs: fmt vet build arch tidy test
 ```
 
-In PowerShell:
+The same commands work from `cmd.exe`, PowerShell, and a POSIX shell, which is the reason this
+exists. The environment used to live here as a PowerShell block; cmder is `cmd.exe`, where
+`$env:NAME = 'value'` is not an assignment, and the line fails with *"The filename, directory name, or
+volume label syntax is incorrect"* — a message about paths for what is a shell mismatch, so the
+reader goes looking at the DSN.
 
-```powershell
-$env:ORGANIZATION_TENANT_DATABASE_URL   = 'postgres://organization_app:…@localhost:5432/organization_control_dev?sslmode=disable'
-$env:ORGANIZATION_PROVIDER_DATABASE_URL = 'postgres://organization_provider_app:…@localhost:5432/organization_control_dev?sslmode=disable'
-$env:ORGANIZATION_TOKEN_ISSUER   = 'https://…/realms/scnehaux'
-$env:ORGANIZATION_TOKEN_AUDIENCE = 'organization-control'
-$env:ORGANIZATION_JWKS_URL       = 'https://…/realms/scnehaux/protocol/openid-connect/certs'
-$env:ORGANIZATION_TENANT_CLAIM   = 'tenant_id'
-$env:ORGANIZATION_PROVIDER_ROLE  = 'organization-provider'
+**`.env` is loaded by `make`, never by the binary.** The service still reads only the process
+environment, so a deployment is configured exactly as the table above describes and no code path
+looks for a file. `.env` is gitignored; `.env.example` is committed.
 
-go run ./cmd/organization-control
-```
+**`-include`, not `include`.** `fmt`, `vet`, `build`, `arch`, and `test-unit` must work in a fresh
+clone with no `.env`, and in CI, where the environment comes from the workflow.
+
+The optional variables are listed in `.env.example`, commented out, so the knobs are discoverable
+without being set.
 
 ### Three muxes, not one with an exemption list
 
@@ -252,9 +257,24 @@ one the only things reachable by hand are the two probes and the anonymous invit
 accepts, so the service under test runs completely unmodified — same binary, same chain, same
 verifier.
 
-```powershell
-go run -tags devissuer ./cmd/organization-devissuer   # prints the environment and the curl commands
+```text
+make issuer                    # terminal 1, leave it open
+make run                       # terminal 2
+make token                     # terminal 3: saves a provider token to .token
+make api P=/v1/tenants/<id>
+make api M=POST P=/v1/organizations B=body.json
+make token ROLE=tenant         # a Tenant-scoped token, refused 403 on a provider route
 ```
+
+`make api` sends `X-Administrative-Reason` because every provider-scoped call writes a row to
+`audit.privileged_access` and the service answers 400 rather than recording an unexplained one.
+`KEY=<anything>` adds an `Idempotency-Key`. The body is a **file**, not an argument: quoting JSON on
+a `cmd` line means escaping every double quote, and one missed backslash produces a 400 that looks
+like the service rejecting a valid request.
+
+The issuer binds its port before printing anything. A second copy fails on the bind, and printing the
+instructions first meant a wall of text followed by an error, which reads as the service refusing
+something rather than as *this is already running*.
 
 **The build tag is the safety property.** `//go:build devissuer` keeps it out of `go build ./...`,
 out of CI, and out of any image. It signs tokens for whoever asks, which is what makes it useful and

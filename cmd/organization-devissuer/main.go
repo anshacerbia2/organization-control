@@ -26,9 +26,13 @@
 //
 // # Use
 //
-//	Terminal 1:  go run -tags devissuer ./cmd/organization-devissuer
-//	Terminal 2:  (copy the environment block it prints, then start the service)
-//	Terminal 3:  (copy the curl commands it prints)
+//	Terminal 1:  make issuer
+//	Terminal 2:  make run
+//	Terminal 3:  make token  &&  make api P=/v1/tenants/<id>
+//
+// The service's environment lives in .env, loaded by the Makefile. This tool no longer prints an
+// environment block: printing one meant it had to be typed or pasted, in whichever shell syntax the
+// block happened to be written in.
 package main
 
 import (
@@ -41,6 +45,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -173,15 +178,22 @@ func main() {
 		_, _ = fmt.Fprintln(w, token)
 	})
 
+	// Bind before printing anything. A second copy of this tool fails here, and printing the
+	// instructions first made that failure read as the service refusing something.
+	listener, err := net.Listen("tcp", listen)
+	if err != nil {
+		log.Fatalf("cannot listen on %s: %v\n\nThe issuer is most likely already running, so there is "+
+			"nothing to start -- just fetch a token from http://%s/token?role=provider", listen, err, listen)
+	}
+
 	banner(kid)
 
 	server := &http.Server{
-		Addr:              listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("listen: %v", err)
+	if err := server.Serve(listener); err != nil {
+		log.Fatalf("serve: %v", err)
 	}
 }
 
@@ -229,89 +241,27 @@ func thumbprint(pub *rsa.PublicKey) string {
 	return raw(sum[:8])
 }
 
+// banner says what is running and where the instructions are. It used to print the whole
+// walkthrough: eight lines of environment and forty of PowerShell, on every start.
+//
+// That was wrong twice over. The environment belongs in .env, where `make run` reads it and
+// nobody types it; and the PowerShell was unusable in cmder, which is cmd.exe, so the reader
+// got "The filename, directory name, or volume label syntax is incorrect" -- a message about
+// paths for what was a shell mismatch, which sends them to look at the DSN.
 func banner(kid string) {
 	out := os.Stdout
 	line := strings.Repeat("=", 78)
 
-	fmt.Fprintf(out, "%s\ndev issuer on http://%s   alg=%s   kid=%s   tokens live %s\n%s\n\n",
+	fmt.Fprintf(out, "%s\ndev issuer on http://%s   alg=%s   kid=%s   tokens live %s\n%s\n",
 		line, listen, algorithm, kid, ttl, line)
 
-	fmt.Fprint(out, "1. Start the service in another terminal with this environment:\n\n")
-	fmt.Fprintf(out, "$env:ORGANIZATION_TENANT_DATABASE_URL   = 'postgres://organization_app:Scnehaux@localhost:5432/organization_control_dev?sslmode=disable'\n")
-	fmt.Fprintf(out, "$env:ORGANIZATION_PROVIDER_DATABASE_URL = 'postgres://organization_provider_app:Scnehaux@localhost:5432/organization_control_dev?sslmode=disable'\n")
-	fmt.Fprintf(out, "$env:ORGANIZATION_TOKEN_ISSUER   = '%s'\n", issuer)
-	fmt.Fprintf(out, "$env:ORGANIZATION_TOKEN_AUDIENCE = '%s'\n", audience)
-	fmt.Fprintf(out, "$env:ORGANIZATION_JWKS_URL       = '%s/certs'\n", issuer)
-	fmt.Fprintf(out, "$env:ORGANIZATION_TENANT_CLAIM   = '%s'\n", tenantClaim)
-	fmt.Fprintf(out, "$env:ORGANIZATION_PROVIDER_ROLE  = '%s'\n", providerRole)
-	fmt.Fprintf(out, "$env:ORGANIZATION_LISTEN_ADDRESS = '127.0.0.1:8099'\n")
-	fmt.Fprintf(out, "go run ./cmd/organization-control\n\n")
-
-	fmt.Fprint(out, "2. Then in a third terminal, get a provider token and use it:\n\n")
-	fmt.Fprintf(out, "$t = (Invoke-WebRequest 'http://%s/token?role=provider' -UseBasicParsing).Content.Trim()\n", listen)
-	fmt.Fprint(out, "$h = @{ Authorization = \"Bearer $t\"; 'X-Administrative-Reason' = 'driving the service by hand' }\n\n")
-
-	fmt.Fprint(out, "   # create an Organization to sponsor the Tenant\n")
-	fmt.Fprint(out, "   $org = Invoke-RestMethod -Uri 'http://127.0.0.1:8099/v1/organizations' -Method POST -Headers $h `\n")
-	fmt.Fprint(out, "     -ContentType 'application/json' -Body '{\"display_name\":\"Acme\",\"classification\":\"customer\"}'\n")
-	fmt.Fprint(out, "   $org\n\n")
-
-	fmt.Fprint(out, "   # request a Tenant under it -- this is the path that did not exist before\n")
-	fmt.Fprint(out, "   $body = @{ organization_id = $org.organization_id; display_name = 'Acme Production'\n")
-	fmt.Fprint(out, "              isolation_profile = 'silo'; residency_region = 'ap-southeast-3' } | ConvertTo-Json\n")
-	fmt.Fprint(out, "   $t1 = Invoke-RestMethod -Uri 'http://127.0.0.1:8099/v1/tenants' -Method POST -Headers $h `\n")
-	fmt.Fprint(out, "     -ContentType 'application/json' -Body $body\n")
-	fmt.Fprint(out, "   $t1\n\n")
-
-	fmt.Fprint(out, "   # it is 'requested', not 'active'. Activating now must be refused:\n")
-	fmt.Fprint(out, "   Invoke-WebRequest -Uri \"http://127.0.0.1:8099/v1/tenants/$($t1.tenant.tenant_id)/activate\" `\n")
-	fmt.Fprint(out, "     -Method POST -Headers $h -ContentType 'application/json' -Body '{\"expected_version\":1}'\n\n")
-
-	fmt.Fprint(out, "   # record the dispatch, then report the boundary built, then activate\n")
-	fmt.Fprint(out, "   Invoke-RestMethod -Uri \"http://127.0.0.1:8099/v1/tenants/$($t1.tenant.tenant_id)/provisioning\" `\n")
-	fmt.Fprint(out, "     -Method POST -Headers $h -ContentType 'application/json' -Body '{\"expected_version\":1}'\n")
-	fmt.Fprint(out, "   $done = @{ correlation_id = $t1.correlation_id; detail = 'boundary built' } | ConvertTo-Json\n")
-	fmt.Fprint(out, "   Invoke-RestMethod -Uri 'http://127.0.0.1:8099/v1/provisioning/realized' -Method POST -Headers $h `\n")
-	fmt.Fprint(out, "     -ContentType 'application/json' -Body $done\n")
-	fmt.Fprint(out, "   Invoke-RestMethod -Uri \"http://127.0.0.1:8099/v1/tenants/$($t1.tenant.tenant_id)/activate\" `\n")
-	fmt.Fprint(out, "     -Method POST -Headers $h -ContentType 'application/json' -Body '{\"expected_version\":2}'\n\n")
-
-	fmt.Fprint(out, "   # read it back\n")
-	fmt.Fprint(out, "   Invoke-RestMethod -Uri \"http://127.0.0.1:8099/v1/tenants/$($t1.tenant.tenant_id)\" -Headers $h\n\n")
-
-	fmt.Fprint(out, "3. Retry the same mutation safely -- send it twice with one Idempotency-Key:\n\n")
-	fmt.Fprint(out, "   $key = [guid]::NewGuid().ToString()\n")
-	fmt.Fprint(out, "   $hk = $h + @{ 'Idempotency-Key' = $key }\n")
-	fmt.Fprint(out, "   $b2 = @{ organization_id = $org.organization_id; display_name = 'Retried'\n")
-	fmt.Fprint(out, "            isolation_profile = 'pooled' } | ConvertTo-Json\n")
-	fmt.Fprint(out, "   $a = Invoke-RestMethod -Uri 'http://127.0.0.1:8099/v1/tenants' -Method POST -Headers $hk `\n")
-	fmt.Fprint(out, "     -ContentType 'application/json' -Body $b2\n")
-	fmt.Fprint(out, "   $b = Invoke-RestMethod -Uri 'http://127.0.0.1:8099/v1/tenants' -Method POST -Headers $hk `\n")
-	fmt.Fprint(out, "     -ContentType 'application/json' -Body $b2\n")
-	fmt.Fprint(out, "   $a.tenant.tenant_id -eq $b.tenant.tenant_id   # True: one Tenant, not two\n\n")
-	fmt.Fprint(out, "   The second response carries 'Idempotent-Replay: true'. The same key with a\n")
-	fmt.Fprint(out, "   different body is 409 rather than a replay, and a key on a GET is 400.\n\n")
-
-	fmt.Fprint(out, "4. Refusals worth seeing for yourself:\n\n")
-	fmt.Fprintf(out, "   role=tenant on a provider route  -> 403\n")
-	fmt.Fprintf(out, "     $tt = (Invoke-WebRequest 'http://%s/token?role=tenant&tenant_id=11111111-1111-4111-8111-11111111111a' -UseBasicParsing).Content.Trim()\n", listen)
-
-	// 403, not 401, and the difference is the point: the token is authentic, so "we do not know who
-	// you are" would be false. Its claims confer no scope. Asserted by
-	// TestAuthenticateRefusesBothAuthorities, and this line said 401 until the by-hand walkthrough
-	// disagreed with it.
-	fmt.Fprintf(out, "   role=both                        -> 403: the token is authentic, and its\n")
-	fmt.Fprintf(out, "                                      claims confer no scope. Cross-Tenant\n")
-	fmt.Fprintf(out, "                                      authority and authority over one Tenant\n")
-	fmt.Fprintf(out, "                                      are refused rather than resolved to either\n")
-	fmt.Fprintf(out, "     $tb = (Invoke-WebRequest 'http://%s/token?role=both' -UseBasicParsing).Content.Trim()\n", listen)
-	fmt.Fprintf(out, "   provider token, no reason header -> 400 naming the header\n")
-	fmt.Fprintf(out, "   a body with an unknown field     -> 400, because DisallowUnknownFields is on\n")
-	fmt.Fprintf(out, "   activating a 'requested' Tenant  -> 409: the state machine is consulted\n")
-	fmt.Fprintf(out, "                                      before the preconditions, so the answer\n")
-	fmt.Fprintf(out, "                                      names the transition rather than a check\n")
-	fmt.Fprintf(out, "                                      that never ran. 412 is what you get once\n")
-	fmt.Fprintf(out, "                                      it IS provisioning and unconfirmed\n\n")
-
+	fmt.Fprint(out, "Leave this window open. In another terminal, from the repository root:\n\n")
+	fmt.Fprint(out, "    make run                                the service on 127.0.0.1:8099\n")
+	fmt.Fprint(out, "    make token                              save a provider token\n")
+	fmt.Fprint(out, "    make api P=/v1/tenants/<id>             call it\n")
+	fmt.Fprint(out, "    make api M=POST P=/v1/organizations B=body.json\n\n")
+	fmt.Fprintf(out, "Tokens directly: http://%s/token?role=provider  (also tenant, both)\n", listen)
+	fmt.Fprint(out, "The walkthrough -- provisioning, idempotent retries, and the refusals worth\n")
+	fmt.Fprint(out, "seeing for yourself -- is README.md, \"Driving the service by hand\".\n")
 	fmt.Fprintf(out, "%s\n", line)
 }

@@ -19,3 +19,9 @@ atlas.sum.tmp
 *.swp
 .DS_Store
 Thumbs.db
+
+# Local development environment. .env.example is committed; the real one is not --
+# it holds credentials, and a template that overwrites working local values is a loss.
+.env
+.token
+.fmt.tmp
