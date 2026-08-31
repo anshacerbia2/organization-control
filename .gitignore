@@ -25,3 +25,9 @@ Thumbs.db
 .env
 .token
 .fmt.tmp
+
+# Request bodies typed while driving the service by hand. `make api` takes the body as a
+# file, so these collect in the root. Ignored by name rather than by pattern: arch.json
+# is tracked, and a *.json rule would hide it.
+/body.json
+/v1.json
