@@ -228,6 +228,40 @@ The anonymous route reads nothing. SAD-004 §5.5 requires an invitation lookup t
 for an absent, expired, revoked, accepted, and valid token, and the only construction where that
 holds for the status code, the body, *and* the response time is one that looks nothing up.
 
+### Driving the service by hand
+
+Every authenticated route needs a token from the issuer named in `ORGANIZATION_JWKS_URL`, so without
+one the only things reachable by hand are the two probes and the anonymous invitation lookup.
+`cmd/organization-devissuer` closes that: it publishes a key set and mints tokens the real verifier
+accepts, so the service under test runs completely unmodified — same binary, same chain, same
+verifier.
+
+```powershell
+go run -tags devissuer ./cmd/organization-devissuer   # prints the environment and the curl commands
+```
+
+**The build tag is the safety property.** `//go:build devissuer` keeps it out of `go build ./...`,
+out of CI, and out of any image. It signs tokens for whoever asks, which is what makes it useful and
+why it must never run anywhere real — so it is absent from the standard build rather than disabled by
+a flag somebody could leave on.
+
+**Two things it discovered, both of which apply to the real realm.**
+
+`verify` permits exactly one algorithm, **PS256**, and verifies with `SignPSS` at
+`PSSSaltLengthEqualsHash`. An RS256 token is well formed, correctly claimed, and refused.
+
+`verify` rejects any RSA modulus below **3072 bits**, and it does so while parsing the key set: a
+2048-bit key is discarded, the set then carries no usable key, and every verification fails as
+`kid unknown and the key set could not be reloaded`. That message is about key distribution and the
+cause is key size. **A Keycloak realm signing with 2048-bit keys will have every token refused by
+this service, and the refusal will not say why** — worth settling before the Keycloak
+proof-of-concept rather than during it.
+
+Both are now asserted by `internal/httpapi/token_endtoend_test.go`, which covers the one
+authentication path the rest of the package does not: key material fetched from a JWKS endpoint over
+HTTP. `authentication_test.go` signs real tokens against a real verifier but supplies the key with
+`verify.StaticKeys`, so `verify.NewJWKS` and the document it parses were never exercised here.
+
 ### Tenant intake and provisioning correlation
 
 A Tenant is created in `requested` and reaches `active` only through the provisioning system. Six
