@@ -198,6 +198,22 @@ rests on ordinary tenant traffic being unable to authenticate as the cross-Tenan
 reused for both would compile, pass every test that does not inspect `current_user`, and silently run
 the estate's tenant traffic under the role that can read every Tenant.
 
+In `cmd.exe` — which is what cmder gives you — the same thing, with `set "NAME=value"` quoted so a
+trailing space on the line cannot become part of a DSN:
+
+```bat
+set "ORGANIZATION_TENANT_DATABASE_URL=postgres://organization_app:…@localhost:5432/organization_control_dev?sslmode=disable"
+set "ORGANIZATION_PROVIDER_DATABASE_URL=postgres://organization_provider_app:…@localhost:5432/organization_control_dev?sslmode=disable"
+set "ORGANIZATION_TOKEN_ISSUER=https://…/realms/scnehaux"
+set "ORGANIZATION_TOKEN_AUDIENCE=organization-control"
+set "ORGANIZATION_JWKS_URL=https://…/realms/scnehaux/protocol/openid-connect/certs"
+set "ORGANIZATION_TENANT_CLAIM=tenant_id"
+set "ORGANIZATION_PROVIDER_ROLE=organization-provider"
+go run ./cmd/organization-control
+```
+
+In PowerShell:
+
 ```powershell
 $env:ORGANIZATION_TENANT_DATABASE_URL   = 'postgres://organization_app:…@localhost:5432/organization_control_dev?sslmode=disable'
 $env:ORGANIZATION_PROVIDER_DATABASE_URL = 'postgres://organization_provider_app:…@localhost:5432/organization_control_dev?sslmode=disable'
