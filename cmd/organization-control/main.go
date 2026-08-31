@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -301,10 +302,20 @@ func run() error {
 		return fmt.Errorf("http server: %w", err)
 	}
 
+	// Bind here rather than inside the goroutine, so "listening" is logged after the port is
+	// actually held. ListenAndServe binds and serves in one call, so the log line preceded the bind
+	// and a port already in use produced "listening on 127.0.0.1:8099" followed by the bind failure
+	// — a startup log that says the service is up when it never came up. An orchestrator reading
+	// logs to decide readiness would believe the first line.
+	listener, err := net.Listen("tcp", cfg.ListenAddress)
+	if err != nil {
+		return fmt.Errorf("bind %s: %w", cfg.ListenAddress, err)
+	}
+	logger.Info("listening", slog.String("address", listener.Addr().String()))
+
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("listening", slog.String("address", cfg.ListenAddress))
-		if listenErr := server.ListenAndServe(); listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
+		if listenErr := server.Serve(listener); listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
 			serveErr <- listenErr
 			return
 		}

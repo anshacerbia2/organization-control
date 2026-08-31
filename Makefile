@@ -29,7 +29,7 @@ ROLE ?= provider
 
 .DEFAULT_GOAL := help
 .PHONY: help env issuer run token api build fmt vet test test-unit test-integration \
-        gates tidy arch migrate-status clean
+        gates tidy arch stop migrate-status clean
 
 help:
 	@echo Targets:
@@ -39,6 +39,7 @@ help:
 	@echo   make token             save a provider token to $(TOKEN_FILE)
 	@echo   make api P=/v1/tenants/ID              GET a path with that token
 	@echo   make api M=POST P=/v1/organizations B=body.json    send a body
+	@echo   make stop              free $(ISSUER) and $(ADDR) after a stale run
 	@echo   make gates             everything CI runs: fmt vet build arch tidy test
 	@echo   make test-unit         no database needed
 	@echo   make test-integration  requires .env and a running PostgreSQL
@@ -133,6 +134,20 @@ test-integration:
 
 gates: fmt vet build arch tidy test
 	@echo All gates passed.
+
+# Both ports are loopback and both processes are development-only, so this is safe in a way
+# it would not be against anything shared. It exists because the alternative is netstat,
+# reading a PID out of a column, and taskkill -- three steps to undo one stale `make run`.
+#
+# The loop is parenthesised and `& exit 0` sits outside it, because `for /f` over a command
+# that printed nothing exits 1: with both ports already free the target failed while having
+# done exactly what was asked. Inside the `do` body the `& exit 0` runs per iteration, so
+# with zero iterations it never ran at all -- which is how it was written first.
+#
+# The second line is the real check, and it fails if anything still holds either port.
+stop:
+	@(for /f "tokens=5" %%p in ('netstat -ano ^| findstr /r /c:"$(ISSUER) .*LISTENING" /c:"$(ADDR) .*LISTENING"') do @(taskkill /f /pid %%p >nul 2>&1 && echo Stopped pid %%p)) & exit 0
+	@netstat -ano | findstr /r /c:"$(ISSUER) .*LISTENING" /c:"$(ADDR) .*LISTENING" >nul && (echo Still listening -- something else holds $(ISSUER) or $(ADDR) && exit 1) || echo Both ports free.
 
 migrate-status:
 	atlas migrate status --env local
