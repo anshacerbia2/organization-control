@@ -31,3 +31,6 @@ Thumbs.db
 # is tracked, and a *.json rule would hide it.
 /body.json
 /v1.json
+
+# The PR body, written locally and read by `gh pr create`. Not repository content.
+/.pr-body.md
