@@ -27,6 +27,12 @@ TOKEN_FILE ?= .token
 # yourself is the difference between trusting the boundary and assuming it.
 ROLE ?= provider
 
+# The Tenant a ROLE=tenant token administers. Defaults to the seeded Tenant A; override with
+# TENANT=<uuid>. Required by the issuer, which is why it is a variable rather than a note:
+# `make token ROLE=tenant` without it was refused, and the refusal was reported as the issuer
+# being unreachable.
+TENANT ?= 11111111-1111-4111-8111-11111111111a
+
 .DEFAULT_GOAL := help
 .PHONY: help env issuer run token api build fmt vet test test-unit test-integration \
         gates tidy arch stop migrate-status clean
@@ -37,6 +43,8 @@ help:
 	@echo   make issuer            terminal 1: the dev token issuer on $(ISSUER)
 	@echo   make run               terminal 2: the service on $(ADDR)
 	@echo   make token             save a provider token to $(TOKEN_FILE)
+	@echo   make token ROLE=tenant a Tenant-scoped token: 403 on a provider route
+	@echo   make token ROLE=both   authentic, confers no scope: also 403
 	@echo   make api P=/v1/tenants/ID              GET a path with that token
 	@echo   make api M=POST P=/v1/organizations B=body.json    send a body
 	@echo   make stop              free $(ISSUER) and $(ADDR) after a stale run
@@ -68,8 +76,16 @@ run:
 # while parsing the line -- before the `set` on that same line has run. The header
 # arrived as "Bearer " with nothing after it, and the service answered 401, which reads
 # as the token being rejected rather than as never having been sent.
+#
+# --fail-with-body, not -f: the issuer explains its own refusals in the body, and -f
+# discarded that. `make token ROLE=tenant` was answered "role=tenant needs a tenant_id"
+# and reported here as "Could not reach the issuer" -- a guess printed over the answer.
+# Only ROLE=tenant carries it. ROLE=both mints its own Tenant claim, because its purpose is
+# to be refused: provider authority and authority over one Tenant in the same token.
+TENANT_QUERY = $(if $(filter tenant,$(ROLE)),&tenant_id=$(TENANT),)
+
 token:
-	@curl.exe -sf "http://$(ISSUER)/token?role=$(ROLE)" -o $(TOKEN_FILE).raw || (echo Could not reach the issuer on http://$(ISSUER) -- run: make issuer && exit 1)
+	@curl.exe -sS --fail-with-body "http://$(ISSUER)/token?role=$(ROLE)$(TENANT_QUERY)" -o $(TOKEN_FILE).raw || (echo Issuer refused, or is not running on http://$(ISSUER) -- start it with: make issuer && type $(TOKEN_FILE).raw 2>nul && del $(TOKEN_FILE).raw 2>nul && exit 1)
 	@for /f "delims=" %%t in ($(TOKEN_FILE).raw) do @echo Authorization: Bearer %%t> $(TOKEN_FILE)
 	@del $(TOKEN_FILE).raw
 	@echo Saved a $(ROLE) token to $(TOKEN_FILE)
