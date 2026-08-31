@@ -49,6 +49,7 @@ help:
 	@echo   make api M=POST P=/v1/organizations B=body.json    send a body
 	@echo   make stop              free $(ISSUER) and $(ADDR) after a stale run
 	@echo   make gates             everything CI runs: fmt vet build arch tidy test
+	@echo   make test-ci           the suite against a CI-shaped database, not the dev one
 	@echo   make test-unit         no database needed
 	@echo   make test-integration  requires .env and a running PostgreSQL
 	@echo   make migrate-status    what Atlas thinks the database is at
@@ -147,6 +148,62 @@ test-unit:
 test-integration:
 	@if not exist .env (echo No .env yet. Run: make env && exit 1)
 	set REQUIRE_INTEGRATION=1&& go test -race -p 1 ./internal/...
+
+# ---------------------------------------------------------------------------
+# Reproducing CI locally
+# ---------------------------------------------------------------------------
+#
+# CI failed every structural assertion in internal/controldb while everything passed here,
+# because the tests rebuilt the DSN with a hardcoded owner of `postgres` and CI's owner is
+# `organization`. Nothing local could have caught that: the development database happens to be
+# owned by postgres. This target is the difference between reasoning about a CI failure and
+# reproducing it.
+#
+# It builds what the workflow's service container builds -- a database owned by a role that is
+# NOT the local owner -- and seeds it with scripts/ci-fixture.sql, the same file CI runs.
+#
+# The runtime role passwords are the LOCAL ones, passed into the fixture, because those roles
+# belong to the cluster rather than to a database: writing CI's values would rewrite the
+# credentials .env depends on. The names and the ownership are what differ from local, and
+# they are the part that found the bug.
+#
+# CI_DATABASE is dropped and recreated on every run, the way a fresh container is. It is a
+# dedicated test database and must never be pointed at anything else.
+
+CI_DATABASE ?= organization_test
+CI_OWNER ?= organization
+CI_OWNER_PASSWORD ?= organization
+CI_DSN ?= postgres://$(CI_OWNER):$(CI_OWNER_PASSWORD)@localhost:5432/$(CI_DATABASE)?sslmode=disable
+
+# The superuser connection, used only to create the owner and the database. Taken from .env so
+# there is one place holding local credentials.
+ADMIN_DSN ?= $(TEST_DATABASE_URL)
+
+.PHONY: ci-db test-ci
+
+# Every psql call puts its options BEFORE the connection string and passes it with -d.
+#
+# The Windows psql stops parsing options at the first positional argument, so
+# `psql "$DSN" -c "..."` warns "extra command-line argument -c ignored" and then reads an empty
+# stdin. It exits 0. The first version of this target did exactly that: nothing it claimed to do
+# happened, and it reported success because an already-migrated organization_test was still
+# lying around from a manual run. A target that silently does nothing is worse than no target.
+ci-db:
+	@if "$(ADMIN_DSN)"=="" (echo No TEST_DATABASE_URL. Run: make env && exit 1)
+	@echo Creating $(CI_OWNER) and $(CI_DATABASE) the way the CI container does...
+	@psql -v ON_ERROR_STOP=1 -q -c "DO $$$$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='$(CI_OWNER)') THEN CREATE ROLE $(CI_OWNER) LOGIN SUPERUSER PASSWORD '$(CI_OWNER_PASSWORD)'; ELSE ALTER ROLE $(CI_OWNER) LOGIN SUPERUSER PASSWORD '$(CI_OWNER_PASSWORD)'; END IF; END $$$$;" -d "$(ADMIN_DSN)"
+	@psql -v ON_ERROR_STOP=1 -q -c "DROP DATABASE IF EXISTS $(CI_DATABASE);" -c "CREATE DATABASE $(CI_DATABASE) OWNER $(CI_OWNER);" -d "$(ADMIN_DSN)"
+	@set "ORGANIZATION_MIGRATION_DATABASE_URL=$(CI_DSN)"&& go run ./cmd/organization-migrate -stage=pre
+# `dir /b /on` rather than a plain wildcard: migrations apply in filename order, and cmd's
+# `for %%f in (*.sql)` walks directory order, which is not the same thing and fails as a
+# missing-column error in whichever migration ran too early.
+	@for /f "delims=" %%f in ('dir /b /on migrations\*.sql') do @(psql -v ON_ERROR_STOP=1 -q -f migrations\%%f -d "$(CI_DSN)" && echo applied %%f) || exit 1
+	@set "ORGANIZATION_MIGRATION_DATABASE_URL=$(CI_DSN)"&& go run ./cmd/organization-migrate -stage=post
+	@psql -v ON_ERROR_STOP=1 -q -v runtime_password=$(TEST_RUNTIME_PASSWORD) -v provider_password=$(TEST_PROVIDER_PASSWORD) -f scripts/ci-fixture.sql -d "$(CI_DSN)"
+	@echo $(CI_DATABASE) is ready, owned by $(CI_OWNER).
+
+test-ci: ci-db
+	@set "TEST_DATABASE_URL=$(CI_DSN)"&& set "REQUIRE_INTEGRATION=1"&& go test -race -count=1 -p 1 ./internal/...
 
 gates: fmt vet build arch tidy test
 	@echo All gates passed.
