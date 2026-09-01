@@ -27,6 +27,15 @@ type Caller struct {
 	// Tenant is the Tenant this caller administers. Nil for a provider caller.
 	Tenant id.UUID
 
+	// Consumer names the registered projection consumer this caller is, and is empty for every
+	// other caller.
+	//
+	// It comes from the token and never from a request body. The fresh check is metered per
+	// consumer, so a consumer able to name itself in the body could spend another consumer's
+	// budget -- and the meter exists to make an over-eager consumer visible, which it cannot do
+	// if the counter it increments is chosen by the caller.
+	Consumer string
+
 	// Provider is set when the caller holds cross-Tenant provider authority.
 	//
 	// A boolean rather than a role list because this package makes no authorization decision: it
@@ -115,6 +124,19 @@ func ResolveScope(next http.Handler) http.Handler {
 
 // resolve is the caller-to-scope rule, separated so it can be exercised directly.
 func resolve(caller Caller, correlation id.UUID) (db.Scope, error) {
+	if caller.Consumer != "" {
+		if caller.Provider || !caller.Tenant.IsNil() {
+			return db.Scope{}, errors.New("httpapi: a consumer caller must carry neither provider authority nor a Tenant")
+		}
+		// A consumer reads across Tenants -- it asks about whichever Tenant its caller is acting
+		// in -- so the isolation scope it needs is the provider one. That is broader than it
+		// should be, and the narrowing is a database change rather than a transport one: the
+		// fresh check reads two tables and writes one counter, so a role granted exactly those
+		// three privileges would fit. Recorded in ROADMAP.md; what is fixed here is the HTTP
+		// authority, so a consumer token reaches the context routes and nothing else.
+		return db.ProviderScope(caller.Subject, correlation)
+	}
+
 	if caller.Provider {
 		// A provider caller carrying a Tenant is refused rather than narrowed to it. The two
 		// readings — cross-Tenant authority, or authority over that one Tenant — differ in the

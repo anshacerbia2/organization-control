@@ -135,6 +135,44 @@ func requireProvider(w http.ResponseWriter, r *http.Request) (db.Scope, bool) {
 	return scope, true
 }
 
+// requireFreshCheckCaller admits the two authorities that may perform an authoritative context
+// check, and returns which consumer is accountable for it.
+//
+// A registered consumer is admitted without the administrative reason header, and a provider is
+// not. That asymmetry is the point rather than an exemption: a provider performing a fresh check
+// is doing something out of the ordinary and owes an explanation, while a consumer doing it is
+// the designed traffic -- and its accountability is the per-consumer meter, which cannot be
+// forgotten the way a header can. Demanding a reason on every consumer call would produce a
+// million rows saying "routine".
+func requireFreshCheckCaller(w http.ResponseWriter, r *http.Request) (db.Scope, string, bool) {
+	scope, ok := db.ScopeFrom(r.Context())
+	if !ok {
+		platform.Problem(w, r, platform.Internal, "The request could not be completed")
+		return db.Scope{}, "", false
+	}
+	caller, ok := CallerFrom(r.Context())
+	if !ok {
+		platform.Problem(w, r, platform.AuthenticationRequired, "The request carries no authenticated caller")
+		return db.Scope{}, "", false
+	}
+
+	if caller.Consumer != "" {
+		return scope, caller.Consumer, true
+	}
+
+	if !scope.IsProvider() {
+		platform.Problem(w, r, platform.Forbidden,
+			"This route requires provider authority or a registered consumer, and the caller is scoped to a single Tenant")
+		return db.Scope{}, "", false
+	}
+	if strings.TrimSpace(r.Header.Get(ReasonHeader)) == "" {
+		platform.Problem(w, r, platform.ValidationFailed,
+			"A cross-Tenant request must carry the "+ReasonHeader+" header")
+		return db.Scope{}, "", false
+	}
+	return scope, "", true
+}
+
 // requireTenant refuses a provider caller on a tenant-scoped route.
 //
 // Refused rather than served, even though provider authority is the broader one. A provider caller

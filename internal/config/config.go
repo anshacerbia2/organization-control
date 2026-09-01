@@ -74,6 +74,15 @@ type Config struct {
 	TenantClaim  string
 	ProviderRole string
 
+	// ConsumerRole and ConsumerClaim describe a registered projection consumer: the realm role it
+	// carries, and the claim naming which consumer it is.
+	//
+	// Optional, and only together. Left unset, consumer authority does not exist and the two
+	// context checks stay provider-only. Set, they let a consumer ask whether one principal holds
+	// context in one Tenant without holding the authority to administer every Tenant.
+	ConsumerRole  string
+	ConsumerClaim string
+
 	// The three provisioning bounds of TDD-organization-control-003 §Configuration.
 	//
 	// ProvisioningTimeout is the age at which a request with no realized status becomes
@@ -134,6 +143,16 @@ func Load() (Config, error) {
 			"ORGANIZATION_TENANT_DATABASE_URL and ORGANIZATION_PROVIDER_DATABASE_URL are identical, "+
 				"so both pools would authenticate as one role and the isolation boundary between "+
 				"them would exist only in the Go type system"))
+	}
+
+	cfg.ConsumerRole = strings.TrimSpace(os.Getenv("ORGANIZATION_CONSUMER_ROLE"))
+	cfg.ConsumerClaim = strings.TrimSpace(os.Getenv("ORGANIZATION_CONSUMER_CLAIM"))
+	// Refused at startup rather than left to fail per request. A role with no claim would
+	// authenticate a consumer the meter cannot name, and a claim with no role would be read by
+	// nothing -- both are silent when they are wrong.
+	if (cfg.ConsumerRole == "") != (cfg.ConsumerClaim == "") {
+		problems = append(problems, errors.New(
+			"ORGANIZATION_CONSUMER_ROLE and ORGANIZATION_CONSUMER_CLAIM must be set together or not at all"))
 	}
 
 	cfg.ListenAddress = stringOr("ORGANIZATION_LISTEN_ADDRESS", ":8080")

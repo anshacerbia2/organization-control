@@ -3,6 +3,10 @@ package httpapi
 // The provider-scoped routes. Every handler here calls `requireProvider`, which refuses a
 // tenant-scoped caller and refuses a request carrying no administrative reason.
 //
+// The two context checks are the exception, and they use `requireFreshCheckCaller`: a registered
+// consumer may perform them without provider authority, because asking whether one principal holds
+// context in one Tenant does not need the authority to administer every Tenant.
+//
 // These paths do name their target — a Tenant, an Organization, an Offboarding — because that is
 // what cross-Tenant authority means: the target cannot come from the caller's own binding, since a
 // provider caller has none. The identifier is therefore a parameter of the request rather than a
@@ -11,6 +15,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	platform "github.com/anshacerbia2/foundation-platform/httpapi"
@@ -778,15 +783,34 @@ func (h *handlers) switchEligible(w http.ResponseWriter, r *http.Request) {
 // the two require opposite responses.
 func (h *handlers) contextCheck(w http.ResponseWriter, r *http.Request,
 	apply func(*http.Request, occontext.VerifyRequest) (occontext.Decision, error)) {
-	if _, ok := requireProvider(w, r); !ok {
+	_, consumer, ok := requireFreshCheckCaller(w, r)
+	if !ok {
 		return
 	}
 	body, ok := decode[verifyContextRequest](w, r)
 	if !ok {
 		return
 	}
+
+	// A consumer's identity comes from its token. The body's consumer_id is accepted only from a
+	// provider, which may legitimately check on another consumer's behalf while explaining why.
+	//
+	// A consumer that could name itself in the body could spend another consumer's meter -- and
+	// the meter is the only thing that makes an over-eager consumer visible. A mismatch is
+	// refused rather than silently overridden: a caller sending a different identifier believes
+	// something about this request that is not true.
+	consumerID := body.ConsumerID
+	if consumer != "" {
+		if strings.TrimSpace(body.ConsumerID) != "" && body.ConsumerID != consumer {
+			platform.Problem(w, r, platform.Forbidden,
+				"The request names a different consumer than the token; a consumer may only check as itself")
+			return
+		}
+		consumerID = consumer
+	}
+
 	decision, err := apply(r, occontext.VerifyRequest{
-		ConsumerID:  body.ConsumerID,
+		ConsumerID:  consumerID,
 		TenantID:    body.TenantID,
 		PrincipalID: body.PrincipalID,
 	})

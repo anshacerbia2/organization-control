@@ -219,8 +219,10 @@ func run() error {
 	}
 
 	authenticationConfig := httpapi.AuthenticationConfig{
-		TenantClaim:  cfg.TenantClaim,
-		ProviderRole: cfg.ProviderRole,
+		TenantClaim:   cfg.TenantClaim,
+		ProviderRole:  cfg.ProviderRole,
+		ConsumerRole:  cfg.ConsumerRole,
+		ConsumerClaim: cfg.ConsumerClaim,
 	}
 
 	// The claim rule is this service's, because STD-IAM-002 §3.5 states it in terms of claims
@@ -247,6 +249,7 @@ func run() error {
 		slog.String("jwks_url", cfg.JWKSURL),
 		slog.String("tenant_claim", cfg.TenantClaim),
 		slog.String("provider_role", cfg.ProviderRole),
+		slog.String("consumer_role", cfg.ConsumerRole),
 		slog.Duration("max_skew", cfg.TokenMaxSkew))
 
 	// Scope resolution runs inside the chain's innermost position rather than as another Chain

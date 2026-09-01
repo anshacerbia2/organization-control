@@ -32,6 +32,20 @@ type AuthenticationConfig struct {
 	// ProviderRole is the realm role conferring cross-Tenant authority. Read from `realm_access.
 	// roles`, which is where Keycloak puts realm roles.
 	ProviderRole string
+
+	// ConsumerRole is the realm role of a registered projection consumer, and ConsumerClaim is
+	// the claim carrying which consumer it is.
+	//
+	// A third authority rather than reusing the provider role, because the two need different
+	// things: a provider administers every Tenant, while a consumer only asks whether one
+	// principal holds context in one Tenant. Handing a consumer the provider role to ask that
+	// question makes every product that performs a fresh check as privileged as the control
+	// plane, which is the blast radius the estate is trying not to create.
+	//
+	// Both are optional and go together: with ConsumerRole unset, consumer authority does not
+	// exist and the context routes remain provider-only.
+	ConsumerRole  string
+	ConsumerClaim string
 }
 
 // Authenticate builds the middleware that resolves a Caller from a bearer token.
@@ -54,6 +68,11 @@ func Authenticate(verifier TokenVerifier, cfg AuthenticationConfig) (Middleware,
 		return nil, errors.New("httpapi: the tenant claim name is required")
 	case strings.TrimSpace(cfg.ProviderRole) == "":
 		return nil, errors.New("httpapi: the provider role name is required")
+	case strings.TrimSpace(cfg.ConsumerRole) != "" && strings.TrimSpace(cfg.ConsumerClaim) == "":
+		// Refused rather than defaulted. A consumer role with no claim naming the consumer would
+		// authenticate a caller whose identity the meter cannot record, and the fresh-check meter
+		// exists precisely to be attributable.
+		return nil, errors.New("httpapi: a consumer role without a consumer claim would confer authority nobody can be metered for")
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -169,16 +188,20 @@ func callerFromClaims(claims verify.Claims, cfg AuthenticationConfig) (Caller, e
 		return Caller{}, errors.New("the token subject is not a valid identifier")
 	}
 
-	provider := false
+	provider, consumerRole := false, false
 	if raw, ok := claims.Raw("realm_access"); ok {
 		var access realmAccess
 		if err := json.Unmarshal(raw, &access); err != nil {
 			return Caller{}, errors.New("the realm_access claim is not an object")
 		}
 		for _, role := range access.Roles {
-			if role == cfg.ProviderRole {
+			switch role {
+			case cfg.ProviderRole:
 				provider = true
-				break
+			case cfg.ConsumerRole:
+				// Only when configured. An empty ConsumerRole would otherwise match a token
+				// carrying an empty role string.
+				consumerRole = cfg.ConsumerRole != ""
 			}
 		}
 	}
@@ -186,6 +209,29 @@ func callerFromClaims(claims verify.Claims, cfg AuthenticationConfig) (Caller, e
 	rawTenant, hasTenant := claims.String(cfg.TenantClaim)
 	rawTenant = strings.TrimSpace(rawTenant)
 	hasTenant = hasTenant && rawTenant != ""
+
+	if consumerRole {
+		// Exclusive against both other authorities, in the same permissive-direction argument the
+		// provider/Tenant pair already makes: a token carrying consumer authority *and* provider
+		// authority has two readings that differ in what it may do, and resolving to either
+		// silently would mean the caller and the service disagree about the request.
+		if provider {
+			return Caller{}, errors.New(
+				"the token carries both consumer and provider authority, and the two confer different scopes")
+		}
+		if hasTenant {
+			return Caller{}, errors.New(
+				"the token carries consumer authority and a Tenant, and the two confer different scopes")
+		}
+		consumerID := ""
+		if raw, ok := claims.String(cfg.ConsumerClaim); ok {
+			consumerID = strings.TrimSpace(raw)
+		}
+		if consumerID == "" {
+			return Caller{}, errors.New("the token carries consumer authority but names no consumer")
+		}
+		return Caller{Subject: subject, Consumer: consumerID}, nil
+	}
 
 	if provider {
 		if hasTenant {
