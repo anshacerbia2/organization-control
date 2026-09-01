@@ -135,8 +135,8 @@ func requireProvider(w http.ResponseWriter, r *http.Request) (db.Scope, bool) {
 	return scope, true
 }
 
-// requireFreshCheckCaller admits the two authorities that may perform an authoritative context
-// check, and returns which consumer is accountable for it.
+// requireConsumerSelfOrProvider admits the two authorities that may act on a consumer's own
+// records, and returns which consumer the request is accountable to.
 //
 // A registered consumer is admitted without the administrative reason header, and a provider is
 // not. That asymmetry is the point rather than an exemption: a provider performing a fresh check
@@ -144,7 +144,11 @@ func requireProvider(w http.ResponseWriter, r *http.Request) (db.Scope, bool) {
 // the designed traffic -- and its accountability is the per-consumer meter, which cannot be
 // forgotten the way a header can. Demanding a reason on every consumer call would produce a
 // million rows saying "routine".
-func requireFreshCheckCaller(w http.ResponseWriter, r *http.Request) (db.Scope, string, bool) {
+// requested is the consumer the request names -- from the path or the body. A consumer caller may
+// only name itself: it is the whole reason the identity comes from the token, and a consumer able to
+// bootstrap, snapshot, or report progress for another consumer could rewrite that consumer's
+// recorded position and make a stale model look current.
+func requireConsumerSelfOrProvider(w http.ResponseWriter, r *http.Request, requested string) (db.Scope, string, bool) {
 	scope, ok := db.ScopeFrom(r.Context())
 	if !ok {
 		platform.Problem(w, r, platform.Internal, "The request could not be completed")
@@ -157,6 +161,11 @@ func requireFreshCheckCaller(w http.ResponseWriter, r *http.Request) (db.Scope, 
 	}
 
 	if caller.Consumer != "" {
+		if trimmed := strings.TrimSpace(requested); trimmed != "" && trimmed != caller.Consumer {
+			platform.Problem(w, r, platform.Forbidden,
+				"The request names a different consumer than the token; a consumer may only act as itself")
+			return db.Scope{}, "", false
+		}
 		return scope, caller.Consumer, true
 	}
 
@@ -170,7 +179,7 @@ func requireFreshCheckCaller(w http.ResponseWriter, r *http.Request) (db.Scope, 
 			"A cross-Tenant request must carry the "+ReasonHeader+" header")
 		return db.Scope{}, "", false
 	}
-	return scope, "", true
+	return scope, strings.TrimSpace(requested), true
 }
 
 // requireTenant refuses a provider caller on a tenant-scoped route.

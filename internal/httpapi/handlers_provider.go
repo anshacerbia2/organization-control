@@ -635,7 +635,10 @@ func (h *handlers) registerConsumer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) getConsumer(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireProvider(w, r); !ok {
+	// A consumer reading its own record is how it learns its snapshot and reported marks, which is
+	// the input to its own freshness. Provider authority to read that would make every consumer as
+	// privileged as the control plane for a question about itself.
+	if _, _, ok := requireConsumerSelfOrProvider(w, r, r.PathValue("consumer_id")); !ok {
 		return
 	}
 	record, err := h.services.Registry.Get(r.Context(), r.PathValue("consumer_id"))
@@ -651,7 +654,7 @@ type progressRequest struct {
 }
 
 func (h *handlers) recordProgress(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireProvider(w, r); !ok {
+	if _, _, ok := requireConsumerSelfOrProvider(w, r, r.PathValue("consumer_id")); !ok {
 		return
 	}
 	body, ok := decode[progressRequest](w, r)
@@ -674,7 +677,7 @@ type bootstrapRequest struct {
 }
 
 func (h *handlers) bootstrapConsumer(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireProvider(w, r); !ok {
+	if _, _, ok := requireConsumerSelfOrProvider(w, r, r.PathValue("consumer_id")); !ok {
 		return
 	}
 	body, ok := decode[bootstrapRequest](w, r)
@@ -701,11 +704,14 @@ type snapshotRequest struct {
 }
 
 func (h *handlers) snapshot(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireProvider(w, r); !ok {
-		return
-	}
 	body, ok := decode[snapshotRequest](w, r)
 	if !ok {
+		return
+	}
+	// Decoded first because the consumer it names is in the body, and the check is that a consumer
+	// caller named itself. econcile deliberately keeps requireProvider: it reports across every
+	// consumer, so it is an operator action rather than a consumer's own.
+	if _, _, ok := requireConsumerSelfOrProvider(w, r, body.ConsumerID); !ok {
 		return
 	}
 	page, err := h.services.Publisher.Snapshot(r.Context(), projection.SnapshotRequest{
@@ -783,11 +789,11 @@ func (h *handlers) switchEligible(w http.ResponseWriter, r *http.Request) {
 // the two require opposite responses.
 func (h *handlers) contextCheck(w http.ResponseWriter, r *http.Request,
 	apply func(*http.Request, occontext.VerifyRequest) (occontext.Decision, error)) {
-	_, consumer, ok := requireFreshCheckCaller(w, r)
+	body, ok := decode[verifyContextRequest](w, r)
 	if !ok {
 		return
 	}
-	body, ok := decode[verifyContextRequest](w, r)
+	_, consumer, ok := requireConsumerSelfOrProvider(w, r, body.ConsumerID)
 	if !ok {
 		return
 	}
