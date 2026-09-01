@@ -5,7 +5,7 @@
 -- applied the schema, because GRANT names objects and an object that does not exist yet
 -- cannot be granted on.
 --
--- Three roles, and the split is the design rather than tidiness.
+-- Four roles, and the split is the design rather than tidiness.
 -- TDD-organization-control-001 separates tenant-scoped from provider-scoped traffic at the
 -- role level: a single role serving both cannot be constrained, because any policy permissive
 -- enough for provider work is permissive enough for a defect in a tenant-scoped path. At the
@@ -34,6 +34,19 @@ BEGIN
     -- indistinguishable in the catalog from one that never needed it.
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_provider_rt') THEN
         CREATE ROLE organization_provider_rt NOLOGIN NOSUPERUSER NOCREATEDB NOBYPASSRLS;
+    END IF;
+
+    -- The dispatcher. A separate deployable draining platform.outbox to a broker, so a
+    -- separate role: it needs no access to a single business table, and giving it the
+    -- provider role to move rows would make a delivery worker able to mutate every Tenant
+    -- in the estate. What it may touch is granted in grants.sql -- the outbox, the dead
+    -- letter table, and nothing else.
+    --
+    -- Not BYPASSRLS, for the same reason as the other two: the tables it works on carry no
+    -- tenant column and need no policy, so a bypass privilege would be an unused capability
+    -- that a later table silently inherits.
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_dispatch_rt') THEN
+        CREATE ROLE organization_dispatch_rt NOLOGIN NOSUPERUSER NOCREATEDB NOBYPASSRLS;
     END IF;
 END
 $$;

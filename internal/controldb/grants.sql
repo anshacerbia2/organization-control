@@ -95,6 +95,32 @@ $$;
 -- The partition maintenance helpers are invoked by the migration job, never by a runtime.
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA platform FROM PUBLIC;
 
+-- The dispatcher holds privileges on three objects and nothing else.
+--
+-- It is a separate deployable that drains platform.outbox, so it needs no access to a single
+-- business table. Running it under organization_provider_rt would work and would make a delivery
+-- worker able to mutate every Tenant in the estate -- a second process with the control plane's
+-- authority, for a job whose whole scope is "move rows that are already committed".
+--
+-- Named tables rather than a schema-wide grant, and deliberately so: platform also holds
+-- idempotency_key and processed_event, which are an HTTP concern and a consumer's concern. A
+-- schema-wide grant would hand this role both, and would silently hand it whatever the substrate
+-- adds to the schema next.
+GRANT USAGE ON SCHEMA platform TO organization_dispatch_rt;
+GRANT SELECT, UPDATE            ON platform.outbox      TO organization_dispatch_rt;
+GRANT SELECT, INSERT, UPDATE    ON platform.dead_letter TO organization_dispatch_rt;
+GRANT USAGE, SELECT             ON SEQUENCE platform.outbox_sequence TO organization_dispatch_rt;
+
+-- No DELETE on the outbox. A dispatched row is marked published, never removed: retention is the
+-- maintenance job's decision, and a worker able to delete is a worker whose bug is unrecoverable
+-- because the evidence goes with it.
+REVOKE DELETE ON platform.outbox FROM organization_dispatch_rt;
+
+-- And no default privileges: a table added to platform later must be granted deliberately rather
+-- than inherited by a role whose scope is three objects.
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_dispatch_rt;
+
 -- The tenant-scoped role holds no privilege on `organization`.
 --
 -- TDD-organization-control-001 classifies that schema outside the RLS set because an
