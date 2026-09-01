@@ -36,6 +36,20 @@ ALTER ROLE organization_provider_app
 GRANT organization_rt          TO organization_app;
 GRANT organization_provider_rt TO organization_provider_app;
 
+-- The delivery worker's login role. Separate from both runtimes because it is a separate process
+-- with a separate credential: rotating it must not touch the API's, and a compromised delivery
+-- worker must not be able to read a Tenant.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_dispatch_app') THEN
+    CREATE ROLE organization_dispatch_app LOGIN;
+  END IF;
+END
+$$;
+ALTER ROLE organization_dispatch_app
+  WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD :'dispatch_password';
+GRANT organization_dispatch_rt TO organization_dispatch_app;
+
 -- Two Tenants, because cross-tenant denial cannot be proven with one. Seeded on the
 -- administrative connection deliberately: the fixture is not the thing under test, and seeding
 -- through a bound runtime role would make the suite assert its own setup.

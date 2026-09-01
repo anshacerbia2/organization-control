@@ -184,6 +184,7 @@ jobs:
           psql -v ON_ERROR_STOP=1 \
             -v runtime_password=runtime \
             -v provider_password=provider \
+            -v dispatch_password=dispatch \
             -f scripts/ci-fixture.sql \
             -d "$TEST_DATABASE_URL"
         env:

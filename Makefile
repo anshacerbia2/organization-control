@@ -199,7 +199,7 @@ ci-db:
 # missing-column error in whichever migration ran too early.
 	@for /f "delims=" %%f in ('dir /b /on migrations\*.sql') do @(psql -v ON_ERROR_STOP=1 -q -f migrations\%%f -d "$(CI_DSN)" && echo applied %%f) || exit 1
 	@set "ORGANIZATION_MIGRATION_DATABASE_URL=$(CI_DSN)"&& go run ./cmd/organization-migrate -stage=post
-	@psql -v ON_ERROR_STOP=1 -q -v runtime_password=$(TEST_RUNTIME_PASSWORD) -v provider_password=$(TEST_PROVIDER_PASSWORD) -f scripts/ci-fixture.sql -d "$(CI_DSN)"
+	@psql -v ON_ERROR_STOP=1 -q -v runtime_password=$(TEST_RUNTIME_PASSWORD) -v provider_password=$(TEST_PROVIDER_PASSWORD) -v dispatch_password=$(TEST_DISPATCH_PASSWORD) -f scripts/ci-fixture.sql -d "$(CI_DSN)"
 	@echo $(CI_DATABASE) is ready, owned by $(CI_OWNER).
 
 test-ci: ci-db
