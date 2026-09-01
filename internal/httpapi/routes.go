@@ -48,6 +48,7 @@ type Services struct {
 	Invitations   *invitation.Service
 	Offboardings  *offboarding.Service
 	Registry      *projection.Registry
+	Frontier      *projection.FrontierReader
 	Publisher     *projection.Publisher
 	Reconciler    *projection.Reconciler
 	Contexts      *occontext.Service
@@ -204,6 +205,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/progress", h.recordProgress)
 	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/bootstrap", h.bootstrapConsumer)
 	api.HandleFunc("POST /v1/projections/snapshot", h.snapshot)
+	api.HandleFunc("GET /v1/projections/frontier", h.frontier)
 	api.HandleFunc("POST /v1/projections/reconcile", h.reconcile)
 
 	api.HandleFunc("POST /v1/context/verify", h.verifyContext)
@@ -232,6 +234,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the offboarding service is required")
 	case s.Registry == nil:
 		return errors.New("httpapi: the projection registry is required")
+	case s.Frontier == nil:
+		return errors.New("httpapi: the frontier reader is required")
 	case s.Publisher == nil:
 		return errors.New("httpapi: the projection publisher is required")
 	case s.Reconciler == nil:

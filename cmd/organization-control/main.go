@@ -186,6 +186,15 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("projection reconciler: %w", err)
 	}
+	// The raw transactor, not the provider pool: the frontier reads platform.outbox aggregates,
+	// which carry no tenant_id and no policy, and consumers poll it. Through the provider scope every
+	// poll would write a privileged-access record, filling the evidence table with rows about
+	// nothing -- the same reasoning as the claim store above.
+	frontier, err := projection.NewFrontierReader(providerConns)
+	if err != nil {
+		return fmt.Errorf("frontier reader: %w", err)
+	}
+
 	contexts, err := occontext.New(providerPool)
 	if err != nil {
 		return fmt.Errorf("context service: %w", err)
@@ -201,6 +210,7 @@ func run() error {
 			Organizations: organizations,
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
+			Frontier: frontier,
 		},
 		Database:         tenantConns,
 		Telemetry:        telemetry,

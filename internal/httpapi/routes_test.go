@@ -91,6 +91,10 @@ func testSurface(t *testing.T) Surface {
 	must(err, "projection reconciler")
 	contexts, err := occontext.New(providerPool)
 	must(err, "context service")
+	// The raw transactor, as production wires it: the frontier reads outbox aggregates carrying no
+	// tenant column, so it takes no scope and writes no privileged-access record per poll.
+	frontier, err := projection.NewFrontierReader(transactor)
+	must(err, "frontier reader")
 
 	surface, err := Routes(RoutesConfig{
 		Services: Services{
@@ -98,6 +102,7 @@ func testSurface(t *testing.T) Surface {
 			Organizations: organizations,
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
+			Frontier: frontier,
 		},
 		Database: okProber{},
 	})
@@ -504,12 +509,16 @@ func testSurfaceServices(t *testing.T) Services {
 	publisher, _ := projection.NewPublisher(providerPool, registry)
 	reconciler, _ := projection.NewReconciler(providerPool)
 	contexts, _ := occontext.New(providerPool)
+	// The raw transactor, as production wires it: the frontier reads outbox aggregates that carry no
+	// tenant column, so it takes no scope and writes no privileged-access record per poll.
+	frontier, _ := projection.NewFrontierReader(transactor)
 
 	return Services{
 		Memberships: memberships, Tenants: tenants, Provisioning: provisioning,
 		Organizations: organizations,
 		Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 		Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
+		Frontier: frontier,
 	}
 }
 

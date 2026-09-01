@@ -734,6 +734,49 @@ type reconcileRequest struct {
 	Rows       []projection.ReportedRow `json:"rows"`
 }
 
+type frontierResponse struct {
+	HighestCommittedMark        int64   `json:"highest_committed_mark"`
+	OldestUnpublishedMark       int64   `json:"oldest_unpublished_mark"`
+	OldestUnpublishedAgeSeconds float64 `json:"oldest_unpublished_age_seconds"`
+	Unpublished                 bool    `json:"unpublished"`
+	ObservedAt                  string  `json:"observed_at"`
+}
+
+// frontier reports the publication frontier as facts, and computes no freshness verdict.
+//
+// A consumer cannot derive this for itself: the outbox allocates its sequence before the transaction
+// commits, so a gap in a consumer's applied positions is indistinguishable from a number a
+// rolled-back transaction consumed. Only this side knows the difference, because a rolled-back row was
+// never in the outbox.
+//
+// Deliberately not one freshness number. Summing publication lag, delivery lag and apply lag here
+// would put a policy decision in the producer, where it cannot see which operation is being
+// authorised — and the same lag is acceptable for a directory read and unacceptable for a payroll
+// one.
+//
+// Readable by a registered consumer acting as itself, and by a provider with a reason. It is a
+// consumer's runtime concern, unlike econcile, which reports across every consumer and stays an
+// operator action.
+func (h *handlers) frontier(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := requireConsumerSelfOrProvider(w, r, ""); !ok {
+		return
+	}
+
+	report, err := h.services.Frontier.Frontier(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+
+	respond(w, http.StatusOK, frontierResponse{
+		HighestCommittedMark:        report.HighestCommittedMark,
+		OldestUnpublishedMark:       report.OldestUnpublishedMark,
+		OldestUnpublishedAgeSeconds: report.OldestUnpublishedAge.Seconds(),
+		Unpublished:                 report.Unpublished,
+		ObservedAt:                  report.ObservedAt.Format(time.RFC3339Nano),
+	})
+}
+
 func (h *handlers) reconcile(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireProvider(w, r); !ok {
 		return
