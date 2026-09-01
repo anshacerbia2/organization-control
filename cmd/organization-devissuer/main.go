@@ -64,6 +64,21 @@ const (
 
 	audience = "organization-control"
 
+	// referenceAudience is foundation-reference's own registered identifier. A delivery token is
+	// audience-bound to the consumer, not to this service: a token the consumer accepts must not
+	// also open this service's routes, or one leaked credential would reach both.
+	referenceAudience = "foundation-reference"
+
+	deliveryScope = "foundation-reference.deliver"
+	operateScope  = "foundation-reference.operate"
+
+	// consumerRole and consumerClaim must match ORGANIZATION_CONSUMER_ROLE and
+	// ORGANIZATION_CONSUMER_CLAIM. They let a registered consumer perform the authoritative fresh
+	// check without holding provider authority over every Tenant.
+	consumerRole  = "projection-consumer"
+	consumerClaim = "https://scnehaux.com/consumer_id"
+	consumerName  = "foundation-reference"
+
 	// tenantClaim and providerRole must match ORGANIZATION_TENANT_CLAIM and
 	// ORGANIZATION_PROVIDER_ROLE. They are properties of the realm a deployment points at, which is
 	// why the service takes them as configuration rather than as constants.
@@ -134,10 +149,19 @@ func main() {
 			subject = minted.String()
 		}
 
+		// The audience depends on the role: a delivery or operate token is for the consumer, and
+		// everything else is for this service. Minting one token good for both would defeat the
+		// separation the two audiences exist to create.
+		tokenAudience := audience
+		switch role {
+		case "delivery", "operate":
+			tokenAudience = referenceAudience
+		}
+
 		now := time.Now().UTC()
 		claims := map[string]any{
 			"iss": issuer,
-			"aud": []string{audience},
+			"aud": []string{tokenAudience},
 			"sub": subject,
 			"iat": now.Unix(),
 			"nbf": now.Unix(),
@@ -164,8 +188,22 @@ func main() {
 			// is to be able to mint one.
 			claims["realm_access"] = map[string]any{"roles": []string{providerRole}}
 			claims[tenantClaim] = "11111111-1111-4111-8111-11111111111a"
+		case "consumer":
+			// A registered projection consumer. Exclusive against the other two authorities, and
+			// the service refuses a token carrying more than one -- which is worth being able to
+			// mint, so the refusal can be seen rather than trusted.
+			claims["realm_access"] = map[string]any{"roles": []string{consumerRole}}
+			claims[consumerClaim] = consumerName
+		case "delivery":
+			// For the dispatcher. Audience-bound to the consumer, and carrying only the scope that
+			// admits a delivery: this token cannot invoke an operation.
+			claims["scope"] = deliveryScope
+		case "operate":
+			// For a caller of the consumer's protected operations. Cannot deliver.
+			claims["scope"] = operateScope
 		default:
-			http.Error(w, "role must be provider, tenant, or both", http.StatusBadRequest)
+			http.Error(w, "role must be provider, tenant, both, consumer, delivery, or operate",
+				http.StatusBadRequest)
 			return
 		}
 
@@ -260,7 +298,10 @@ func banner(kid string) {
 	fmt.Fprint(out, "    make token                              save a provider token\n")
 	fmt.Fprint(out, "    make api P=/v1/tenants/<id>             call it\n")
 	fmt.Fprint(out, "    make api M=POST P=/v1/organizations B=body.json\n\n")
-	fmt.Fprintf(out, "Tokens directly: http://%s/token?role=provider  (also tenant, both)\n", listen)
+	fmt.Fprintf(out, "Tokens: http://%s/token?role=provider   (also tenant, both)\n", listen)
+	fmt.Fprintf(out, "        role=consumer   aud=%s, for the authoritative fresh check\n", audience)
+	fmt.Fprintf(out, "        role=delivery   aud=%s, for the dispatcher\n", referenceAudience)
+	fmt.Fprintf(out, "        role=operate    aud=%s, for a caller of its operations\n", referenceAudience)
 	fmt.Fprint(out, "The walkthrough -- provisioning, idempotent retries, and the refusals worth\n")
 	fmt.Fprint(out, "seeing for yourself -- is README.md, \"Driving the service by hand\".\n")
 	fmt.Fprintf(out, "%s\n", line)
