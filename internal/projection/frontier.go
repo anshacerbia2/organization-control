@@ -11,9 +11,9 @@ package projection
 // event is still in flight.
 //
 // Only this side can tell the two apart, because a rolled-back row was never in the outbox at all.
-// This reader therefore reports facts and no verdict: the highest position committed here, the oldest
-// position still unpublished, and how old it is. Whether that is fresh enough is the consumer's
-// policy decision, per operation, and it is not this service's to make.
+// This reader therefore reports facts and no verdict: what is committed here, what is still owed, and
+// what this side has given up on. Whether that is fresh enough is the consumer's policy decision, per
+// operation, and it is not this service's to make.
 
 import (
 	"context"
@@ -23,6 +23,25 @@ import (
 
 	"github.com/anshacerbia2/organization-control/internal/db"
 )
+
+// AuthorityEventTypes are the published events a Membership projection's authority depends on.
+//
+// The list exists because a dead-lettered delivery is not the same fact for every event type. A
+// dead-lettered Workspace rename is an operational annoyance; a dead-lettered Membership revocation is
+// a withdrawal that will never reach the consumer by itself, and a consumer that cannot see the
+// difference must either ignore all of them or refuse on all of them.
+//
+// It mirrors internal/membership's action-to-event-type table, which this package may not import:
+// arch.json gives internal/projection edges to internal/db and internal/system only, because a
+// read-only publisher with a path into the Membership state machine is a mutation path behind a
+// snapshot. TestTheFrontierDebtCoversEveryMembershipAuthorityEvent in internal/httpapi — which
+// already imports both — keeps the copy honest.
+var AuthorityEventTypes = []string{
+	"com.scnehaux.organization.membership.lifecycle.granted",
+	"com.scnehaux.organization.membership.lifecycle.restored",
+	"com.scnehaux.organization.membership.security.suspended",
+	"com.scnehaux.organization.membership.security.revoked",
+}
 
 // Frontier is the answer, as facts.
 type Frontier struct {
@@ -45,8 +64,32 @@ type Frontier struct {
 	// epoch".
 	Unpublished bool
 
+	// SecurityDeadLettered and OldestSecurityDeadLetterAge describe deliveries this side has stopped
+	// attempting: authority-bearing events whose platform.dead_letter row is still unresolved.
+	//
+	// They are separate facts rather than part of the unpublished pool, because they are a different
+	// fact. `published = FALSE` excludes a dead-lettered row deliberately — see the statement below —
+	// so without these fields a poison Membership revocation leaves the frontier reporting that this
+	// side owes nothing, while the consumer holds an active row the revocation was supposed to
+	// withdraw. Every local signal reads fresh and the enforcement answer is wrong for as long as
+	// nobody looks at the table.
+	//
+	// Reported separately from the owed pool for a second reason: the two are not the same kind of
+	// wait. An unpublished row will be delivered, so age against a budget is meaningful. A
+	// dead-lettered row will not be delivered by anything except an operator, so no budget makes it
+	// acceptable — which is a consumer's judgement to make, and it can only make it if the two
+	// arrive apart.
+	SecurityDeadLettered        int64
+	OldestSecurityDeadLetterAge time.Duration
+
+	// SecurityDebt is false when nothing authority-bearing is unresolved, for the same reason
+	// Unpublished exists.
+	SecurityDebt bool
+
 	// ObservedAt is the instant this was read, so a consumer holding the answer can age it rather
 	// than treating a cached frontier as current.
+	//
+	// Read from the database, not from this process: see the statement below.
 	ObservedAt time.Time
 }
 
@@ -58,51 +101,97 @@ type Frontier struct {
 // poll, filling the evidence table an investigation reads with rows about nothing — and consumers are
 // expected to poll this.
 type FrontierReader struct {
-	tx  db.Transactor
-	now func() time.Time
+	tx     db.Transactor
+	events []string
 }
 
 func NewFrontierReader(tx db.Transactor) (*FrontierReader, error) {
 	if tx == nil {
 		return nil, errors.New("projection: a transactor is required")
 	}
-	return &FrontierReader{tx: tx, now: time.Now}, nil
+	return &FrontierReader{tx: tx, events: AuthorityEventTypes}, nil
 }
 
-// One statement, so the three facts describe one instant. Read separately, a publication committing
-// between them would produce a highest mark that includes a row the oldest-unpublished read still
-// reports as owed — a frontier contradicting itself, which is precisely the confusion it exists to
-// remove.
+// One statement, so every fact describes one instant on one clock.
+//
+// Read separately, a publication committing between two reads would produce a highest mark that
+// includes a row the oldest-unpublished read still reports as owed — a frontier contradicting itself,
+// which is precisely the confusion it exists to remove.
+//
+// # Why the instant comes from the database
+//
+// `observed_at` and every age here are computed from `clock_timestamp()` inside this statement, and
+// this reader keeps no clock of its own. The earlier version stamped `observed_at` from the Go
+// process and subtracted `created_at` from it — a subtraction across two clocks, and the failure was
+// directional rather than noisy: an application clock behind the database's shrinks the age and
+// understates the backlog, and one far enough ahead of it makes the age grow while the backlog
+// stands still. Both are the same defect the frontier exists to remove, arriving through arithmetic.
+//
+// `clock_timestamp()` rather than `now()`: `now()` is the transaction's start, so a reader inside a
+// transaction that began earlier would report ages measured from an instant already past. A single
+// wall-clock reading, taken once in a CTE and reused, keeps `observed_at` and the two ages consistent
+// with each other rather than microseconds apart.
+//
+// A negative age is unreachable by construction and therefore not clamped: a row is visible to this
+// statement only if it committed before the snapshot, and `created_at` precedes its own commit, so
+// `clock_timestamp()` is after both.
+//
+// # Why the owed pool excludes dead-lettered rows
 //
 // `published = FALSE` rather than `published_at IS NULL`: a dead-lettered row is marked published with
 // its error recorded, so it leaves the unpublished pool. Otherwise one poison event would make the
 // oldest-unpublished age grow forever and every consumer would read itself as permanently stale.
-const frontierStatement = `SELECT
-    coalesce((SELECT max(sequence) FROM platform.outbox), 0),
-    coalesce((SELECT min(sequence)   FROM platform.outbox WHERE published = FALSE), 0),
-    (SELECT min(created_at)          FROM platform.outbox WHERE published = FALSE)`
+//
+// That is the right treatment of the pool and the wrong end of the story on its own, so the debt those
+// rows represent is reported beside it rather than folded into it.
+const frontierStatement = `WITH observed AS (
+    SELECT clock_timestamp() AS at
+), committed AS (
+    SELECT max(sequence) AS mark FROM platform.outbox
+), owed AS (
+    SELECT min(sequence) AS mark, min(created_at) AS oldest
+      FROM platform.outbox
+     WHERE published = FALSE
+), debt AS (
+    SELECT count(*) AS rows, min(dead_lettered_at) AS oldest
+      FROM platform.dead_letter
+     WHERE resolved_at IS NULL
+       AND event_type = ANY ($1::text[])
+)
+SELECT observed.at,
+       coalesce(committed.mark, 0),
+       coalesce(owed.mark, 0),
+       extract(epoch FROM observed.at - owed.oldest)::double precision,
+       debt.rows,
+       extract(epoch FROM observed.at - debt.oldest)::double precision
+  FROM observed, committed, owed, debt`
 
 func (f *FrontierReader) Frontier(ctx context.Context) (Frontier, error) {
-	frontier := Frontier{ObservedAt: f.now().UTC()}
+	var frontier Frontier
 
 	err := f.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		var oldestCreatedAt *time.Time
-		if err := tx.QueryRow(ctx, frontierStatement).Scan(
+		// Nullable because both aggregates are over a possibly empty set. A pointer rather than a
+		// zero, so "owes nothing" stays distinguishable from "owes something created at the epoch".
+		var owedSeconds, debtSeconds *float64
+
+		if err := tx.QueryRow(ctx, frontierStatement, f.events).Scan(
+			&frontier.ObservedAt,
 			&frontier.HighestCommittedMark,
 			&frontier.OldestUnpublishedMark,
-			&oldestCreatedAt); err != nil {
+			&owedSeconds,
+			&frontier.SecurityDeadLettered,
+			&debtSeconds); err != nil {
 			return fmt.Errorf("projection: reading the publication frontier: %w", err)
 		}
 
-		if oldestCreatedAt != nil {
+		frontier.ObservedAt = frontier.ObservedAt.UTC()
+		if owedSeconds != nil {
 			frontier.Unpublished = true
-			frontier.OldestUnpublishedAge = frontier.ObservedAt.Sub(oldestCreatedAt.UTC())
-			if frontier.OldestUnpublishedAge < 0 {
-				// The row was created after this reader took its clock reading. Reported as zero
-				// rather than negative: a negative age is not a fact about anything, and a consumer
-				// comparing it against a budget would read it as unboundedly fresh.
-				frontier.OldestUnpublishedAge = 0
-			}
+			frontier.OldestUnpublishedAge = seconds(*owedSeconds)
+		}
+		if debtSeconds != nil {
+			frontier.SecurityDebt = true
+			frontier.OldestSecurityDeadLetterAge = seconds(*debtSeconds)
 		}
 		return nil
 	})
@@ -110,4 +199,8 @@ func (f *FrontierReader) Frontier(ctx context.Context) (Frontier, error) {
 		return Frontier{}, err
 	}
 	return frontier, nil
+}
+
+func seconds(value float64) time.Duration {
+	return time.Duration(value * float64(time.Second))
 }
