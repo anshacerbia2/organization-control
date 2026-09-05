@@ -16,7 +16,7 @@
 // in the pre stage as well made Atlas refuse to apply at all -- an empty schema it did not
 // create counts as an unclean database.
 //
-// # Why eight schemas rather than one
+// # Why nine schemas rather than one
 //
 // `ADR-GLB-007` puts each bounded context behind its own boundary, and
 // `TDD-organization-control-001` classifies RLS per schema. One schema per context makes the
@@ -56,6 +56,18 @@ schema "operation" {
 }
 schema "projection" {
   comment = "Consumer registry and cursors. Operational state with no tenant column."
+}
+// audit holds evidence about actions taken across Tenants, so nothing in it is tenant-scoped.
+//
+// A separate schema rather than a table in `operation`, which is RLS-protected. rls.sql discovers
+// its table set from the catalog — every table in an RLS schema is enabled, forced, and given a
+// predicate on tenant_id — and it checks first that every such table HAS a non-nullable tenant_id.
+// A cross-Tenant evidence table in `operation` therefore fails the deploy, correctly: the rule is
+// that an RLS schema contains only tenant-scoped tables, and the right answer to a table that is not
+// one is a different schema rather than an exception carved into a catalog-driven invariant. The
+// rule's own hint says so.
+schema "audit" {
+  comment = "Evidence about cross-Tenant administration. No tenant column, outside the RLS set."
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -778,6 +790,75 @@ table "offboarding_obligation" {
 
   index "offboarding_obligation_tenant_idx" {
     columns = [column.tenant_id, column.offboarding_id]
+  }
+}
+
+// privileged_access is the evidence every cross-Tenant transaction writes before it runs.
+//
+// ADDITION to TDD-organization-control-001, which declares `db.PrivilegedRecorder` as a mandatory
+// constructor argument for the provider pool and names no table for it to write to. Until this
+// table existed the only implementations were test fakes, so the invariant PAD-PLT-002 §3.3 number
+// 22 states — cross-tenant administration carries evidence — held in the type system and nowhere
+// else: the composition root could not be built without supplying a recorder, and any recorder that
+// discarded its argument would have satisfied it.
+//
+// Deliberately NOT tenant-scoped, which is why it lives in the `audit` schema rather than in
+// `operation`. A row here records an action taken *across* Tenants, so there is no
+// single tenant_id to key a predicate on, and inventing one would either attribute the access to an
+// arbitrary Tenant or exclude the row from every Tenant's view. The boundary is the grant instead:
+// `organization_rt` holds nothing in this schema, which grants.sql revokes explicitly.
+//
+// It is also written outside the transaction it describes. db.withProviderScope calls the recorder
+// before opening the domain transaction, so evidence survives a domain rollback — the case an
+// investigation actually asks about is the transaction that failed or was killed mid-flight.
+table "privileged_access" {
+  schema  = schema.audit
+  comment = "Evidence for cross-Tenant provider access: who, correlated to which request, and why."
+
+  column "access_id" {
+    null = false
+    type = uuid
+  }
+  column "actor_id" {
+    null    = false
+    type    = uuid
+    comment = "The administrative subject from the resolved provider scope."
+  }
+  // The correlation is what joins this row back to the request that caused it. Required rather
+  // than nullable: db.ProviderScope already refuses to resolve without one, precisely so a
+  // cross-Tenant action cannot be reviewed as an actor with no trail.
+  column "correlation_id" {
+    null = false
+    type = uuid
+  }
+  column "reason" {
+    null = false
+    type = text
+  }
+  column "occurred_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.access_id]
+  }
+
+  // A blank reason is evidence naming nobody's intent. db.ErrReasonRequired refuses one before any
+  // statement runs; this refuses it again at the table, so a second writer cannot record one.
+  check "privileged_access_reason_present" {
+    expr = "length(btrim(reason)) > 0"
+  }
+
+  // The review question is "what did this actor do, and when", and the incident question is "what
+  // touched the estate around this time". Both are served by this order; neither is served by a
+  // scan of an unindexed append-only table.
+  index "privileged_access_actor_idx" {
+    columns = [column.actor_id, column.occurred_at]
+  }
+  index "privileged_access_correlation_idx" {
+    columns = [column.correlation_id]
   }
 }
 

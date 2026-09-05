@@ -211,6 +211,12 @@ func WithTenantScope(ctx context.Context, pool *TenantPool, fn Body) error {
 			`SELECT set_config('app.tenant_id', $1, true)`, scope.tenantID.String()); err != nil {
 			return fmt.Errorf("db: bind tenant scope: %w", err)
 		}
+		// The idempotency claim, if the request carries one. Inside this transaction so it commits
+		// with whatever fn does and is released if fn fails; before fn so a replay costs one SELECT
+		// and repeats none of the work. A request carrying no claim returns from here immediately.
+		if err := claimWithin(ctx, tx); err != nil {
+			return err
+		}
 		return fn(ctx, tx)
 	})
 }
@@ -284,6 +290,14 @@ func withProviderScope(ctx context.Context, pool *ProviderPool, reason string, s
 		if _, err := tx.Exec(ctx,
 			`SELECT set_config('app.provider_scope', 'true', true)`); err != nil {
 			return fmt.Errorf("db: bind provider scope: %w", err)
+		}
+		// Not on the snapshot path. A snapshot transaction is READ ONLY, so the claim's INSERT
+		// would fail — and it should not be attempted anyway: a snapshot mutates nothing, so there
+		// is no effect for a key to guard and nothing a retry could duplicate.
+		if !snapshot {
+			if err := claimWithin(ctx, tx); err != nil {
+				return err
+			}
 		}
 		return fn(ctx, tx)
 	})

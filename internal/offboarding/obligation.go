@@ -2,7 +2,6 @@ package offboarding
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -45,11 +44,11 @@ VALUES ($1, $2, $3, $4, $5, 'open', $6)`
 func (s *Service) Raise(ctx context.Context, req RaiseRequest) (Obligation, error) {
 	switch {
 	case req.OffboardingID.IsNil():
-		return Obligation{}, errors.New("offboarding: an offboarding identifier is required")
+		return Obligation{}, fmt.Errorf("%w: an offboarding identifier is required", ErrInvalid)
 	case strings.TrimSpace(req.Domain) == "":
-		return Obligation{}, errors.New("offboarding: an accountable domain is required")
+		return Obligation{}, fmt.Errorf("%w: an accountable domain is required", ErrInvalid)
 	case strings.TrimSpace(req.Type) == "":
-		return Obligation{}, errors.New("offboarding: an obligation type is required")
+		return Obligation{}, fmt.Errorf("%w: an obligation type is required", ErrInvalid)
 	}
 
 	obligationID, err := s.newID()
@@ -143,13 +142,13 @@ WHERE obligation_id = $1`
 func (s *Service) Resolve(ctx context.Context, res Resolution) (Obligation, error) {
 	switch {
 	case res.ObligationID.IsNil():
-		return Obligation{}, errors.New("offboarding: an obligation identifier is required")
+		return Obligation{}, fmt.Errorf("%w: an obligation identifier is required", ErrInvalid)
 	case strings.TrimSpace(res.Domain) == "":
-		return Obligation{}, errors.New("offboarding: the resolving domain is required")
+		return Obligation{}, fmt.Errorf("%w: the resolving domain is required", ErrInvalid)
 	case !res.State.Valid() || res.State == ObligationOpen:
-		return Obligation{}, fmt.Errorf("offboarding: %q is not a resolution", res.State)
+		return Obligation{}, fmt.Errorf("%w: %q is not a resolution", ErrInvalid, res.State)
 	case res.State != ObligationCompleted && strings.TrimSpace(res.Detail) == "":
-		return Obligation{}, fmt.Errorf("offboarding: %s requires a detail", res.State)
+		return Obligation{}, fmt.Errorf("%w: %s requires a detail", ErrInvalid, res.State)
 	}
 
 	var obligation Obligation
@@ -218,7 +217,7 @@ func (s *Service) Outstanding(ctx context.Context, offboardingID id.UUID) ([]str
 // a hold that also blocked the freeze would keep access open on a Tenant that is leaving.
 func (s *Service) SetLegalHold(ctx context.Context, offboardingID id.UUID, hold bool, reason string) (Offboarding, error) {
 	if strings.TrimSpace(reason) == "" {
-		return Offboarding{}, errors.New("offboarding: a reason is required to change a legal hold")
+		return Offboarding{}, fmt.Errorf("%w: a reason is required to change a legal hold", ErrInvalid)
 	}
 
 	var record Offboarding

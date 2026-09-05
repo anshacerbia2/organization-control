@@ -97,9 +97,9 @@ RETURNING created_at`
 func (s *Service) Issue(ctx context.Context, req IssueRequest) (Issued, error) {
 	switch {
 	case strings.TrimSpace(req.TargetIdentifier) == "":
-		return Issued{}, errors.New("invitation: a target identifier is required")
+		return Issued{}, fmt.Errorf("%w: a target identifier is required", ErrInvalid)
 	case req.SubjectType != "human" && req.SubjectType != "workload":
-		return Issued{}, fmt.Errorf("invitation: subject_type %q is not human or workload", req.SubjectType)
+		return Issued{}, fmt.Errorf("%w: subject_type %q is not human or workload", ErrInvalid, req.SubjectType)
 	}
 	ttl := req.TTL
 	if ttl == 0 {
@@ -248,11 +248,11 @@ WHERE correlation_id = $1 AND state = 'pending'`
 func (s *Service) RecordVerifiedIdentity(ctx context.Context, fact VerifiedIdentity) (Invitation, error) {
 	switch {
 	case fact.CorrelationID.IsNil():
-		return Invitation{}, errors.New("invitation: a correlation identifier is required")
+		return Invitation{}, fmt.Errorf("%w: a correlation identifier is required", ErrInvalid)
 	case strings.TrimSpace(fact.Identifier) == "":
-		return Invitation{}, errors.New("invitation: the verified identifier is required")
+		return Invitation{}, fmt.Errorf("%w: the verified identifier is required", ErrInvalid)
 	case fact.PrincipalID.IsNil():
-		return Invitation{}, errors.New("invitation: a principal identifier is required")
+		return Invitation{}, fmt.Errorf("%w: a principal identifier is required", ErrInvalid)
 	}
 
 	var record Invitation
@@ -430,7 +430,7 @@ WHERE invitation_id = $1`
 // Revoke withdraws the intent. Tenant-scoped: it is the inviter's own decision inside its Tenant.
 func (s *Service) Revoke(ctx context.Context, invitationID id.UUID) (Invitation, error) {
 	if invitationID.IsNil() {
-		return Invitation{}, errors.New("invitation: an invitation identifier is required")
+		return Invitation{}, fmt.Errorf("%w: an invitation identifier is required", ErrInvalid)
 	}
 	if _, ok := db.ScopeFrom(ctx); !ok {
 		return Invitation{}, db.ErrNoScope
@@ -484,7 +484,7 @@ const expireStatement = `UPDATE invitation.invitation SET state = 'expired' WHER
 // it already committed.
 func (s *Service) ExpireLapsed(ctx context.Context, size int) (int, error) {
 	if size <= 0 {
-		return 0, errors.New("invitation: a positive batch size is required")
+		return 0, fmt.Errorf("%w: a positive batch size is required", ErrInvalid)
 	}
 
 	at := s.now().UTC()

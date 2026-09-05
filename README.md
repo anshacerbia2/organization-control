@@ -82,6 +82,13 @@ every other consumer uses; sharing a foundation grants no privileged interface.
 | Path | Contents |
 | :-- | :-- |
 | `cmd/organization-control/` | Deployable entrypoint and composition root |
+| `cmd/organization-migrate/` | Schema stages: roles, then platform, RLS, and privileges |
+| `cmd/organization-devissuer/` | Local token issuer, `//go:build devissuer` only |
+| `Makefile`, `.env.example` | Development entry points and the local environment |
+| `internal/config/` | Environment configuration, read once at startup |
+| `internal/httpapi/` | Routing, request decoding, and the domain-error-to-problem mapping |
+| `internal/access/` | The privileged-access recorder: evidence for cross-Tenant work |
+| `internal/db/` | The single scope-binding path and the two pool types |
 | `internal/organization/` | Organization registry |
 | `internal/tenant/` | Tenant lifecycle and security version |
 | `internal/workspace/` | Workspace lifecycle |
@@ -119,7 +126,7 @@ Four sources build one database, and each is owned by whoever owns the SQL:
 | Source | Owner | What it applies |
 | :-- | :-- | :-- |
 | `internal/controldb/roles.sql` | this repository | The three cluster roles |
-| `schema.hcl` via Atlas | this repository | The seven owned schemas and their tables |
+| `schema.hcl` via Atlas | this repository | The eight owned schemas and their tables |
 | `foundation-platform/migrations/platform` | the shared module | The `platform` schema |
 | `internal/controldb/rls.sql`, `grants.sql` | this repository | Policies, then privileges |
 
@@ -133,6 +140,22 @@ atlas migrate apply --env local                 # the owned schemas and their ta
 go run ./cmd/organization-migrate -stage=post   # platform schema, RLS, privileges
 ```
 
+**`roles.sql` creates the three group roles and no login role.** `organization_migrator`,
+`organization_rt`, and `organization_provider_rt` are all `NOLOGIN`: they carry privileges and
+nobody authenticates as them. The login roles that inherit them are a deployment concern, because
+their passwords are, so the pipeline creates them and this repository does not. Locally and in CI
+that means:
+
+```sql
+CREATE ROLE organization_app LOGIN PASSWORD '…';
+CREATE ROLE organization_provider_app LOGIN PASSWORD '…';
+GRANT organization_rt          TO organization_app;
+GRANT organization_provider_rt TO organization_provider_app;
+```
+
+Without them the integration suites skip when `TEST_DATABASE_URL` is unset and fail to authenticate
+when it is set — see `.github/workflows/ci.yml` for the exact block CI runs.
+
 **The order differs from identity-control's, and the reason is Atlas rather than preference.**
 
 Atlas refuses to apply against a database it considers unclean, and in database scope any
@@ -141,10 +164,223 @@ the clean check does not consult. Roles are cluster objects, so creating them le
 database clean; that is what makes this order possible at all.
 
 Database scope is itself forced. identity-control bounds Atlas to one schema with a
-`search_path` on both URLs, and this service declares seven: Atlas rejects a multi-schema HCL
+`search_path` on both URLs, and this service declares eight: Atlas rejects a multi-schema HCL
 source against a schema-scoped dev URL. `atlas.hcl` bounds the scope with `schemas` and
 `exclude` instead, and `public` is declared and managed empty — without it, the first generated
 plan ended in `DROP SCHEMA "public" CASCADE`.
+
+## Running the service
+
+Every value comes from the environment, per STD-GLB-009. Nothing is defaulted that would let a
+misconfigured process start and fail later.
+
+| Variable | Required | Purpose |
+| :-- | :-- | :-- |
+| `ORGANIZATION_TENANT_DATABASE_URL` | yes | Connects as `organization_app` → `organization_rt` |
+| `ORGANIZATION_PROVIDER_DATABASE_URL` | yes | Connects as `organization_provider_app` → `organization_provider_rt` |
+| `ORGANIZATION_TOKEN_ISSUER` | yes | Compared for exact equality |
+| `ORGANIZATION_TOKEN_AUDIENCE` | yes | This resource's registered identifier |
+| `ORGANIZATION_JWKS_URL` | yes | Key source. Never read from a token |
+| `ORGANIZATION_TENANT_CLAIM` | yes | The claim carrying the Tenant a caller administers |
+| `ORGANIZATION_PROVIDER_ROLE` | yes | The realm role conferring cross-Tenant authority |
+| `ORGANIZATION_LISTEN_ADDRESS` | no | Defaults to `:8080` |
+| `ORGANIZATION_TOKEN_MAX_SKEW` | no | 30s; capped at 60s by STD-IAM-002 §3.5 |
+| `ORGANIZATION_PROVISIONING_TIMEOUT` | no | 30m. Age at which a provisioning request becomes `unresolved` |
+| `ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL` | no | 15m. Cadence for the unresolved sweep |
+| `ORGANIZATION_TENANT_NAME_MAX` | no | 120. Tenant display-name bound |
+
+**A reconcile interval longer than the provisioning timeout is refused at startup.** A sweep slower
+than the timeout leaves a request sitting `requested` well past the age at which its outcome is meant
+to be declared unknown, which turns "ambiguous after thirty minutes" into a statement about nothing.
+It is the misconfiguration that produces no error anywhere else.
+
+**The two DSNs must differ, and startup refuses them if they are identical.** They are two
+credentials for two PostgreSQL login roles with different policies, and the whole isolation posture
+rests on ordinary tenant traffic being unable to authenticate as the cross-Tenant role. One DSN
+reused for both would compile, pass every test that does not inspect `current_user`, and silently run
+the estate's tenant traffic under the role that can read every Tenant.
+
+### Locally: `.env` and the Makefile
+
+Nothing above needs to be typed. `.env.example` carries a working local set; the `Makefile` loads
+`.env` and exports it to the child process.
+
+```text
+make env      copy .env.example to .env, once, without overwriting an existing one
+make issuer   terminal 1: the dev token issuer on 127.0.0.1:8098
+make run      terminal 2: the service on 127.0.0.1:8099
+make token    save a provider token to .token
+make api P=/v1/tenants/<id>
+make api M=POST P=/v1/organizations B=body.json
+make gates    everything CI runs: fmt vet build arch tidy test
+```
+
+The same commands work from `cmd.exe`, PowerShell, and a POSIX shell, which is the reason this
+exists. The environment used to live here as a PowerShell block; cmder is `cmd.exe`, where
+`$env:NAME = 'value'` is not an assignment, and the line fails with *"The filename, directory name, or
+volume label syntax is incorrect"* — a message about paths for what is a shell mismatch, so the
+reader goes looking at the DSN.
+
+**`.env` is loaded by `make`, never by the binary.** The service still reads only the process
+environment, so a deployment is configured exactly as the table above describes and no code path
+looks for a file. `.env` is gitignored; `.env.example` is committed.
+
+**`-include`, not `include`.** `fmt`, `vet`, `build`, `arch`, and `test-unit` must work in a fresh
+clone with no `.env`, and in CI, where the environment comes from the workflow.
+
+The optional variables are listed in `.env.example`, commented out, so the knobs are discoverable
+without being set.
+
+### Three muxes, not one with an exemption list
+
+| Mux | Authentication | Scope resolution | Holds |
+| :-- | :-- | :-- | :-- |
+| `Probes` | none, ever | none | `GET /healthz`, `GET /readyz` |
+| `Anonymous` | none | none | `POST /v1/invitations/lookup` |
+| `API` | required | required | everything else |
+
+An exemption list is edited by whoever adds a route, and the failure mode of forgetting is an
+unauthenticated mutation. Here a route is unauthenticated only if its author writes it into
+`Anonymous`. identity-control learned the other half of this in an outage: one mux meant the
+authentication middleware also wrapped `/readyz`, every probe answered 401, and no replica entered
+service.
+
+The anonymous route reads nothing. SAD-004 §5.5 requires an invitation lookup to answer identically
+for an absent, expired, revoked, accepted, and valid token, and the only construction where that
+holds for the status code, the body, *and* the response time is one that looks nothing up.
+
+### Driving the service by hand
+
+Every authenticated route needs a token from the issuer named in `ORGANIZATION_JWKS_URL`, so without
+one the only things reachable by hand are the two probes and the anonymous invitation lookup.
+`cmd/organization-devissuer` closes that: it publishes a key set and mints tokens the real verifier
+accepts, so the service under test runs completely unmodified — same binary, same chain, same
+verifier.
+
+```text
+make issuer                    # terminal 1, leave it open
+make run                       # terminal 2
+make token                     # terminal 3: saves a provider token to .token
+make api P=/v1/tenants/<id>
+make api M=POST P=/v1/organizations B=body.json
+make token ROLE=tenant         # a Tenant-scoped token, refused 403 on a provider route
+```
+
+`make api` sends `X-Administrative-Reason` because every provider-scoped call writes a row to
+`audit.privileged_access` and the service answers 400 rather than recording an unexplained one.
+`KEY=<anything>` adds an `Idempotency-Key`. The body is a **file**, not an argument: quoting JSON on
+a `cmd` line means escaping every double quote, and one missed backslash produces a 400 that looks
+like the service rejecting a valid request.
+
+The issuer binds its port before printing anything. A second copy fails on the bind, and printing the
+instructions first meant a wall of text followed by an error, which reads as the service refusing
+something rather than as *this is already running*.
+
+**The build tag is the safety property.** `//go:build devissuer` keeps it out of `go build ./...`,
+out of CI, and out of any image. It signs tokens for whoever asks, which is what makes it useful and
+why it must never run anywhere real — so it is absent from the standard build rather than disabled by
+a flag somebody could leave on.
+
+**Two things it discovered, both of which apply to the real realm.**
+
+`verify` permits exactly one algorithm, **PS256**, and verifies with `SignPSS` at
+`PSSSaltLengthEqualsHash`. An RS256 token is well formed, correctly claimed, and refused.
+
+`verify` rejects any RSA modulus below **3072 bits**, and it does so while parsing the key set: a
+2048-bit key is discarded, the set then carries no usable key, and every verification fails as
+`kid unknown and the key set could not be reloaded`. That message is about key distribution and the
+cause is key size. **A Keycloak realm signing with 2048-bit keys will have every token refused by
+this service, and the refusal will not say why** — worth settling before the Keycloak
+proof-of-concept rather than during it.
+
+Both are now asserted by `internal/httpapi/token_endtoend_test.go`, which covers the one
+authentication path the rest of the package does not: key material fetched from a JWKS endpoint over
+HTTP. `authentication_test.go` signs real tokens against a real verifier but supplies the key with
+`verify.StaticKeys`, so `verify.NewJWKS` and the document it parses were never exercised here.
+
+### Tenant intake and provisioning correlation
+
+A Tenant is created in `requested` and reaches `active` only through the provisioning system. Six
+routes cover the path:
+
+| Route | Driven by | Effect |
+| :-- | :-- | :-- |
+| `POST /v1/tenants` | operator | Tenant in `requested`, a provisioning request, and `tenant.lifecycle.requested` — one transaction |
+| `POST /v1/tenants/{id}/provisioning` | operator | `requested → provisioning`, or a retry from `failed` with a new request row |
+| `POST /v1/provisioning/realized` | provisioning system | Marks the request `realized`. Does **not** activate |
+| `POST /v1/provisioning/failed` | provisioning system | Marks the request `failed` and moves the Tenant to `failed` |
+| `POST /v1/provisioning/sweep-unresolved` | scheduler | Ages unanswered requests to `unresolved`. Never retries |
+| `POST /v1/tenants/{id}/activate` | operator | `provisioning → active`, once realized and the sponsor is active |
+
+Four properties are worth naming because each is a decision rather than a detail.
+
+**The creation event is the desired-state publication.** TDD-organization-control-003 ends intake with
+"publish desired state" and names exactly one event at creation, so they are the same event:
+`tenant.lifecycle.requested` carries the isolation profile, the residency region, and the correlation
+identifier the realized status comes back on. A separate internal channel would have given the estate
+two records of one intention.
+
+**A realized status does not activate.** Activation also checks the sponsoring Organization, which is
+a decision about the customer relationship rather than about infrastructure — and the provisioning
+system has no view of it. It stays a deliberate act.
+
+**A timeout produces `unresolved`, never `failed`, and never a retry.** SAD-004 §7.5 requires an
+ambiguous outcome to remain pending or failed and never to be inferred as success. The target may have
+built the boundary or may not; treating that as a refusal and retrying is how a Tenant gets
+provisioned twice. The sweep ages deprovisioning requests too, which is what finally makes
+`internal/offboarding`'s ambiguity gate reachable — nothing produced the state before.
+
+**The two callback routes are authenticated like everything else.** A route exempted so an external
+system could reach it more easily would let anyone who learned a correlation identifier declare a
+Tenant's boundary built, and activation reads exactly that statement before letting Memberships in.
+The design's API list names none of these four provisioning routes; that is an omission rather than a
+prohibition, since it mandates realized-status correlation, gives this service no inbound transport
+but HTTP, and `POST /v1/offboardings/{id}/deprovisioning` already reports the other direction's
+outcome the same way.
+
+### `Idempotency-Key`
+
+Supply the header on a mutation and a retry of the identical request returns the first response
+instead of executing again. The response carries `Idempotent-Replay: true` so a client can tell which
+happened.
+
+**The claim is made inside the service's own transaction, not by the middleware.**
+`idempotency.Claim` takes a `db.Tx` because the claim has to commit with the effect it guards, so
+`internal/db` makes it inside the scoped transaction every service already opens — the middleware only
+attaches it to the context. A middleware claiming in a transaction of its own would commit
+separately, and a key held by a mutation that then rolled back refuses every retry of a request that
+never happened, reported as "already in progress". That sends whoever is debugging to look for a
+concurrent request that does not exist. `TestAFailedMutationReleasesItsKey` fails if the claim is
+moved out of that transaction — it was written by moving it out and watching it fail.
+
+Threading it through the scope binding rather than through the services was the alternative to a
+`Within` variant on some thirty service methods across eight packages. The services never see a
+claim, which is what stops one of them being written without honouring it.
+
+| Situation | Answer |
+| :-- | :-- |
+| No header | Passes through untouched |
+| Identical retry of a completed request | The stored response, `Idempotent-Replay: true` |
+| Same key, different request | 409 `idempotency-key-conflict` |
+| Same key, first use not yet completed | 409 `request-in-progress` |
+| Header on a `GET` or `HEAD` | 400 — a key spent on a read would answer the caller's later mutation |
+| Body over 1 MiB | 400 — refused rather than silently unclaimed |
+
+**Two things it does not do.**
+
+The header is honoured when present and not yet *required*. TDD-organization-control-003 §"API /
+Interface" says every mutation requires it; making it mandatory changes the client contract rather
+than this mechanism, and belongs in one deliberate step.
+
+There is a window. `Complete` needs the status and body, which do not exist until the handler has
+rendered them, so the response is recorded after the domain transaction commits. A process dying in
+between leaves a key claimed and uncompleted, and later retries are refused rather than replayed. The
+mutation still happened exactly once; what is lost is being told what it returned. Closing it
+entirely is the thirty-method refactor above.
+
+**A replay returns the same response, not the same bytes.**
+`platform.idempotency_key.response_body` is `jsonb`, so PostgreSQL sorts object keys and drops
+insignificant whitespace. Anything hashing or signing a response body has to canonicalise first.
 
 ## Row-Level Security is not in `schema.hcl`, and that is a vendor limitation rather than a design choice
 

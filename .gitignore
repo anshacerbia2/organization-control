@@ -19,3 +19,18 @@ atlas.sum.tmp
 *.swp
 .DS_Store
 Thumbs.db
+
+# Local development environment. .env.example is committed; the real one is not --
+# it holds credentials, and a template that overwrites working local values is a loss.
+.env
+.token
+.fmt.tmp
+
+# Request bodies typed while driving the service by hand. `make api` takes the body as a
+# file, so these collect in the root. Ignored by name rather than by pattern: arch.json
+# is tracked, and a *.json rule would hide it.
+/body.json
+/v1.json
+
+# The PR body, written locally and read by `gh pr create`. Not repository content.
+/.pr-body.md

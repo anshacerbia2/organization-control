@@ -88,7 +88,68 @@
       "the Tenant recheck is a status read inside the acceptance transaction, and an edge would",
       "give the invitation flow a path to move a Tenant."
     ],
-    "internal/invitation": ["internal/db", "internal/system", "internal/membership"]
+    "internal/invitation": ["internal/db", "internal/system", "internal/membership"],
+
+    "_comment_httpapi": [
+      "internal/httpapi is the inbound transport. It reaches every service because it routes to",
+      "every service, and it reaches internal/db for one reason only: db.Scope, which it resolves",
+      "from the authenticated caller and places in the context. It holds no authority of its own --",
+      "no state machine, no statement, no policy decision -- so an edge in the other direction",
+      "would mean a domain package could answer an HTTP request, and no domain package declares",
+      "one.",
+      "",
+      "It does not import internal/controldb. Schema stage management belongs to the migrate",
+      "deployable, and a serving process that could advance a stage could do so on a request."
+    ],
+    "internal/httpapi": [
+      "internal/db",
+      "internal/context",
+      "internal/invitation",
+      "internal/membership",
+      "internal/offboarding",
+      "internal/organization",
+      "internal/projection",
+      "internal/tenant",
+      "internal/workspace"
+    ],
+
+    "_comment_access": [
+      "internal/access implements db.PrivilegedRecorder against audit.privileged_access. It",
+      "reaches internal/db for the interface and the Transactor type and nothing else: a recorder",
+      "that could reach a service could act on the access it is only supposed to witness.",
+      "",
+      "It is imported by the composition root alone. No domain package depends on it, because none",
+      "should be able to write its own evidence."
+    ],
+    "internal/access": ["internal/db"],
+
+    "_comment_config": [
+      "internal/config reads the environment and has no internal edges. A configuration package",
+      "that could reach a domain package could validate a value by calling the thing it configures,",
+      "which is how a startup check becomes a database connection."
+    ],
+    "internal/config": [],
+
+    "_comment_cmd_control": [
+      "cmd/organization-control is the composition root: the only place the pools, the recorder,",
+      "and the ten services are constructed, and the only place net/http is used to serve. It",
+      "reaches internal/db because it builds both pools, and it reaches every service because it",
+      "hands them to internal/httpapi.Routes."
+    ],
+    "cmd/organization-control": [
+      "internal/access",
+      "internal/config",
+      "internal/db",
+      "internal/httpapi",
+      "internal/context",
+      "internal/invitation",
+      "internal/membership",
+      "internal/offboarding",
+      "internal/organization",
+      "internal/projection",
+      "internal/tenant",
+      "internal/workspace"
+    ]
   },
 
   "pureSegments": ["domain"],
@@ -105,8 +166,8 @@
       "except": []
     },
     "net/http": {
-      "reason": "this service reaches no other domain over HTTP. ADR-ORG-001 5.4 gives it neither the Keycloak administration credential nor a network route to the kernel, and that prohibition is structural rather than procedural: an HTTP client here would be the first step toward the projection path the Identity Control Service owns. The composition root will be excepted when it serves, and nothing else",
-      "except": []
+      "reason": "this service reaches no other domain over HTTP. ADR-ORG-001 5.4 gives it neither the Keycloak administration credential nor a network route to the kernel, and that prohibition is structural rather than procedural: an outbound HTTP client here would be the first step toward the projection path the Identity Control Service owns. The two packages excepted below serve; they do not call. An import-level rule cannot tell a server from a client once the package is excepted, so the prohibition that matters is enforced where it can be seen: internal/httpapi's outbound_test.go walks both packages for a client construction or a package-level request helper and fails on any. Widening this list without extending that walk would retire the rule while leaving it written down",
+      "except": ["internal/httpapi", "cmd/organization-control"]
     }
   },
 

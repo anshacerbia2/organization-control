@@ -33,18 +33,58 @@ type Service struct {
 	// one, and a service that read the wall clock could not be asserted against a fixed instant.
 	now func() time.Time
 
+	// newID mints Tenant and provisioning-request identifiers. A seam for the same reason as the
+	// clock: an intake test asserting which identifier reached the event cannot do so against a
+	// value the service invented.
+	newID func() (id.UUID, error)
+
+	// displayNameMax bounds the Tenant display name, per the
+	// `ORGANIZATION_TENANT_NAME_MAX` row of TDD-organization-control-003 §Configuration. Held here
+	// rather than read from the environment, because a package that read its own configuration
+	// would be untestable at two limits and would put a second configuration surface behind
+	// `internal/config`.
+	displayNameMax int
+
 	// beforeAppend runs after the row is updated and before the outbox append, and is nil outside
 	// tests. It exists because the atomicity of those two writes is the property this design rests
 	// on, and the only honest way to assert it is to fail inside the window it protects.
 	beforeAppend func(context.Context) error
 }
 
+// Option adjusts a bound the deployment owns.
+//
+// Variadic rather than extra parameters, so the existing `New(pool)` callers keep compiling and a
+// future bound does not reopen every construction site.
+type Option func(*Service)
+
+// WithDisplayNameMax sets the Tenant display-name bound.
+//
+// A non-positive value is ignored rather than applied. A zero bound would refuse every display
+// name, and a configuration mistake that rejects all Tenant creation is worse than one that keeps
+// the documented default.
+func WithDisplayNameMax(max int) Option {
+	return func(s *Service) {
+		if max > 0 {
+			s.displayNameMax = max
+		}
+	}
+}
+
 // New constructs the service.
-func New(pool *db.ProviderPool) (*Service, error) {
+func New(pool *db.ProviderPool, opts ...Option) (*Service, error) {
 	if pool == nil {
 		return nil, errors.New("tenant: a provider-scoped pool is required")
 	}
-	return &Service{pool: pool, now: time.Now}, nil
+	service := &Service{
+		pool:           pool,
+		now:            time.Now,
+		newID:          id.NewV7,
+		displayNameMax: DefaultDisplayNameMax,
+	}
+	for _, opt := range opts {
+		opt(service)
+	}
+	return service, nil
 }
 
 var (

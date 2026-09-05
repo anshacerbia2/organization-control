@@ -126,7 +126,7 @@ WHERE m.status = 'active'`
 // consumer's value into authority, on any classification, including `extra`.
 func (r *Reconciler) Reconcile(ctx context.Context, report Report) (Result, error) {
 	if report.ConsumerID == "" {
-		return Result{}, errors.New("projection: a consumer identifier is required")
+		return Result{}, fmt.Errorf("%w: a consumer identifier is required", ErrInvalid)
 	}
 	if report.Mark <= 0 {
 		return Result{}, ErrReportMarkRequired

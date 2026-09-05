@@ -245,7 +245,7 @@ func (p *Publisher) Snapshot(ctx context.Context, req SnapshotRequest) (Page, er
 // calls this once its local model has been replaced.
 func (p *Publisher) Bootstrap(ctx context.Context, consumerID string, mark int64) (Consumer, error) {
 	if mark < 0 {
-		return Consumer{}, errors.New("projection: a snapshot mark cannot be negative")
+		return Consumer{}, fmt.Errorf("%w: a snapshot mark cannot be negative", ErrInvalid)
 	}
 
 	var consumer Consumer

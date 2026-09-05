@@ -147,6 +147,16 @@ var transitions = map[Action]rule{
 }
 
 var (
+	// ErrInvalid is a malformed request: a required field absent, a value outside its permitted
+	// set, or two fields that contradict each other.
+	//
+	// It exists so the HTTP surface can answer 400. Before it, every validation failure here was
+	// a bare errors.New, indistinguishable at the transport boundary from a failed statement --
+	// so a caller who omitted a field received 500, which says the service is broken rather than
+	// that the request is. Constructor guards and stored-value decoders deliberately do NOT carry
+	// it: those are a process built wrong and a row that should not exist, and both are 500.
+	ErrInvalid = errors.New("tenant: the request is invalid")
+
 	// ErrUnknownAction reports an action outside the state machine. It is a programming error: a
 	// command surface maps a route to an Action, so an unknown one means a route exists without a
 	// transition behind it.
@@ -359,11 +369,11 @@ type Command struct {
 func (c Command) validate() error {
 	switch {
 	case c.TenantID.IsNil():
-		return errors.New("tenant: a tenant identifier is required")
+		return fmt.Errorf("%w: a tenant identifier is required", ErrInvalid)
 	case c.Reason == "":
-		return errors.New("tenant: a reason is required")
+		return fmt.Errorf("%w: a reason is required", ErrInvalid)
 	case c.ExpectedVersion <= 0:
-		return errors.New("tenant: the expected version the caller was shown is required")
+		return fmt.Errorf("%w: the expected version the caller was shown is required", ErrInvalid)
 	}
 	return nil
 }

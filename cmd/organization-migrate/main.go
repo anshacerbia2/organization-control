@@ -4,14 +4,14 @@
 // Four sources build one database, and each is owned by whoever owns the SQL:
 //
 //	roles.sql                     this repository    cluster roles only, no schema, no table
-//	schema.hcl via Atlas          this repository    the seven owned schemas and their tables
+//	schema.hcl via Atlas          this repository    the eight owned schemas and their tables
 //	foundation-platform platform  the shared module  the platform schema, shipped in Go
 //	rls.sql + grants.sql          this repository    policies, then privileges
 //
 // Atlas runs second, which is why the stages are separate invocations rather than one:
 //
 //	organization-migrate -stage=pre     # roles
-//	atlas migrate apply --env ci        # the seven owned schemas and their tables
+//	atlas migrate apply --env ci        # the eight owned schemas and their tables
 //	organization-migrate -stage=post    # platform schema, then RLS, then privileges
 //
 // # Why the platform schema is applied after Atlas rather than before

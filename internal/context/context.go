@@ -86,6 +86,16 @@ type Decision struct {
 }
 
 var (
+	// ErrInvalid is a malformed request: a required field absent, a value outside its permitted
+	// set, or two fields that contradict each other.
+	//
+	// It exists so the HTTP surface can answer 400. Before it, every validation failure here was
+	// a bare errors.New, indistinguishable at the transport boundary from a failed statement --
+	// so a caller who omitted a field received 500, which says the service is broken rather than
+	// that the request is. Constructor guards and stored-value decoders deliberately do NOT carry
+	// it: those are a process built wrong and a row that should not exist, and both are 500.
+	ErrInvalid = errors.New("context: the request is invalid")
+
 	// ErrNotRegistered means the calling consumer has no registry row. The fresh check is metered
 	// per consumer, so an unregistered caller cannot be metered — and an unmetered fresh-check
 	// path is the one that gets used as an ordinary read.
@@ -161,11 +171,11 @@ WHERE consumer_id = $1`
 func (s *Service) Verify(ctx stdcontext.Context, req VerifyRequest) (Decision, error) {
 	switch {
 	case req.ConsumerID == "":
-		return Decision{}, errors.New("context: a consumer identifier is required")
+		return Decision{}, fmt.Errorf("%w: a consumer identifier is required", ErrInvalid)
 	case req.TenantID.IsNil():
-		return Decision{}, errors.New("context: a tenant identifier is required")
+		return Decision{}, fmt.Errorf("%w: a tenant identifier is required", ErrInvalid)
 	case req.PrincipalID.IsNil():
-		return Decision{}, errors.New("context: a principal identifier is required")
+		return Decision{}, fmt.Errorf("%w: a principal identifier is required", ErrInvalid)
 	}
 
 	decision := Decision{
@@ -295,7 +305,7 @@ const readCalls = `SELECT verify_calls_since_report FROM projection.consumer WHE
 // still cleared, so the next interval measures the next interval.
 func (s *Service) RecordRate(ctx stdcontext.Context, report RateReport) (Rate, error) {
 	if report.ConsumerID == "" {
-		return Rate{}, errors.New("context: a consumer identifier is required")
+		return Rate{}, fmt.Errorf("%w: a consumer identifier is required", ErrInvalid)
 	}
 	if report.Requests < 0 {
 		return Rate{}, fmt.Errorf("%w: %d is not a request count", ErrRequestRequired, report.Requests)
@@ -346,7 +356,7 @@ ORDER BY last_verify_ratio DESC`
 // list, and the operator reading the first line should see the one that matters.
 func (s *Service) OverThreshold(ctx stdcontext.Context, threshold float64) ([]Rate, error) {
 	if threshold < 0 {
-		return nil, errors.New("context: a negative threshold flags every consumer")
+		return nil, fmt.Errorf("%w: a negative threshold flags every consumer", ErrInvalid)
 	}
 
 	var over []Rate

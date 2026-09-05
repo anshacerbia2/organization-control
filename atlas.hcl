@@ -1,6 +1,6 @@
 // Atlas project configuration, per ADR-GLB-004.
 //
-// Every environment scopes Atlas to the seven schemas this service owns. That scope is
+// Every environment scopes Atlas to the eight schemas this service owns. That scope is
 // load-bearing rather than tidy: the same database also carries `platform`, which
 // foundation-platform owns and ships as versioned SQL. Unscoped, Atlas reads `platform` as
 // drift against schema.hcl and plans to drop it — which is what a database-scoped plan did
@@ -32,11 +32,11 @@ locals {
   // exists in the database and is absent from the source reads as drift — the first plan
   // generated here ended in `DROP SCHEMA "public" CASCADE`. Managing it empty is both true and
   // useful: a table appearing in `public` is drift, and Atlas now reports it.
-  managed_schemas = ["public", "organization", "tenant", "workspace", "membership", "invitation", "operation", "projection"]
+  managed_schemas = ["public", "organization", "tenant", "workspace", "membership", "invitation", "operation", "projection", "audit"]
 
   // Everything Atlas must leave alone, stated rather than inferred.
   //
-  // `schemas` alone does not bound a multi-schema HCL diff. With seven schemas declared Atlas
+  // `schemas` alone does not bound a multi-schema HCL diff. With eight schemas declared Atlas
   // works in database scope, and the first plan generated without this list ended in
   // `DROP SCHEMA "public" CASCADE` -- the same failure identity-control hit, where one
   // `search_path` was enough to prevent it. `platform` would have followed for the same reason:
