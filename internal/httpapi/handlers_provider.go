@@ -739,7 +739,16 @@ type frontierResponse struct {
 	OldestUnpublishedMark       int64   `json:"oldest_unpublished_mark"`
 	OldestUnpublishedAgeSeconds float64 `json:"oldest_unpublished_age_seconds"`
 	Unpublished                 bool    `json:"unpublished"`
-	ObservedAt                  string  `json:"observed_at"`
+
+	// The debt this side has stopped attempting to deliver: authority-bearing events sitting
+	// unresolved in platform.dead_letter. Separate fields rather than folded into the owed pool,
+	// because they are a different fact — an unpublished row will arrive, and one of these will not
+	// arrive without an operator.
+	SecurityDeadLettered               int64   `json:"security_dead_lettered"`
+	OldestSecurityDeadLetterAgeSeconds float64 `json:"oldest_security_dead_letter_age_seconds"`
+	SecurityDebt                       bool    `json:"security_debt"`
+
+	ObservedAt string `json:"observed_at"`
 }
 
 // frontier reports the publication frontier as facts, and computes no freshness verdict.
@@ -773,7 +782,12 @@ func (h *handlers) frontier(w http.ResponseWriter, r *http.Request) {
 		OldestUnpublishedMark:       report.OldestUnpublishedMark,
 		OldestUnpublishedAgeSeconds: report.OldestUnpublishedAge.Seconds(),
 		Unpublished:                 report.Unpublished,
-		ObservedAt:                  report.ObservedAt.Format(time.RFC3339Nano),
+
+		SecurityDeadLettered:               report.SecurityDeadLettered,
+		OldestSecurityDeadLetterAgeSeconds: report.OldestSecurityDeadLetterAge.Seconds(),
+		SecurityDebt:                       report.SecurityDebt,
+
+		ObservedAt: report.ObservedAt.Format(time.RFC3339Nano),
 	})
 }
 
