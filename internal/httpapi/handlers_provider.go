@@ -634,6 +634,29 @@ func (h *handlers) registerConsumer(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusCreated, viewConsumer(record))
 }
 
+// retireConsumer withdraws a consumer, freeing the single active slot.
+//
+// Provider-only, and deliberately not available to the consumer itself: a consumer that could
+// retire itself could withdraw its own authority mid-operation, and the decision to stop
+// enforcing through a projection belongs to whoever is replacing it.
+//
+// It exists so ErrSingleConsumer has a way past it that is not "delete the constraint".
+// Rotating a consumer identity, renaming a deployable, or moving the projection to a new one
+// all dead-end at that refusal otherwise, and the shortest route past a refusal with no exit
+// is removing the guard.
+func (h *handlers) retireConsumer(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	if err := h.services.Registry.Retire(r.Context(), r.PathValue("consumer_id")); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	// 204 rather than the record: Get refuses a retired consumer, so returning a view of one
+	// would be the only place in this surface that hands back something it will not read back.
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *handlers) getConsumer(w http.ResponseWriter, r *http.Request) {
 	// A consumer reading its own record is how it learns its snapshot and reported marks, which is
 	// the input to its own freshness. Provider authority to read that would make every consumer as

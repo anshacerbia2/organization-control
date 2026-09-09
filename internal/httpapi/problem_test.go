@@ -104,6 +104,7 @@ var registry = map[string]error{
 	"projection.ErrPageSize":           projection.ErrPageSize,
 	"projection.ErrCursor":             projection.ErrCursor,
 	"projection.ErrNotRegistered":      projection.ErrNotRegistered,
+	"projection.ErrSingleConsumer":     projection.ErrSingleConsumer,
 	"projection.ErrNoSnapshotMark":     projection.ErrNoSnapshotMark,
 	"projection.ErrMarkWentBackwards":  projection.ErrMarkWentBackwards,
 	"projection.ErrReportMarkRequired": projection.ErrReportMarkRequired,

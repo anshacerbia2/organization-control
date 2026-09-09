@@ -324,6 +324,17 @@ func TestOverThresholdNamesTheMisusingConsumersWorstFirst(t *testing.T) {
 	tenantID, principalID := f.seed(t, "active", "active")
 
 	// Three consumers: well behaved, over the threshold, and far over it.
+	//
+	// Registered one at a time and retired as each finishes its interval, because
+	// `projection.consumer_single_active` permits one active consumer -- the distributed
+	// enforcement scope is one producer and one consumer, and that boundary is enforced by
+	// the schema rather than documented.
+	//
+	// The list this test asserts on is unaffected: `overThresholdStatement` selects on
+	// last_verify_ratio and does not filter retired rows, so a misuse interval stays
+	// reportable after the consumer that produced it is gone. Which is what an operator
+	// wants -- the interval happened -- and it means the ranking spans consumers over time
+	// rather than only consumers alive at once.
 	type wanted struct {
 		id    string
 		calls int
@@ -331,12 +342,15 @@ func TestOverThresholdNamesTheMisusingConsumersWorstFirst(t *testing.T) {
 		ratio float64
 	}
 	cases := []wanted{
-		{f.register(t), 1, 1000, 0.001},
-		{f.register(t), 2, 20, 0.1},
-		{f.register(t), 6, 10, 0.6},
+		{"", 1, 1000, 0.001},
+		{"", 2, 20, 0.1},
+		{"", 6, 10, 0.6},
 	}
-	for _, c := range cases {
-		for i := 0; i < c.calls; i++ {
+	for i := range cases {
+		c := &cases[i]
+		c.id = f.register(t)
+
+		for n := 0; n < c.calls; n++ {
 			if _, err := f.service.Verify(f.ctx, VerifyRequest{
 				ConsumerID: c.id, TenantID: tenantID, PrincipalID: principalID,
 			}); err != nil {
@@ -346,6 +360,7 @@ func TestOverThresholdNamesTheMisusingConsumersWorstFirst(t *testing.T) {
 		if _, err := f.service.RecordRate(f.ctx, RateReport{ConsumerID: c.id, Requests: c.reqs}); err != nil {
 			t.Fatalf("RecordRate: %v", err)
 		}
+		f.exec(t, `UPDATE projection.consumer SET retired_at = now() WHERE consumer_id = $1`, c.id)
 	}
 
 	over, err := f.service.OverThreshold(f.ctx, DefaultRateAlert)

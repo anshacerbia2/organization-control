@@ -202,6 +202,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 
 	api.HandleFunc("POST /v1/projections/consumers", h.registerConsumer)
 	api.HandleFunc("GET /v1/projections/consumers/{consumer_id}", h.getConsumer)
+	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/retire", h.retireConsumer)
 	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/progress", h.recordProgress)
 	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/bootstrap", h.bootstrapConsumer)
 	api.HandleFunc("POST /v1/projections/snapshot", h.snapshot)
