@@ -149,6 +149,10 @@ var mapping = []struct {
 
 	// Projection.
 	{projection.ErrNotRegistered, platform.Forbidden},
+	// StateTransitionRefused rather than ValidationFailed: the request is well formed and the
+	// estate is in a state that refuses it. The caller's move is to retire the consumer holding
+	// the slot, not to correct a field -- and the refusal names which consumer that is.
+	{projection.ErrSingleConsumer, platform.StateTransitionRefused},
 	{projection.ErrNoSnapshotMark, platform.PreconditionUnmet},
 	{projection.ErrMarkWentBackwards, platform.ValidationFailed},
 	{projection.ErrInvalid, platform.ValidationFailed},
