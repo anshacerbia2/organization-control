@@ -10,9 +10,12 @@ package controldb_test
 
 import (
 	"context"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
+	"github.com/anshacerbia2/foundation-platform/id"
 )
 
 const dispatchRole = "organization_dispatch_rt"
@@ -58,9 +61,11 @@ func TestTheDispatchRoleTouchesOnlyItsThreeObjects(t *testing.T) {
 	permitted := map[grant]bool{
 		{"platform.outbox", "SELECT"}:      true,
 		{"platform.outbox", "UPDATE"}:      true,
-		{"platform.dead_letter", "SELECT"}: true,
 		{"platform.dead_letter", "INSERT"}: true,
-		{"platform.dead_letter", "UPDATE"}: true,
+		// Not for reading incidents. `ON CONFLICT (event_id) DO NOTHING` makes PostgreSQL
+		// require SELECT on the table being inserted into; see grants.sql and the capability
+		// test below, which measured it.
+		{"platform.dead_letter", "SELECT"}: true,
 	}
 
 	for _, g := range held {
@@ -70,9 +75,19 @@ func TestTheDispatchRoleTouchesOnlyItsThreeObjects(t *testing.T) {
 		}
 	}
 
-	// And the two it must have, so a revocation that broke delivery would fail here rather than in
+	// And the three it must have, so a revocation that broke delivery would fail here rather than in
 	// production at the moment an event needed sending.
-	for _, required := range []grant{{"platform.outbox", "SELECT"}, {"platform.outbox", "UPDATE"}} {
+	//
+	// The positive half matters as much as the negative one above, and for a failure the negative
+	// half cannot see: an allowlist catches a role that gained something, and says nothing about a
+	// role that lost something it needs. A table this role must write, added by a later platform
+	// version and never granted, is invisible to the check that only looks for excess.
+	for _, required := range []grant{
+		{"platform.outbox", "SELECT"},
+		{"platform.outbox", "UPDATE"},
+		{"platform.dead_letter", "INSERT"},
+		{"platform.dead_letter", "SELECT"},
+	} {
 		found := false
 		for _, g := range held {
 			if g == required {
@@ -152,5 +167,110 @@ func TestTheDispatchRoleOwnsNothing(t *testing.T) {
 	}
 	if owned != 0 {
 		t.Errorf("the dispatch role owns %d objects, so it holds DDL on them regardless of grants", owned)
+	}
+}
+
+// TestTheDispatchRoleCanDeadLetterWithInsertAlone answers the question the catalog cannot.
+//
+// The narrowed grant leaves this role INSERT and nothing else on platform.dead_letter, and the
+// dispatcher's dead-letter write is an `INSERT ... SELECT FROM platform.outbox ... ON CONFLICT
+// (event_id) DO NOTHING`. Whether that shape needs SELECT or UPDATE on its target is PostgreSQL's
+// decision, not one to reason out: DO NOTHING does not read the conflicting row, but the grant was
+// narrowed on that belief and a belief is not a test.
+//
+// It runs the insert twice. The second attempt is the one that matters -- it takes the conflict
+// path against a row that already exists, which is the only case where a hidden read requirement
+// would surface.
+//
+// The statement is written out here rather than called, because foundation-platform keeps it
+// unexported. That is a drift risk and it is the smaller one: this asserts the SHAPE the privilege
+// question turns on, and if the real statement changes shape, the mutation this repository already
+// runs against the dispatch role's allowlist is what catches the privilege change.
+func TestTheDispatchRoleCanDeadLetterWithInsertAlone(t *testing.T) {
+	admin, ctx := openAdmin(t)
+
+	eventID, err := id.NewV7()
+	if err != nil {
+		t.Fatalf("NewV7: %v", err)
+	}
+	aggregateID, err := id.NewV7()
+	if err != nil {
+		t.Fatalf("NewV7: %v", err)
+	}
+
+	var createdAt time.Time
+	if err := admin.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO platform.outbox
+			    (event_id, event_type, aggregate_id, payload, envelope)
+			VALUES ($1::uuid, 'com.scnehaux.organization.membership.security.revoked', $2::uuid,
+			        '{}'::jsonb, jsonb_build_object('id', $3::text))
+			RETURNING created_at`,
+			eventID.String(), aggregateID.String(), eventID.String()).Scan(&createdAt)
+	}); err != nil {
+		t.Fatalf("seeding the outbox row: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = admin.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+			_, _ = tx.Exec(ctx, `DELETE FROM platform.dead_letter WHERE event_id = $1`, eventID.String())
+			_, _ = tx.Exec(ctx, `DELETE FROM platform.outbox WHERE event_id = $1`, eventID.String())
+			return nil
+		})
+	})
+
+	dispatch, dispatchCtx := openAs(t, "organization_dispatch_app", os.Getenv("TEST_DISPATCH_PASSWORD"))
+
+	deadLetter := `INSERT INTO platform.dead_letter
+	    (event_id, event_type, envelope, payload, failure_class, failure_detail, attempts,
+	     first_failed_at)
+	SELECT event_id, event_type, envelope, payload, $3, $4, $5,
+	       COALESCE(first_failed_at, now())
+	FROM platform.outbox
+	WHERE created_at = $1 AND event_id = $2
+	ON CONFLICT (event_id) DO NOTHING`
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := dispatch.InTx(dispatchCtx, func(ctx context.Context, tx db.Tx) error {
+			_, err := tx.Exec(ctx, deadLetter, createdAt, eventID.String(), "poison", "redacted", 1)
+			return err
+		}); err != nil {
+			t.Fatalf("attempt %d: the dispatch role cannot dead-letter with INSERT alone: %v\n"+
+				"The grant on platform.dead_letter was narrowed to INSERT on the understanding that "+
+				"ON CONFLICT DO NOTHING reads nothing. Add back only the privilege PostgreSQL names here.",
+				attempt, err)
+		}
+	}
+
+	// And the row is there, read back by the owner: the dispatch role cannot see its own write,
+	// which is the point of INSERT-only and is asserted below.
+	var rows int
+	if err := admin.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM platform.dead_letter WHERE event_id = $1`, eventID.String()).Scan(&rows)
+	}); err != nil {
+		t.Fatalf("counting dead letters: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("%d dead-letter rows after two attempts, want 1", rows)
+	}
+
+	// The negative half, on the same connection that just succeeded. Without it, a future widening
+	// of this grant would make the test above pass for the wrong reason.
+	//
+	// SELECT is not the thing denied: the conflict clause requires it. What must stay denied is
+	// changing an incident after it is written -- resolution is a separate role's decision, and a
+	// delivery worker that can edit the record of its own failure is one whose bug erases itself.
+	if err := dispatch.InTx(dispatchCtx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE platform.dead_letter SET resolved_at = now() WHERE event_id = $1`, eventID.String())
+		return err
+	}); err == nil {
+		t.Error("the dispatch role can UPDATE platform.dead_letter; resolving an incident is not a delivery worker's decision")
+	}
+	if err := dispatch.InTx(dispatchCtx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM platform.dead_letter WHERE event_id = $1`, eventID.String())
+		return err
+	}); err == nil {
+		t.Error("the dispatch role can DELETE from platform.dead_letter; the incident record must outlive the worker that wrote it")
 	}
 }

@@ -210,6 +210,47 @@ jobs:
       - name: prove tenant isolation as the runtime role
         run: go test ./internal/controldb/... ./internal/db/... -count=1 -v -p 1
 
+      # The platform schema must stay deny-by-default, and this proves the assertion that says so
+      # can fail.
+      #
+      # `platform` is the one schema this repository does not own: it arrives from
+      # foundation-platform on its own cadence, so a table can appear in this database without a
+      # line of code here changing. While the grant loop covered it and ALTER DEFAULT PRIVILEGES
+      # handed the same to everything added later, each new platform table arrived carrying full
+      # DML for both runtime roles -- which is how platform.delivery_receipt, the root of trust
+      # for dead-letter resolution, would have become INSERT-able by the ordinary request path.
+      #
+      # The mutation restores that posture: platform back into the loop, and the compensating
+      # revokes removed. Two edits rather than one, because either alone is cancelled by the
+      # other -- putting platform back in the loop while the explicit block still revokes leaves
+      # the database correct, and a gate that cannot reproduce the defect proves nothing about
+      # the assertion guarding it.
+      - name: the platform privilege posture is load-bearing
+        run: |
+          file=internal/controldb/grants.sql
+          cp "$file" "$file.orig"
+          sed -i "s/'projection','audit'\]/'projection','audit','platform']/" "$file"
+          sed -i "/^REVOKE ALL ON ALL TABLES    IN SCHEMA platform FROM organization_rt, organization_provider_rt;$/d;/^REVOKE ALL ON ALL SEQUENCES IN SCHEMA platform FROM organization_rt, organization_provider_rt;$/d" "$file"
+          perl -0pi -e 's/ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform\n    REVOKE ALL ON (?:TABLES|SEQUENCES) FROM organization_rt, organization_provider_rt;\n//g' "$file"
+          changed=$(git diff --numstat "$file" | awk '{print $1+$2}')
+          if [ "${changed:-0}" -lt 6 ]; then
+            echo "::error::the mutation changed ${changed:-0} lines; the loop entry or the compensating revokes were not found, and this check is silently passing"
+            mv "$file.orig" "$file"
+            exit 1
+          fi
+          go run ./cmd/organization-migrate -stage=post
+          if go test ./internal/controldb/ -count=1 \
+              -run 'TestThePlatformSchemaGrantsExactlyWhatWasDeclared|TestNewPlatformTablesArriveClosed'; then
+            echo "::error::the privilege assertions passed with the broad platform grant restored, so they do not test it"
+            mv "$file.orig" "$file"
+            go run ./cmd/organization-migrate -stage=post
+            exit 1
+          fi
+          echo "the posture is load-bearing: restoring the broad grant fails the privilege assertions"
+          mv "$file.orig" "$file"
+          # Put the database back, or every step after this one runs against the mutated posture.
+          go run ./cmd/organization-migrate -stage=post
+
       # Reused from foundation-platform rather than reimplemented. The rules live in arch.json
       # beside the code they constrain.
       - name: architecture boundaries
