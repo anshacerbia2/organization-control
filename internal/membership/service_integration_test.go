@@ -127,7 +127,7 @@ func grantOne(t *testing.T, service *Service, ctx context.Context) Result {
 // unrelated to the test that failed.
 func cleanup(t *testing.T, service *Service, ctx context.Context, membershipID id.UUID) {
 	t.Helper()
-	_ = db.WithTenantScope(ctx, service.pool, func(ctx context.Context, tx db.Tx) error {
+	_ = ownerPool(t, ctx).InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
 		_, _ = tx.Exec(ctx, `DELETE FROM platform.outbox WHERE aggregate_id = $1`, membershipID.String())
 		_, _ = tx.Exec(ctx, `DELETE FROM membership.membership WHERE membership_id = $1`, membershipID.String())
 		return nil
@@ -153,7 +153,7 @@ func statusAndVersion(t *testing.T, service *Service, ctx context.Context, membe
 func outboxCount(t *testing.T, service *Service, ctx context.Context, membershipID id.UUID) int {
 	t.Helper()
 	var count int
-	if err := db.WithTenantScope(ctx, service.pool, func(ctx context.Context, tx db.Tx) error {
+	if err := ownerPool(t, ctx).InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
 		return tx.QueryRow(ctx,
 			`SELECT count(*) FROM platform.outbox WHERE aggregate_id = $1`,
 			membershipID.String()).Scan(&count)
@@ -269,7 +269,7 @@ func TestWithdrawalTakesThePriorityLaneOnTheWire(t *testing.T) {
 		priority  int16
 	}
 	var rows []row
-	if err := db.WithTenantScope(ctx, service.pool, func(ctx context.Context, tx db.Tx) error {
+	if err := ownerPool(t, ctx).InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
 		result, err := tx.Query(ctx,
 			`SELECT event_type, priority FROM platform.outbox WHERE aggregate_id = $1 ORDER BY sequence`,
 			granted.Membership.MembershipID.String())
@@ -384,7 +384,7 @@ func TestAcceptedAtIsRecordedNotObserved(t *testing.T) {
 	// The same instant reaches the envelope, so a consumer measuring propagation and the caller
 	// measuring acknowledgement work from one origin rather than two clocks.
 	var occurred time.Time
-	if err := db.WithTenantScope(ctx, service.pool, func(ctx context.Context, tx db.Tx) error {
+	if err := ownerPool(t, ctx).InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
 		return tx.QueryRow(ctx,
 			`SELECT (envelope->>'time')::timestamptz FROM platform.outbox WHERE aggregate_id = $1`,
 			granted.Membership.MembershipID.String()).Scan(&occurred)
@@ -418,4 +418,21 @@ func TestAMembershipInAnotherTenantIsNotFound(t *testing.T) {
 	if status, _ := statusAndVersion(t, service, ctxA, granted.Membership.MembershipID); status != StateActive {
 		t.Errorf("status = %s after a cross-tenant attempt, want active", status)
 	}
+}
+
+// ownerPool is the owner connection, for assertions that read platform tables.
+//
+// No production path under tenant scope reads platform.outbox, so the tenant runtime role holds
+// no SELECT there. These assertions are the test inspecting what was published, and inspecting
+// is not the system under test -- routing them through the service's credential is what made an
+// unnecessary grant look necessary.
+func ownerPool(t *testing.T, ctx context.Context) *fdb.Pool {
+	t.Helper()
+	pool, err := fdb.Open(ctx, fdb.Config{
+		Name: "membership-test-owner", DSN: os.Getenv("TEST_DATABASE_URL"), MaxConns: 2})
+	if err != nil {
+		t.Fatalf("open owner pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }

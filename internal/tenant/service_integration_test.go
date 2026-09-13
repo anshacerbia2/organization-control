@@ -45,6 +45,17 @@ type fixture struct {
 	recorder *recorder
 	fixed    time.Time
 	actor    id.UUID
+
+	// setup is the owner connection, and it is separate from the pool the service runs on
+	// deliberately.
+	//
+	// Seeding and teardown are not the system under test. While they shared the service's
+	// runtime credential, the suite could not tell "this code needs that privilege" apart from
+	// "my cleanup needs it" -- and it did not: the fixtures delete from platform.outbox, which
+	// no production path does, and that alone kept a DELETE grant on the request-path role
+	// looking necessary. Narrowing the grants turned every one of these tests red, which is how
+	// the conflation surfaced.
+	setup *fdb.Pool
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -76,6 +87,13 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatalf("open pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+
+	// TEST_DATABASE_URL unmodified: the owner, not a runtime role.
+	setup, err := fdb.Open(ctx, fdb.Config{Name: "tenant-test-setup", DSN: base, MaxConns: 2})
+	if err != nil {
+		t.Fatalf("open setup pool: %v", err)
+	}
+	t.Cleanup(setup.Close)
 
 	rec := &recorder{}
 	providerPool, err := db.NewProviderPool(pool, rec)
@@ -112,6 +130,7 @@ func newFixture(t *testing.T) *fixture {
 		recorder: rec,
 		fixed:    fixed,
 		actor:    actor,
+		setup:    setup,
 	}
 }
 
@@ -154,13 +173,18 @@ func (f *fixture) requestProvisioning(t *testing.T, tenantID id.UUID, state stri
 		mustID(t).String(), tenantID.String(), state, mustID(t).String(), requestedAt)
 }
 
+// exec runs seeding and teardown on the owner connection.
+//
+// Not through WithProviderScope: that binds the provider scope and files a privileged-access
+// record, which is right for the service and wrong for a fixture -- it would fill the evidence
+// table with rows about test setup, and it would run the statements under the very credential
+// whose privileges these tests exist to constrain.
 func (f *fixture) exec(t *testing.T, statement string, args ...any) {
 	t.Helper()
-	if err := db.WithProviderScope(f.ctx, f.service.pool, "tenant suite fixture",
-		func(ctx context.Context, tx db.Tx) error {
-			_, err := tx.Exec(ctx, statement, args...)
-			return err
-		}); err != nil {
+	if err := f.setup.InTx(f.ctx, func(ctx context.Context, tx fdb.Tx) error {
+		_, err := tx.Exec(ctx, statement, args...)
+		return err
+	}); err != nil {
 		t.Fatalf("fixture statement: %v", err)
 	}
 }

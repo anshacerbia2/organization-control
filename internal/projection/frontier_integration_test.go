@@ -25,7 +25,9 @@ func frontierReader(t *testing.T) (*FrontierReader, *fdb.Pool, context.Context) 
 	if err != nil {
 		t.Fatalf("NewFrontierReader: %v", err)
 	}
-	return reader, f.pool, f.ctx
+	// f.setup, not f.pool: the value returned here is used only by the fixture helpers below,
+	// and writing to platform.dead_letter is not something any runtime role does.
+	return reader, f.setup, f.ctx
 }
 
 // insertOutboxRow writes one row directly, because what is under test is how the frontier reads the

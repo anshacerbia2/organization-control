@@ -71,8 +71,22 @@ DO $$
 DECLARE
     target TEXT;
 BEGIN
+    -- `platform` is deliberately absent. It is the one schema here that organization-control
+    -- does not own: it arrives from foundation-platform on a different release cadence, so a
+    -- table can appear in this database without a line of code in this repository changing.
+    --
+    -- The inheritance below is a considered trade for the schemas this repository DOES own --
+    -- their migrations and the code that needs them ship together, so a table the runtime
+    -- cannot read is a bug that surfaces on the first deploy and is fixed in the same commit.
+    -- That assumption does not hold for a schema someone else versions, and the failure runs
+    -- the other way: a new platform table arrives already writable by the request path, and
+    -- nothing fails, nothing logs. platform.delivery_receipt would have arrived that way --
+    -- the root of trust for dead-letter resolution, INSERT-able by organization_rt.
+    --
+    -- So platform is granted explicitly below, table by table, from execution paths that
+    -- exist. See "platform, by capability".
     FOREACH target IN ARRAY ARRAY['organization','tenant','workspace','membership',
-                                  'invitation','operation','projection','audit','platform']
+                                  'invitation','operation','projection','audit']
     LOOP
         EXECUTE format('REVOKE ALL ON SCHEMA %I FROM PUBLIC', target);
         EXECUTE format('GRANT USAGE ON SCHEMA %I TO organization_rt, organization_provider_rt', target);
@@ -92,6 +106,96 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------------------------
+-- platform, by capability
+-- ---------------------------------------------------------------------------------------------
+--
+-- Deny by default, then name what executes. Every grant below cites the path that needs it:
+--
+--   role -> execution path -> SQL operation -> table -> privilege
+--
+-- A privilege with no path is not granted, however harmless it looks. The dispatcher held
+-- SELECT and UPDATE on platform.dead_letter for outbox/maintenance.go, which no deployable
+-- calls; both runtime roles held full DML on platform.processed_event, which is a consumer's
+-- inbox and which no line of code in this repository touches. Neither was a misjudgement about
+-- what was needed -- nothing judged at all, because the grant was schema-wide.
+--
+-- Schema USAGE is granted and table privileges are not implied by it: a role with INSERT on a
+-- table it cannot reach through its schema still cannot use it, so both halves appear here.
+
+REVOKE ALL ON SCHEMA platform FROM PUBLIC;
+GRANT USAGE ON SCHEMA platform TO organization_rt, organization_provider_rt;
+
+-- Withdraws what earlier versions of this file granted schema-wide, including on a database
+-- that has already run them. Stated before the grants below, not after, or it would remove
+-- them again.
+REVOKE ALL ON ALL TABLES    IN SCHEMA platform FROM organization_rt, organization_provider_rt;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA platform FROM organization_rt, organization_provider_rt;
+
+-- The root cause, not the symptom. Without this, the next table foundation-platform adds is
+-- handed to both runtime roles automatically and every per-table revoke above is a race we
+-- lose one migration at a time.
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
+    REVOKE ALL ON TABLES FROM organization_rt, organization_provider_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
+    REVOKE ALL ON SEQUENCES FROM organization_rt, organization_provider_rt;
+
+-- platform.outbox -- INSERT
+--
+-- organization_rt          -> membership, invitation, workspace, organization, tenant (x2),
+--                             offboarding transitions -> outbox.Append -> INSERT
+-- organization_provider_rt -> the same services under provider scope, and projection.reconcile
+--
+-- The append happens inside the caller's domain transaction, which is the whole point of the
+-- outbox: the event and the state change commit together or neither does.
+GRANT INSERT ON platform.outbox TO organization_rt;
+GRANT INSERT ON platform.outbox TO organization_provider_rt;
+
+-- platform.outbox -- SELECT, provider only
+--
+-- organization_provider_rt -> projection.Publisher.Snapshot -> markStatement -> SELECT
+--                          -> projection.FrontierReader     -> frontierStatement -> SELECT
+--
+-- No path was found that reads the outbox under tenant scope, so organization_rt does not get
+-- it. If one exists that this derivation missed, the integration suite is where it surfaces.
+GRANT SELECT ON platform.outbox TO organization_provider_rt;
+
+-- platform.outbox_sequence -- outbox.Append takes its position from nextval in the same
+-- statement, so the sequence travels with the INSERT.
+GRANT USAGE, SELECT ON SEQUENCE platform.outbox_sequence
+    TO organization_rt, organization_provider_rt;
+
+-- platform.dead_letter -- SELECT, provider only
+--
+-- organization_provider_rt -> projection.FrontierReader -> unresolved security-debt facts
+--
+-- organization_rt gets nothing: no request-path code reads incident evidence. It previously
+-- held DELETE here, which let the ordinary request path remove a record of an undelivered
+-- security event rather than resolve it.
+GRANT SELECT ON platform.dead_letter TO organization_provider_rt;
+
+-- platform.idempotency_key -- SELECT, INSERT, UPDATE for both runtime roles
+--
+-- organization_rt          -> httpapi idempotency middleware -> db.Claim/Complete
+-- organization_provider_rt -> claimWithin, called inside withProviderScope
+--
+-- Deny-by-default is not deny-everything. This is the table that proves it: the claim store
+-- runs on the tenant connections by design, so a rule of "no platform access for the request
+-- path" would refuse every idempotent request and every Membership mutation in one deploy.
+GRANT SELECT, INSERT, UPDATE ON platform.idempotency_key
+    TO organization_rt, organization_provider_rt;
+
+-- platform.processed_event -- nothing, for either runtime role.
+--
+-- It is a consumer's deduplication inbox. inbox.Guard runs in foundation-reference, against
+-- foundation-reference's own database. Referenced in this repository only by the ordering
+-- guard at the top of this file, and by the comment below.
+
+-- platform.delivery_receipt -- absent at foundation-platform v0.2.3.
+--
+-- When the bump lands it is granted INSERT to organization_dispatch_rt and nothing else. The
+-- default-privilege revoke above is what stops it arriving writable before anyone says so.
+
 -- The partition maintenance helpers are invoked by the migration job, never by a runtime.
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA platform FROM PUBLIC;
 
@@ -108,7 +212,28 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA platform FROM PUBLIC;
 -- adds to the schema next.
 GRANT USAGE ON SCHEMA platform TO organization_dispatch_rt;
 GRANT SELECT, UPDATE            ON platform.outbox      TO organization_dispatch_rt;
-GRANT SELECT, INSERT, UPDATE    ON platform.dead_letter TO organization_dispatch_rt;
+
+-- INSERT and SELECT on dead_letter. UPDATE is withdrawn; SELECT is required, and not for the
+-- reason it looks like.
+--
+-- deadLetterStatement inserts into dead_letter and SELECTs from the OUTBOX, so the obvious
+-- reading is that INSERT alone suffices. It does not. The statement ends
+-- `ON CONFLICT (event_id) DO NOTHING`, and a conflict target makes PostgreSQL demand SELECT on
+-- the table being inserted into. Measured rather than reasoned, as the identical statement with
+-- and without the clause, under this exact role:
+--
+--   INSERT ... VALUES (...)                                    -> INSERT 0 1
+--   INSERT ... VALUES (...) ON CONFLICT (event_id) DO NOTHING  -> permission denied
+--
+-- Both this file and the review that prompted it had concluded INSERT was enough. The database
+-- is the only party that was going to settle it, which is why the capability test in
+-- dispatch_role_integration_test.go executes the statement instead of asserting the catalog.
+--
+-- UPDATE stays withdrawn: it was held for outbox/maintenance.go -- CountStaleUnresolvedDeadLetters
+-- and DisposeResolvedDeadLetters -- which no deployable calls. Privilege granted for code that
+-- does not run is privilege nothing can justify later.
+GRANT INSERT, SELECT            ON platform.dead_letter TO organization_dispatch_rt;
+REVOKE UPDATE                   ON platform.dead_letter FROM organization_dispatch_rt;
 GRANT USAGE, SELECT             ON SEQUENCE platform.outbox_sequence TO organization_dispatch_rt;
 
 -- No DELETE on the outbox. A dispatched row is marked published, never removed: retention is the

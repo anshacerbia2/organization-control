@@ -32,6 +32,8 @@ type recorder struct{}
 func (recorder) RecordProviderAccess(context.Context, db.ProviderAccess) error { return nil }
 
 type fixture struct {
+	setup *fdb.Pool
+
 	service     *Service
 	provider    *db.ProviderPool
 	providerCtx context.Context
@@ -115,7 +117,15 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatalf("ProviderScope: %v", err)
 	}
 
+	// TEST_DATABASE_URL unmodified: the owner, not a runtime role.
+	setup, err := fdb.Open(ctx, fdb.Config{Name: "invitation-test-setup", DSN: os.Getenv("TEST_DATABASE_URL"), MaxConns: 2})
+	if err != nil {
+		t.Fatalf("open setup pool: %v", err)
+	}
+	t.Cleanup(setup.Close)
+
 	return &fixture{
+		setup:   setup,
 		service: service, provider: provider,
 		providerCtx: db.WithScope(ctx, providerScope),
 		scopeFor: func(tenantID id.UUID) context.Context {
@@ -138,13 +148,16 @@ func mustID(t *testing.T) id.UUID {
 	return value
 }
 
+// exec runs seeding and teardown on the owner connection, not on the pool the service uses.
+//
+// Seeding is not the system under test. While the two shared a credential, this suite could
+// not tell "the code needs that privilege" apart from "my cleanup needs it".
 func (f *fixture) exec(t *testing.T, statement string, args ...any) {
 	t.Helper()
-	if err := db.WithProviderScope(f.providerCtx, f.provider, "invitation suite fixture",
-		func(ctx context.Context, tx db.Tx) error {
-			_, err := tx.Exec(ctx, statement, args...)
-			return err
-		}); err != nil {
+	if err := f.setup.InTx(f.providerCtx, func(ctx context.Context, tx fdb.Tx) error {
+		_, err := tx.Exec(ctx, statement, args...)
+		return err
+	}); err != nil {
 		t.Fatalf("fixture statement: %v", err)
 	}
 }
