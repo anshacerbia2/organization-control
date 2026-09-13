@@ -75,6 +75,11 @@ jobs:
       # These are the login roles created below, and they exist only inside this job.
       TEST_RUNTIME_PASSWORD: runtime
       TEST_PROVIDER_PASSWORD: provider
+      # Must match dispatch_password in the fixture step below. The role was created there from
+      # the start and never exported here, which stayed invisible until a test first connected as
+      # it -- the same shape as the grants this build now checks: declared in one place, consumed
+      # in another, and nothing linking the two.
+      TEST_DISPATCH_PASSWORD: dispatch
       # Turns a skipped isolation suite into a failure. Without it, a service container that
       # never came up would leave every cross-tenant assertion unrun and the build green, which
       # is indistinguishable from having proven isolation.

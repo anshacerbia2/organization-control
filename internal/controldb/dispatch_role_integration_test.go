@@ -218,7 +218,15 @@ func TestTheDispatchRoleCanDeadLetterWithInsertAlone(t *testing.T) {
 		})
 	})
 
-	dispatch, dispatchCtx := openAs(t, "organization_dispatch_app", os.Getenv("TEST_DISPATCH_PASSWORD"))
+	// Named before connecting. Without this the missing variable surfaces as a SASL failure for
+	// organization_dispatch_app, which reads as a broken role rather than an unset environment --
+	// and that is exactly how it presented the first time this test ran in CI.
+	password := os.Getenv("TEST_DISPATCH_PASSWORD")
+	if password == "" {
+		t.Fatal("TEST_DISPATCH_PASSWORD is empty: the dispatch login role exists but its password " +
+			"was never exported to the test environment, so this capability cannot be checked")
+	}
+	dispatch, dispatchCtx := openAs(t, "organization_dispatch_app", password)
 
 	deadLetter := `INSERT INTO platform.dead_letter
 	    (event_id, event_type, envelope, payload, failure_class, failure_detail, attempts,
