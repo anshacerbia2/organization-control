@@ -65,7 +65,9 @@ func TestTheDispatchRoleTouchesOnlyItsThreeObjects(t *testing.T) {
 		// Not for reading incidents. `ON CONFLICT (event_id) DO NOTHING` makes PostgreSQL
 		// require SELECT on the table being inserted into; see grants.sql and the capability
 		// test below, which measured it.
-		{"platform.dead_letter", "SELECT"}: true,
+		{"platform.dead_letter", "SELECT"}:      true,
+		{"platform.delivery_receipt", "INSERT"}: true,
+		{"platform.delivery_receipt", "SELECT"}: true,
 	}
 
 	for _, g := range held {
@@ -87,6 +89,8 @@ func TestTheDispatchRoleTouchesOnlyItsThreeObjects(t *testing.T) {
 		{"platform.outbox", "UPDATE"},
 		{"platform.dead_letter", "INSERT"},
 		{"platform.dead_letter", "SELECT"},
+		{"platform.delivery_receipt", "INSERT"},
+		{"platform.delivery_receipt", "SELECT"},
 	} {
 		found := false
 		for _, g := range held {
@@ -262,6 +266,33 @@ func TestTheDispatchRoleCanDeadLetterWithInsertAlone(t *testing.T) {
 		t.Errorf("%d dead-letter rows after two attempts, want 1", rows)
 	}
 
+	// The receipt table, measured here rather than inferred from the one above.
+	//
+	// Its statement carries the same shape of conflict target, so the same privilege requirement
+	// looks obvious -- and assuming it is precisely how foundation-platform v0.2.5 shipped a
+	// preflight demanding INSERT alone for this table, which would have passed against a database
+	// where the first delivery failed. Two tables, two measurements.
+	receipt := `INSERT INTO platform.delivery_receipt (event_id, consumer, event_type, evidence)
+	VALUES ($1, $2, 'com.scnehaux.organization.membership.security.revoked', 'consumer_applied')
+	ON CONFLICT (event_id, consumer) DO NOTHING`
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := dispatch.InTx(dispatchCtx, func(ctx context.Context, tx db.Tx) error {
+			_, err := tx.Exec(ctx, receipt, eventID.String(), "capability-probe")
+			return err
+		}); err != nil {
+			t.Fatalf("attempt %d: the dispatch role cannot record a delivery receipt: %v\n"+
+				"Add back only the privilege PostgreSQL names here, and record the measurement "+
+				"rather than carrying it across from platform.dead_letter.", attempt, err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = admin.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+			_, _ = tx.Exec(ctx, `DELETE FROM platform.delivery_receipt WHERE event_id = $1`, eventID.String())
+			return nil
+		})
+	})
+
 	// The negative half, on the same connection that just succeeded. Without it, a future widening
 	// of this grant would make the test above pass for the wrong reason.
 	//
@@ -280,5 +311,23 @@ func TestTheDispatchRoleCanDeadLetterWithInsertAlone(t *testing.T) {
 		return err
 	}); err == nil {
 		t.Error("the dispatch role can DELETE from platform.dead_letter; the incident record must outlive the worker that wrote it")
+	}
+
+	// And the same on the receipt table, which is the root of trust for dead-letter resolution.
+	// A delivery worker that can edit or remove the evidence of its own deliveries is one whose
+	// bug rewrites the record that would have shown it.
+	if err := dispatch.InTx(dispatchCtx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE platform.delivery_receipt SET evidence = 'consumer_applied' WHERE event_id = $1`,
+			eventID.String())
+		return err
+	}); err == nil {
+		t.Error("the dispatch role can UPDATE platform.delivery_receipt; resolution evidence must not be editable by the party it is evidence about")
+	}
+	if err := dispatch.InTx(dispatchCtx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM platform.delivery_receipt WHERE event_id = $1`, eventID.String())
+		return err
+	}); err == nil {
+		t.Error("the dispatch role can DELETE from platform.delivery_receipt")
 	}
 }

@@ -37,6 +37,7 @@ BEGIN
               ('platform.outbox'),
               ('platform.processed_event'),
               ('platform.dead_letter'),
+              ('platform.delivery_receipt'),
               ('platform.idempotency_key')
            ) AS expected(name)
      WHERE to_regclass(expected.name) IS NULL;
@@ -191,10 +192,18 @@ GRANT SELECT, INSERT, UPDATE ON platform.idempotency_key
 -- foundation-reference's own database. Referenced in this repository only by the ordering
 -- guard at the top of this file, and by the comment below.
 
--- platform.delivery_receipt -- absent at foundation-platform v0.2.3.
+-- platform.delivery_receipt -- nothing, for either runtime role.
 --
--- When the bump lands it is granted INSERT to organization_dispatch_rt and nothing else. The
--- default-privilege revoke above is what stops it arriving writable before anyone says so.
+-- It is the root of trust for dead-letter resolution: a row saying this event reached this
+-- consumer, and the only evidence in that contract not derived from the consumer's own report
+-- about itself. A request path able to INSERT here could forge the proof that closes a security
+-- debt, so forging the evidence and forging the resolution are the same act.
+--
+-- It arrived with the v0.2.5 bump, and it arrived closed. That is the default-privilege revoke
+-- above doing the one thing it exists for: before it, this table would have been handed full DML
+-- to both runtime roles by inheritance, with nothing failing and nothing logging.
+--
+-- The dispatcher's INSERT is granted with its other privileges below.
 
 -- The partition maintenance helpers are invoked by the migration job, never by a runtime.
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA platform FROM PUBLIC;
@@ -234,6 +243,27 @@ GRANT SELECT, UPDATE            ON platform.outbox      TO organization_dispatch
 -- does not run is privilege nothing can justify later.
 GRANT INSERT, SELECT            ON platform.dead_letter TO organization_dispatch_rt;
 REVOKE UPDATE                   ON platform.dead_letter FROM organization_dispatch_rt;
+
+-- INSERT and SELECT on delivery_receipt. Same pair as dead_letter, and for the same reason.
+--
+-- recordReceiptStatement writes one row per delivery in the same transaction that marks the
+-- outbox row published, so a receipt cannot exist for a delivery that rolled back. It ends
+-- `ON CONFLICT (event_id, consumer) DO NOTHING`, and a conflict target makes PostgreSQL require
+-- SELECT on the table being inserted into.
+--
+-- Measured for this table rather than carried over from the one above, which is the distinction
+-- that matters: foundation-platform v0.2.5 shipped a preflight asserting INSERT alone here,
+-- because the measurement already in hand for dead_letter was not repeated for the table beside
+-- it. That check would have passed against a database where the next delivery failed.
+--
+--   INSERT ... ON CONFLICT (event_id, consumer) DO NOTHING
+--     INSERT           -> permission denied
+--     INSERT, SELECT   -> INSERT 0 1
+--
+-- Never UPDATE or DELETE. A delivery worker able to edit the evidence of its own deliveries is
+-- one whose bug rewrites the record that would have shown it.
+GRANT INSERT, SELECT            ON platform.delivery_receipt TO organization_dispatch_rt;
+
 GRANT USAGE, SELECT             ON SEQUENCE platform.outbox_sequence TO organization_dispatch_rt;
 
 -- No DELETE on the outbox. A dispatched row is marked published, never removed: retention is the
