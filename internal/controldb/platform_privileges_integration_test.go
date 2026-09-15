@@ -59,6 +59,9 @@ var expectedPlatformPrivileges = map[string]map[string][]string{
 		// SELECT is not for reading incidents. `ON CONFLICT (event_id) DO NOTHING` makes
 		// PostgreSQL require SELECT on the table being inserted into; measured, not assumed.
 		"dead_letter": {"INSERT", "SELECT"},
+		// Measured for this table too rather than carried across from the one above. Assuming it
+		// is how foundation-platform v0.2.5 shipped a preflight requiring INSERT alone here.
+		"delivery_receipt": {"INSERT", "SELECT"},
 	},
 }
 
