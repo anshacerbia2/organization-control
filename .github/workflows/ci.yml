@@ -256,6 +256,60 @@ jobs:
           # Put the database back, or every step after this one runs against the mutated posture.
           go run ./cmd/organization-migrate -stage=post
 
+      # The single-consumer scope is enforced in two places, and each mutation proves a different
+      # one carries its own weight.
+      #
+      # The enforcement scope for distributed Membership enforcement is one producer and one
+      # projection consumer. Several things that are correct at that scope go silently wrong
+      # beyond it — dead-letter debt is reported estate-wide rather than per consumer, so one
+      # consumer's poison event would refuse every other consumer's traffic. The limit is
+      # therefore load-bearing rather than tidy, and a documented limitation nobody enforces is
+      # one that expires without anyone noticing.
+      #
+      # Mutation A removes the registry's pre-check. The database still refuses through its
+      # partial unique index, so the estate stays correct — but the caller receives a raw
+      # SQLSTATE 23505 instead of a refusal naming the consumer in the way, and the HTTP surface
+      # answers 500 rather than 409. That is what the first mutation asserts is still tested.
+      #
+      # Mutation B drops the index. The pre-check still refuses anything going through Register,
+      # and anything reaching the table another way — psql, a future code path — is accepted.
+      - name: the single-consumer scope is load-bearing
+        run: |
+          registry=internal/projection/consumer.go
+          schema=schema.hcl
+          cp "$registry" "$registry.orig"
+
+          # A: the registry's refusal, which turns the constraint into an answer naming the
+          # consumer in the way. One token, so the mutation cannot silently miss its target.
+          sed -i 's/if held {/if false {/' "$registry"
+          if git diff --quiet "$registry"; then
+            echo "::error::the registry pre-check was not found; this check is silently passing and must be updated"
+            mv "$registry.orig" "$registry"
+            exit 1
+          fi
+          if go test ./internal/projection/ -count=1 -run 'TestASecondActiveConsumerIsRefused'; then
+            echo "::error::the suite passed with the registry pre-check removed, so nothing asserts the refusal names the consumer in the way"
+            mv "$registry.orig" "$registry"
+            exit 1
+          fi
+          echo "the registry pre-check is load-bearing"
+          mv "$registry.orig" "$registry"
+
+          # B: the database constraint, which is what binds a writer that never calls Register.
+          psql -v ON_ERROR_STOP=1 -q -c "DROP INDEX projection.consumer_single_active" -d "$TEST_DATABASE_URL"
+          if go test ./internal/projection/ -count=1 -run 'TestTheDatabaseRefusesASecondActiveConsumerWithoutTheRegistry'; then
+            echo "::error::the suite passed with the unique index dropped, so the constraint is not tested"
+            go run ./cmd/organization-migrate -stage=post
+            exit 1
+          fi
+          echo "the database constraint is load-bearing"
+          # Restore it, or every step after this one runs without the invariant.
+          psql -v ON_ERROR_STOP=1 -q \
+            -c "CREATE UNIQUE INDEX consumer_single_active ON projection.consumer ((true)) WHERE retired_at IS NULL" \
+            -d "$TEST_DATABASE_URL"
+        env:
+          PGPASSWORD: organization
+
       # Reused from foundation-platform rather than reimplemented. The rules live in arch.json
       # beside the code they constrain.
       - name: architecture boundaries
