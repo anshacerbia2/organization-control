@@ -51,6 +51,7 @@ type Services struct {
 	Frontier      *projection.FrontierReader
 	Publisher     *projection.Publisher
 	Reconciler    *projection.Reconciler
+	Replayer      *projection.Replayer
 	Contexts      *occontext.Service
 }
 
@@ -209,6 +210,11 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("GET /v1/projections/frontier", h.frontier)
 	api.HandleFunc("POST /v1/projections/reconcile", h.reconcile)
 
+	// Replay does not resolve. It puts an abandoned delivery back on the wire so the dispatcher
+	// carries it again; the incident stays open and the security debt stays blocking until a
+	// resolution consumes the evidence this may produce.
+	api.HandleFunc("POST /v1/dead-letters/{event_id}/replay", h.replayDeadLetter)
+
 	api.HandleFunc("POST /v1/context/verify", h.verifyContext)
 	api.HandleFunc("POST /v1/context/switch-eligible", h.switchEligible)
 	api.HandleFunc("POST /v1/context/rate", h.recordRate)
@@ -241,6 +247,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the projection publisher is required")
 	case s.Reconciler == nil:
 		return errors.New("httpapi: the projection reconciler is required")
+	case s.Replayer == nil:
+		return errors.New("httpapi: the dead-letter replayer is required")
 	case s.Contexts == nil:
 		return errors.New("httpapi: the context service is required")
 	}
