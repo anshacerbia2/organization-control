@@ -160,6 +160,16 @@ var mapping = []struct {
 	{projection.ErrCursor, platform.ValidationFailed},
 	{projection.ErrReportMarkRequired, platform.ValidationFailed},
 
+	// Dead-letter replay.
+	{projection.ErrDeadLetterNotFound, platform.NotFound},
+	// StateTransitionRefused, not NotFound: the incident exists and is closed, and saying so is
+	// the answer -- an operator replaying a resolved incident has a wrong picture of the estate,
+	// and "not found" would confirm it.
+	{projection.ErrAlreadyResolved, platform.StateTransitionRefused},
+	// PreconditionUnmet rather than ValidationFailed: the request is correct and the stored row
+	// cannot satisfy it. Nothing the caller sends changes that, which is what separates the two.
+	{projection.ErrUnreplayable, platform.PreconditionUnmet},
+
 	// Context.
 	{context.ErrInvalid, platform.ValidationFailed},
 	{context.ErrNotRegistered, platform.Forbidden},

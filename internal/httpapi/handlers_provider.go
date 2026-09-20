@@ -956,3 +956,42 @@ func (h *handlers) ratesOverThreshold(w http.ResponseWriter, r *http.Request) {
 	}
 	respond(w, http.StatusOK, ratesResponse{Rates: rates})
 }
+
+type replayResponse struct {
+	EventID   string `json:"event_id"`
+	EventType string `json:"event_type"`
+	Position  int64  `json:"position"`
+	Resolved  bool   `json:"resolved"`
+}
+
+// replayDeadLetter puts an abandoned delivery back into the outbox under its original identifier.
+//
+// Provider-only, and audited by the scope wrapper before the transaction opens, so an attempt that
+// fails still leaves a record that it was made.
+//
+// It resolves nothing, and the response says so in a field rather than a comment: `resolved` is
+// always false here. Replay creates the opportunity for evidence; a resolution consumes it. The
+// separation is enforced below this handler as well -- the provider role holds no UPDATE on
+// platform.dead_letter -- so a future change here cannot quietly merge the two acts.
+func (h *handlers) replayDeadLetter(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	eventID, ok := pathUUID(w, r, "event_id")
+	if !ok {
+		return
+	}
+
+	result, err := h.services.Replayer.Replay(r.Context(), eventID)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+
+	respond(w, http.StatusAccepted, replayResponse{
+		EventID:   result.EventID.String(),
+		EventType: result.EventType,
+		Position:  result.Position,
+		Resolved:  false,
+	})
+}

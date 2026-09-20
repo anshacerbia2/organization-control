@@ -186,6 +186,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("projection reconciler: %w", err)
 	}
+	// Provider-scoped, unlike the frontier below: a replay puts a security event back on the wire,
+	// and the access record the scope wrapper writes first is the point of doing it this way.
+	replayer, err := projection.NewReplayer(providerPool)
+	if err != nil {
+		return fmt.Errorf("dead-letter replayer: %w", err)
+	}
 	// The raw transactor, not the provider pool: the frontier reads platform.outbox aggregates,
 	// which carry no tenant_id and no policy, and consumers poll it. Through the provider scope every
 	// poll would write a privileged-access record, filling the evidence table with rows about
@@ -210,6 +216,7 @@ func run() error {
 			Organizations: organizations,
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
+			Replayer: replayer,
 			Frontier: frontier,
 		},
 		Database:         tenantConns,

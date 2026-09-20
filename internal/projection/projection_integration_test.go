@@ -35,6 +35,11 @@ func (r *recorder) RecordProviderAccess(context.Context, db.ProviderAccess) erro
 type fixture struct {
 	setup *fdb.Pool
 
+	// The capturing recorder the provider pool was built with. Held so a test can assert that a
+	// refused provider action still filed its access record — nothing from this suite reaches
+	// audit.privileged_access.
+	recorder *recorder
+
 	pool       *fdb.Pool
 	provider   *db.ProviderPool
 	registry   *Registry
@@ -76,7 +81,11 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(pool.Close)
 
-	provider, err := db.NewProviderPool(pool, &recorder{})
+	// Kept rather than constructed inline: the scope wrapper writes its access record through this,
+	// so a test asserting that a refused provider action is still attributable has to be able to
+	// see it. Nothing reaches audit.privileged_access from this suite.
+	sink := &recorder{}
+	provider, err := db.NewProviderPool(pool, sink)
 	if err != nil {
 		t.Fatalf("NewProviderPool: %v", err)
 	}
@@ -115,8 +124,8 @@ func newFixture(t *testing.T) *fixture {
 	t.Cleanup(setup.Close)
 
 	return &fixture{
-		setup: setup,
-		pool:  pool, provider: provider, registry: registry, publisher: publisher,
+		setup: setup, recorder: sink,
+		pool: pool, provider: provider, registry: registry, publisher: publisher,
 		reconciler: reconciler, ctx: db.WithScope(ctx, scope), fixed: fixed,
 	}
 }
