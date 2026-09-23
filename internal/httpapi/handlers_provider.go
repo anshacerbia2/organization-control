@@ -995,3 +995,45 @@ func (h *handlers) replayDeadLetter(w http.ResponseWriter, r *http.Request) {
 		Resolved:  false,
 	})
 }
+
+type resolveResponse struct {
+	EventID        string `json:"event_id"`
+	Consumer       string `json:"consumer"`
+	ResolutionType string `json:"resolution_type"`
+	Reference      string `json:"resolution_reference"`
+}
+
+// resolveDeadLetter closes an incident that applied evidence supports, and refuses otherwise.
+//
+// Provider-only at the HTTP boundary and organization_resolution_rt at the database one — two
+// different questions. The first asks whether this caller may ask; the second bounds what the
+// answer can touch, which is four columns of one row and nothing else. The credential that
+// replays an abandoned delivery holds no UPDATE there, so replaying and closing cannot be done by
+// one process even if this handler were wrong.
+//
+// The consumer whose receipt counts is derived server-side and is absent from the request on
+// purpose: the operator chooses the action, the server chooses the subject the evidence must be
+// about. So is the author — resolved_by comes from the bound scope, because an author taken from
+// a body is an author anybody can write.
+func (h *handlers) resolveDeadLetter(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	eventID, ok := pathUUID(w, r, "event_id")
+	if !ok {
+		return
+	}
+
+	result, err := h.services.Resolver.Resolve(r.Context(), eventID)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+
+	respond(w, http.StatusOK, resolveResponse{
+		EventID:        result.EventID.String(),
+		Consumer:       result.Consumer,
+		ResolutionType: result.Type,
+		Reference:      result.Reference,
+	})
+}

@@ -250,9 +250,69 @@ func WithProviderSnapshot(ctx context.Context, pool *ProviderPool, reason string
 	return withProviderScope(ctx, pool, reason, true, fn)
 }
 
+// ResolutionPool carries the one operator act that closes a security incident.
+//
+// A distinct pool rather than a capability on ProviderPool, because it authenticates as a distinct
+// database role. The provider role replays an abandoned delivery and holds no UPDATE on
+// platform.dead_letter; the resolution role holds column-level UPDATE on four columns of that table
+// and can reach nothing else. Running both through one pool would put replay and closure behind one
+// credential, and the evidence between them would be decorative.
+//
+// It carries the same mandatory recorder for the same reason: closing an incident is the most
+// consequential cross-tenant act in the estate, and an unattributable one is worse than a
+// cross-tenant read nobody logged.
+type ResolutionPool struct {
+	tx       Transactor
+	recorder PrivilegedRecorder
+}
+
+// NewResolutionPool wraps the resolution pool.
+func NewResolutionPool(tx Transactor, recorder PrivilegedRecorder) (*ResolutionPool, error) {
+	if tx == nil {
+		return nil, errors.New("db: a transaction source is required")
+	}
+	if recorder == nil {
+		return nil, errors.New("db: a resolution pool requires a privileged-access recorder")
+	}
+	return &ResolutionPool{tx: tx, recorder: recorder}, nil
+}
+
+// WithResolutionScope runs fn as the resolution role, with the access recorded first.
+//
+// Built on the same primitive as WithProviderScope rather than beside it, and that is the point of
+// the shape. A resolver given a bare pool would have to remember to write its own access record,
+// and the one operation in this estate that must never be unattributable would be the one whose
+// attribution depended on somebody remembering. Here it is written before the transaction opens, so
+// a resolution refused by the predicate still leaves evidence that it was attempted — and an
+// attempt refused is exactly what an investigation asks about.
+//
+// The provider scope binding is set for the same reason it is on the provider path: the tables this
+// role touches carry no tenant column, but `app.provider_scope` is what the audit trail and the
+// policy set agree on, and a second convention would be a second thing to get right.
+func WithResolutionScope(ctx context.Context, pool *ResolutionPool, reason string, fn Body) error {
+	if pool == nil {
+		return errors.New("db: a resolution pool is required")
+	}
+	return withRecordedScope(ctx, pool.tx, pool.recorder, reason, false, fn)
+}
+
 func withProviderScope(ctx context.Context, pool *ProviderPool, reason string, snapshot bool, fn Body) error {
 	if pool == nil {
 		return errors.New("db: a provider pool is required")
+	}
+	return withRecordedScope(ctx, pool.tx, pool.recorder, reason, snapshot, fn)
+}
+
+// withRecordedScope is the primitive both paths share: validate the scope, record the access, then
+// open the transaction and bind.
+//
+// One implementation rather than two, so the ordering property — evidence before effect — cannot
+// drift between them. It drifted once already in this estate, in a different file, and the failure
+// was invisible because the happy path looked identical.
+func withRecordedScope(ctx context.Context, tx Transactor, recorder PrivilegedRecorder,
+	reason string, snapshot bool, fn Body) error {
+	if tx == nil {
+		return errors.New("db: a transaction source is required")
 	}
 	scope, ok := ScopeFrom(ctx)
 	if !ok {
@@ -268,7 +328,7 @@ func withProviderScope(ctx context.Context, pool *ProviderPool, reason string, s
 	// Recorded first, and a failure here stops the transaction. Proceeding without evidence
 	// would make the access unattributable, which is the one property PAD-PLT-002 §3.3
 	// invariant 22 does not treat as optional.
-	if err := pool.recorder.RecordProviderAccess(ctx, ProviderAccess{
+	if err := recorder.RecordProviderAccess(ctx, ProviderAccess{
 		Actor:       scope.actor,
 		Correlation: scope.correlation,
 		Reason:      reason,
@@ -276,7 +336,7 @@ func withProviderScope(ctx context.Context, pool *ProviderPool, reason string, s
 		return fmt.Errorf("db: record provider access: %w", err)
 	}
 
-	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+	return tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
 		if snapshot {
 			if _, err := tx.Exec(ctx,
 				`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`); err != nil {

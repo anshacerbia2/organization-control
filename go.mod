@@ -5,7 +5,7 @@ module github.com/anshacerbia2/organization-control
 // and GO_VERSION in ci.yml is a testing choice. See foundation-platform README §Go versions.
 go 1.25.0
 
-require github.com/anshacerbia2/foundation-platform v0.2.6
+require github.com/anshacerbia2/foundation-platform v0.2.7
 
 require (
 	github.com/go-logr/logr v1.4.3 // indirect

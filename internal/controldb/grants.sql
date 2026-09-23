@@ -276,6 +276,55 @@ REVOKE DELETE ON platform.outbox FROM organization_dispatch_rt;
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_dispatch_rt;
 
+-- ---------------------------------------------------------------------------------------------
+-- The resolution role
+-- ---------------------------------------------------------------------------------------------
+--
+-- Closing a dead letter is what makes the frontier stop reporting a security debt, which is what
+-- lets every consumer serve again. It is the estate's most consequential operator act, and it is
+-- the only one with its own credential.
+--
+-- Separate from the provider role on purpose. The provider role replays an abandoned delivery and
+-- holds no UPDATE here, so it cannot close what it just put back on the wire. One credential
+-- performing both would make replay and "declare it delivered" the same act, and the evidence
+-- between them decorative.
+
+GRANT USAGE ON SCHEMA platform, projection, audit TO organization_resolution_rt;
+
+-- Column-level UPDATE, not table-level.
+--
+-- The resolver writes four columns and must not be able to touch the rest of the row. Table-level
+-- UPDATE would let it rewrite failure_class, envelope, payload or dead_lettered_at -- the record
+-- of what went wrong -- while closing the incident that records it. An operator able to edit the
+-- account of a failure and close it in one statement leaves nothing an investigation can read.
+--
+-- SELECT on the whole row, because the predicate has to read the incident before it decides.
+GRANT SELECT ON platform.dead_letter TO organization_resolution_rt;
+GRANT UPDATE (resolved_at, resolution_type, resolved_by, resolution_reference)
+    ON platform.dead_letter TO organization_resolution_rt;
+
+-- The evidence, read-only. A resolver that could write receipts could manufacture the proof it
+-- then consumes, which is the whole predicate defeated in one grant.
+GRANT SELECT ON platform.delivery_receipt TO organization_resolution_rt;
+
+-- Whose receipt counts. The active projection consumer is derived from this table server-side
+-- rather than accepted from the request: the operator chooses the action, the server chooses the
+-- subject the evidence must be about.
+GRANT SELECT ON projection.consumer TO organization_resolution_rt;
+
+-- The access record, written before the resolution transaction opens so an attempt that fails is
+-- still attributable.
+GRANT INSERT ON audit.privileged_access TO organization_resolution_rt;
+
+-- Nothing inherited, for the same reason as the dispatcher: a table added later must be granted
+-- deliberately rather than arrive in the hands of a role whose scope is four objects.
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_resolution_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA projection
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_resolution_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA audit
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_resolution_rt;
+
 -- The tenant-scoped role holds no privilege on `organization`.
 --
 -- TDD-organization-control-001 classifies that schema outside the RLS set because an

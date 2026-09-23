@@ -80,6 +80,7 @@ jobs:
       # it -- the same shape as the grants this build now checks: declared in one place, consumed
       # in another, and nothing linking the two.
       TEST_DISPATCH_PASSWORD: dispatch
+      TEST_RESOLUTION_PASSWORD: resolution
       # Turns a skipped isolation suite into a failure. Without it, a service container that
       # never came up would leave every cross-tenant assertion unrun and the build green, which
       # is indistinguishable from having proven isolation.
@@ -190,6 +191,7 @@ jobs:
             -v runtime_password=runtime \
             -v provider_password=provider \
             -v dispatch_password=dispatch \
+            -v resolution_password=resolution \
             -f scripts/ci-fixture.sql \
             -d "$TEST_DATABASE_URL"
         env:

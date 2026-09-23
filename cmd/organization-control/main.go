@@ -192,6 +192,22 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("dead-letter replayer: %w", err)
 	}
+
+	// Its own connections, as its own role. Closing an incident is the act that makes every
+	// consumer serve again, and it is the only one in this service with a credential of its own.
+	resolutionConns, err := fdb.Open(ctx, fdb.Config{Name: "organization-control-resolution", DSN: cfg.ResolutionDSN, MaxConns: 2})
+	if err != nil {
+		return fmt.Errorf("resolution pool: %w", err)
+	}
+	defer resolutionConns.Close()
+	resolutionPool, err := db.NewResolutionPool(resolutionConns, recorder)
+	if err != nil {
+		return fmt.Errorf("resolution scope pool: %w", err)
+	}
+	resolver, err := projection.NewResolver(resolutionPool)
+	if err != nil {
+		return fmt.Errorf("dead-letter resolver: %w", err)
+	}
 	// The raw transactor, not the provider pool: the frontier reads platform.outbox aggregates,
 	// which carry no tenant_id and no policy, and consumers poll it. Through the provider scope every
 	// poll would write a privileged-access record, filling the evidence table with rows about
@@ -216,7 +232,7 @@ func run() error {
 			Organizations: organizations,
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
-			Replayer: replayer,
+			Replayer: replayer, Resolver: resolver,
 			Frontier: frontier,
 		},
 		Database:         tenantConns,

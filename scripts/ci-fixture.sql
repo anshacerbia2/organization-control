@@ -50,6 +50,21 @@ ALTER ROLE organization_dispatch_app
   WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD :'dispatch_password';
 GRANT organization_dispatch_rt TO organization_dispatch_app;
 
+-- The resolver's login role. Separate again, and for a sharper reason than the dispatcher's:
+-- this is the credential that closes security incidents. A deployment that reused the provider
+-- credential for it would put replay and closure behind one secret, which is the separation the
+-- fourth role exists to create.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_resolution_app') THEN
+    CREATE ROLE organization_resolution_app LOGIN;
+  END IF;
+END
+$$;
+ALTER ROLE organization_resolution_app
+  WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD :'resolution_password';
+GRANT organization_resolution_rt TO organization_resolution_app;
+
 -- Two Tenants, because cross-tenant denial cannot be proven with one. Seeded on the
 -- administrative connection deliberately: the fixture is not the thing under test, and seeding
 -- through a bound runtime role would make the suite assert its own setup.

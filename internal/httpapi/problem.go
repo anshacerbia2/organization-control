@@ -169,6 +169,11 @@ var mapping = []struct {
 	// PreconditionUnmet rather than ValidationFailed: the request is correct and the stored row
 	// cannot satisfy it. Nothing the caller sends changes that, which is what separates the two.
 	{projection.ErrUnreplayable, platform.PreconditionUnmet},
+	// PreconditionUnmet for both: the request is correct and the estate does not yet satisfy it.
+	// The caller's move is to replay the event, or to register the consumer whose receipt would
+	// count -- not to correct a field, which is what ValidationFailed would tell them.
+	{projection.ErrNoActiveConsumer, platform.PreconditionUnmet},
+	{projection.ErrNoAppliedEvidence, platform.PreconditionUnmet},
 
 	// Context.
 	{context.ErrInvalid, platform.ValidationFailed},

@@ -35,8 +35,9 @@ type Config struct {
 	// Both are required. Defaulting the provider DSN to the tenant one is exactly the collapse
 	// above, and defaulting it to empty would produce a process whose provider routes fail at
 	// request time rather than at startup.
-	TenantDSN   string
-	ProviderDSN string
+	TenantDSN     string
+	ProviderDSN   string
+	ResolutionDSN string
 
 	DBMaxConns        int32
 	DBMaxConnLifetime time.Duration
@@ -116,6 +117,11 @@ func Load() (Config, error) {
 		"ORGANIZATION_TENANT_DATABASE_URL":   &cfg.TenantDSN,
 		"ORGANIZATION_PROVIDER_DATABASE_URL": &cfg.ProviderDSN,
 
+		// The resolver's own credential. Required rather than defaulted to the provider one:
+		// a deployment that fell back would put replay and closure behind one secret, which is
+		// the separation the fourth role exists to create, and nothing would report it.
+		"ORGANIZATION_RESOLUTION_DATABASE_URL": &cfg.ResolutionDSN,
+
 		// Each of these is a term in an authentication decision. A default would be a default
 		// answer to "who may call this service", which is not a question a fallback value gets to
 		// answer.
@@ -143,6 +149,22 @@ func Load() (Config, error) {
 			"ORGANIZATION_TENANT_DATABASE_URL and ORGANIZATION_PROVIDER_DATABASE_URL are identical, "+
 				"so both pools would authenticate as one role and the isolation boundary between "+
 				"them would exist only in the Go type system"))
+	}
+
+	// The same check for the resolution credential, and it guards a sharper property.
+	//
+	// The provider role replays an abandoned delivery and holds no UPDATE on platform.dead_letter;
+	// the resolution role closes the incident. Pointed at the same DSN, one process would do both
+	// under one credential, and the database separation that makes the evidence between them
+	// meaningful would be gone — while every test still passed, because they would pass as the
+	// wider role.
+	if cfg.ResolutionDSN != "" &&
+		(cfg.ResolutionDSN == cfg.ProviderDSN || cfg.ResolutionDSN == cfg.TenantDSN) {
+		problems = append(problems, errors.New(
+			"ORGANIZATION_RESOLUTION_DATABASE_URL matches another pool's DSN, so replaying an "+
+				"abandoned delivery and closing the incident it left would be performed by one "+
+				"credential — and the evidence the resolver reads would be evidence the same "+
+				"process could have produced"))
 	}
 
 	cfg.ConsumerRole = strings.TrimSpace(os.Getenv("ORGANIZATION_CONSUMER_ROLE"))

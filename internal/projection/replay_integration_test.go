@@ -218,9 +218,13 @@ func TestReplayingAResolvedIncidentIsRefused(t *testing.T) {
 	f := newFixture(t)
 	eventID, _ := abandoned(t, f, outbox.PriorityHigh, true)
 
+	// All four columns, because a timestamp alone is no longer a resolution: platform migration
+	// 0006 refuses an incident closed without a reason, an author, and a reference to the evidence.
 	if err := f.setup.InTx(f.ctx, func(ctx context.Context, tx fdb.Tx) error {
-		_, err := tx.Exec(ctx,
-			`UPDATE platform.dead_letter SET resolved_at = now() WHERE event_id = $1`, eventID.String())
+		_, err := tx.Exec(ctx, `UPDATE platform.dead_letter
+			   SET resolved_at = now(), resolution_type = 'REPLAYED', resolved_by = 'suite',
+			       resolution_reference = 'platform.delivery_receipt:' || event_id::text
+			 WHERE event_id = $1`, eventID.String())
 		return err
 	}); err != nil {
 		t.Fatalf("resolving the dead letter: %v", err)
