@@ -16,6 +16,10 @@
 //
 // The cost is a row for an access whose work did not happen. That is the correct direction to fail —
 // an over-recorded access is answerable, an unrecorded one is not.
+//
+// The counterpart is db.RecordAccessInTx, which records an OUTCOME inside the transaction that
+// produced it. The two ownerships are not a choice between styles: an attempt must outlive its own
+// failure, and an outcome must not outlive the transaction it claims happened.
 package access
 
 import (
@@ -23,24 +27,12 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/anshacerbia2/foundation-platform/id"
-
 	"github.com/anshacerbia2/organization-control/internal/db"
 )
 
-// insertStatement writes one evidence row.
-//
-// `occurred_at` is left to the column default so the timestamp is the database's, not the process's.
-// A recorder that stamped its own clock would let a replica with a skewed clock produce evidence
-// that cannot be ordered against the rows the transaction went on to write.
-const insertStatement = `INSERT INTO audit.privileged_access
-    (access_id, actor_id, correlation_id, reason)
-VALUES ($1, $2, $3, $4)`
-
 // Recorder persists provider access to audit.privileged_access.
 type Recorder struct {
-	tx    db.Transactor
-	newID func() (id.UUID, error)
+	tx db.Transactor
 }
 
 // New constructs the recorder.
@@ -53,7 +45,7 @@ func New(tx db.Transactor) (*Recorder, error) {
 	if tx == nil {
 		return nil, errors.New("access: a transaction source is required")
 	}
-	return &Recorder{tx: tx, newID: id.NewV7}, nil
+	return &Recorder{tx: tx}, nil
 }
 
 // RecordProviderAccess writes one row and reports whether it committed.
@@ -75,16 +67,12 @@ func (r *Recorder) RecordProviderAccess(ctx context.Context, provider db.Provide
 		return db.ErrReasonRequired
 	}
 
-	accessID, err := r.newID()
-	if err != nil {
-		return fmt.Errorf("access: mint identifier: %w", err)
-	}
-
+	// The row is written by db.RecordAccessInTx, which the in-transaction writer also uses. One
+	// statement, two transaction owners: what distinguishes this recorder is the transaction it
+	// opens here, not a second copy of the INSERT that could drift into a different shape.
 	return r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		if _, err := tx.Exec(ctx, insertStatement,
-			accessID.String(), provider.Actor.String(), provider.Correlation.String(),
-			provider.Reason); err != nil {
-			return fmt.Errorf("access: insert evidence: %w", err)
+		if err := db.RecordAccessInTx(ctx, tx, provider); err != nil {
+			return fmt.Errorf("access: %w", err)
 		}
 		return nil
 	})

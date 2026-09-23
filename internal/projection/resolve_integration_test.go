@@ -111,6 +111,93 @@ func incident(t *testing.T, f *fixture) (id.UUID, string) {
 	return eventID, consumer
 }
 
+// closureRecords reads the outcome evidence for one incident.
+//
+// Read from audit.privileged_access itself rather than from the fixture's recorder stub, because
+// this is the record the resolver writes through its own connection inside its own transaction --
+// the stub only sees the attempt the scope wrapper files before that transaction opens.
+func closureRecords(t *testing.T, f *fixture, eventID id.UUID) (int, string, string) {
+	t.Helper()
+
+	var (
+		count  int
+		reason string
+		actor  string
+	)
+	if err := f.setup.InTx(f.ctx, func(ctx context.Context, tx fdb.Tx) error {
+		return tx.QueryRow(ctx, `
+			-- max(actor_id::text) rather than max(actor_id): PostgreSQL 15, which this suite runs
+			-- against locally, has no max() for uuid while the CI engine does. Casting first keeps
+			-- the two engines answering the same question.
+			SELECT count(*), coalesce(max(reason), ''), coalesce(max(actor_id::text), '')
+			  FROM audit.privileged_access
+			 WHERE reason LIKE 'closed dead-lettered event ' || $1::text || '%'`,
+			eventID.String()).Scan(&count, &reason, &actor)
+	}); err != nil {
+		t.Fatalf("reading the closure records: %v", err)
+	}
+	return count, reason, actor
+}
+
+// A closure accounts for itself, and the account is enrolled in the transaction that made it.
+//
+// The attempt record the scope wrapper files first cannot do this job: at that point nothing has
+// happened yet, so it can name an intention but not an outcome. This one names the incident and
+// the receipt the closure rested on.
+func TestAClosureRecordsItselfInsideTheTransactionThatMadeIt(t *testing.T) {
+	f := newFixture(t)
+	eventID, consumer := incident(t, f)
+	receipt(t, f, eventID, consumer, "consumer_applied")
+
+	r, sink := resolver(t, f)
+	before := sink.calls
+	resolution, err := r.Resolve(f.ctx, eventID)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if sink.calls <= before {
+		t.Error("the resolution filed no attempt record before its transaction opened")
+	}
+
+	count, reason, actor := closureRecords(t, f, eventID)
+	if count != 1 {
+		t.Fatalf("%d closure records for %s, want exactly 1", count, eventID)
+	}
+	// The reference, not just the verdict. A record saying an incident was closed, without saying
+	// on what, leaves an investigation exactly where it started.
+	if !strings.Contains(reason, resolution.Reference) {
+		t.Errorf("the closure record does not name the evidence it rested on: %q", reason)
+	}
+	scope, _ := db.ScopeFrom(f.ctx)
+	if actor != scope.Actor().String() {
+		t.Errorf("the closure record names actor %s, want the bound %s", actor, scope.Actor())
+	}
+}
+
+// And a refused closure leaves no account of a closure.
+//
+// This is the half that makes the record worth reading. If the outcome were written outside the
+// transaction the way the attempt is, a refusal -- or a crash between the UPDATE and the commit --
+// would leave a row stating that an incident was closed when it is still open, and nothing in the
+// table would distinguish it from a true one.
+func TestARefusedClosureLeavesNoAccountOfAClosure(t *testing.T) {
+	f := newFixture(t)
+	eventID, _ := incident(t, f)
+
+	r, sink := resolver(t, f)
+	before := sink.calls
+	if _, err := r.Resolve(f.ctx, eventID); !errors.Is(err, ErrNoAppliedEvidence) {
+		t.Fatalf("Resolve returned %v, want ErrNoAppliedEvidence", err)
+	}
+
+	if sink.calls <= before {
+		t.Error("the refused resolution filed no attempt record; the attempt is unattributable")
+	}
+	if count, reason, _ := closureRecords(t, f, eventID); count != 0 {
+		t.Errorf("%d closure records for an incident that was never closed: %q", count, reason)
+	}
+}
+
 // The whole property, end to end: evidence exists, the incident closes, and the frontier stops
 // reporting the debt.
 //
