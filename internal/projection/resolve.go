@@ -191,6 +191,24 @@ func (r *Resolver) Resolve(ctx context.Context, eventID id.UUID) (Resolution, er
 					ErrAlreadyResolved, eventID)
 			}
 
+			// The second record, and the reason it is here rather than beside the first one.
+			//
+			// The scope wrapper already filed an ATTEMPT before this transaction opened, which is
+			// what makes a refused or crashed resolution attributable. It cannot say what happened,
+			// because at that point nothing had. This one says what happened -- which incident, on
+			// whose receipt -- and it is enrolled in the transaction that did it, so a closure that
+			// rolls back takes its own account of itself with it. An outcome row surviving a
+			// rolled-back closure would not be an over-record; it would be a false statement, and
+			// an investigation reading it has no way to tell it from a true one.
+			if err := db.RecordAccessInTx(ctx, tx, db.ProviderAccess{
+				Actor:       scope.Actor(),
+				Correlation: scope.Correlation(),
+				Reason: fmt.Sprintf("closed dead-lettered event %s as %s on %s",
+					eventID, ResolutionTypeReplayed, reference),
+			}); err != nil {
+				return fmt.Errorf("projection: recording the resolution of %s: %w", eventID, err)
+			}
+
 			out = Resolution{
 				EventID:   eventID,
 				Consumer:  consumer,

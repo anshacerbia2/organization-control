@@ -145,6 +145,49 @@ type PrivilegedRecorder interface {
 	RecordProviderAccess(ctx context.Context, access ProviderAccess) error
 }
 
+// insertPrivilegedAccess writes one evidence row.
+//
+// `occurred_at` is left to the column default so the timestamp is the database's, not the
+// process's. A writer that stamped its own clock would let a replica with a skewed clock produce
+// evidence that cannot be ordered against the rows the transaction went on to write.
+//
+// It lives here, beside ProviderAccess, because there are two writers with deliberately different
+// transaction ownership -- internal/access on its own connection, and an act that records its
+// outcome inside the transaction that performed it -- and the statement they share must not be
+// able to drift apart into two shapes of evidence.
+const insertPrivilegedAccess = `INSERT INTO audit.privileged_access
+    (access_id, actor_id, correlation_id, reason)
+VALUES ($1, $2, $3, $4)`
+
+// RecordAccessInTx writes evidence inside the caller's transaction, so it commits or rolls back
+// with the work it describes.
+//
+// That is the opposite ownership from internal/access, and both are wanted. Evidence of an ATTEMPT
+// must survive the failure of the thing attempted, so it is written first and separately. Evidence
+// of an OUTCOME must not: a row saying an incident was closed, left behind by a transaction that
+// rolled back, is not an over-record but a false statement, and an investigation cannot tell it
+// from a true one.
+func RecordAccessInTx(ctx context.Context, tx Tx, access ProviderAccess) error {
+	switch {
+	case access.Actor.IsNil():
+		return errors.New("db: evidence requires an acting subject")
+	case access.Correlation.IsNil():
+		return errors.New("db: evidence requires a correlation identifier")
+	case access.Reason == "":
+		return ErrReasonRequired
+	}
+
+	accessID, err := id.NewV7()
+	if err != nil {
+		return fmt.Errorf("db: mint evidence identifier: %w", err)
+	}
+	if _, err := tx.Exec(ctx, insertPrivilegedAccess,
+		accessID.String(), access.Actor.String(), access.Correlation.String(), access.Reason); err != nil {
+		return fmt.Errorf("db: insert evidence: %w", err)
+	}
+	return nil
+}
+
 // TenantPool carries ordinary tenant-scoped traffic. It authenticates as a login role inheriting
 // `organization_rt`.
 type TenantPool struct{ tx Transactor }
