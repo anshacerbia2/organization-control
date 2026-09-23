@@ -123,15 +123,25 @@ func insertDeadLetter(t *testing.T, ctx context.Context, pool *fdb.Pool,
 			RETURNING event_id, sequence`, eventType, age.String()).Scan(&eventID, &sequence); err != nil {
 			return err
 		}
+		// The resolution columns move together with resolved_at, because platform migration 0006
+		// refuses an incident closed with a timestamp and no account of why. A fixture that wrote
+		// only the timestamp would be seeding a state the estate can no longer reach.
 		_, err := tx.Exec(ctx, `
 			INSERT INTO platform.dead_letter
 			    (event_id, event_type, envelope, payload, consumer, failure_class, failure_detail,
-			     attempts, first_failed_at, dead_lettered_at, resolved_at)
-			VALUES ($1, $2, '{"specversion":"1.0"}'::jsonb, '{}'::jsonb, 'foundation-reference',
+			     attempts, first_failed_at, dead_lettered_at,
+			     resolved_at, resolution_type, resolved_by, resolution_reference)
+			VALUES ($1::uuid, $2, '{"specversion":"1.0"}'::jsonb, '{}'::jsonb, 'foundation-reference',
 			        'poison', 'the consumer refused the envelope', 3,
 			        clock_timestamp() - $3::interval, clock_timestamp() - $3::interval,
-			        CASE WHEN $4 THEN clock_timestamp() ELSE NULL END)`,
-			eventID, eventType, age.String(), resolved)
+			        CASE WHEN $4 THEN clock_timestamp() ELSE NULL END,
+			        CASE WHEN $4 THEN 'REPLAYED' ELSE NULL END,
+			        CASE WHEN $4 THEN 'suite' ELSE NULL END,
+			        -- $5 rather than $1 again: the same placeholder cannot be deduced as both a uuid
+			        -- and the text side of a concatenation, and PostgreSQL refuses the statement rather
+			        -- than guessing (SQLSTATE 42P08).
+			        CASE WHEN $4 THEN 'platform.delivery_receipt:' || $5::text ELSE NULL END)`,
+			eventID, eventType, age.String(), resolved, eventID)
 		return err
 	}); err != nil {
 		t.Fatalf("inserting a dead letter: %v", err)

@@ -54,6 +54,16 @@ var expectedPlatformPrivileges = map[string]map[string][]string{
 		"dead_letter":     {"SELECT"},
 		"idempotency_key": {"INSERT", "SELECT", "UPDATE"},
 	},
+	// The resolver. Column-level UPDATE does not appear in table_privileges as UPDATE unless it is
+	// table-wide, so the absence of UPDATE here is the assertion: this role may write four columns
+	// and may not write the row.
+	"organization_resolution_rt": {
+		// The predicate reads the incident before it decides.
+		"dead_letter": {"SELECT"},
+		// The evidence, read-only. A resolver that could write receipts could manufacture the proof
+		// it then consumes.
+		"delivery_receipt": {"SELECT"},
+	},
 	"organization_dispatch_rt": {
 		"outbox": {"SELECT", "UPDATE"},
 		// SELECT is not for reading incidents. `ON CONFLICT (event_id) DO NOTHING` makes
@@ -81,7 +91,8 @@ func TestThePlatformSchemaGrantsExactlyWhatWasDeclared(t *testing.T) {
 			SELECT grantee, table_name, privilege_type
 			  FROM information_schema.table_privileges
 			 WHERE table_schema = 'platform'
-			   AND grantee IN ('organization_rt', 'organization_provider_rt', 'organization_dispatch_rt')`)
+			   AND grantee IN ('organization_rt', 'organization_provider_rt', 'organization_dispatch_rt',
+				                   'organization_resolution_rt')`)
 		if err != nil {
 			return err
 		}
@@ -170,7 +181,7 @@ func TestNewPlatformTablesArriveClosed(t *testing.T) {
 			grantee = entry[:index]
 		}
 		switch grantee {
-		case "organization_rt", "organization_provider_rt", "organization_dispatch_rt":
+		case "organization_rt", "organization_provider_rt", "organization_dispatch_rt", "organization_resolution_rt":
 			t.Errorf("platform's default privileges hand %q to a runtime role.\n"+
 				"The next table foundation-platform adds would arrive carrying it, with nothing "+
 				"failing and nothing logging. Grant platform tables explicitly instead.", entry)
@@ -184,7 +195,8 @@ func TestNewPlatformTablesArriveClosed(t *testing.T) {
 func TestRuntimeRolesCanEnterThePlatformSchema(t *testing.T) {
 	pool, ctx := openAdmin(t)
 
-	for _, role := range []string{"organization_rt", "organization_provider_rt", "organization_dispatch_rt"} {
+	for _, role := range []string{"organization_rt", "organization_provider_rt", "organization_dispatch_rt",
+		"organization_resolution_rt"} {
 		var permitted bool
 		if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 			return tx.QueryRow(ctx,

@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -60,15 +59,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Skip("TEST_DATABASE_URL is unset")
 	}
 
-	rest := base
-	if index := strings.Index(base, "://"); index >= 0 {
-		rest = base[index+3:]
-	}
-	if at := strings.Index(rest, "@"); at >= 0 {
-		rest = rest[at+1:]
-	}
-	dsn := fmt.Sprintf("postgres://organization_provider_app:%s@%s",
-		os.Getenv("TEST_PROVIDER_PASSWORD"), rest)
+	dsn := roleDSN(base, "organization_provider_app", os.Getenv("TEST_PROVIDER_PASSWORD"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)

@@ -6,17 +6,32 @@ package config
 // mutually exclusive by construction, and a parallel test here would read another's environment.
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
-// required sets the seven variables that have no default, so a test can assert on the ones that do.
+// required sets the eight variables that have no default, so a test can assert on the ones that do.
+//
+// It clears the ambient ORGANIZATION_ environment first, and that is not defensive tidiness. A
+// developer runs this through `make`, which loads .env, so every one of these variables is already
+// present in the shell -- and a variable this helper forgets is quietly supplied by the environment
+// locally and absent in CI. ORGANIZATION_RESOLUTION_DATABASE_URL was added to Load and not to this
+// list: the suite was green on this machine and red on the build, which is the worst direction for
+// that asymmetry to run, because the local green is the one a change is judged by.
 func required(t *testing.T) {
 	t.Helper()
 
+	for _, entry := range os.Environ() {
+		if name, _, ok := strings.Cut(entry, "="); ok && strings.HasPrefix(name, "ORGANIZATION_") {
+			t.Setenv(name, "")
+		}
+	}
+
 	t.Setenv("ORGANIZATION_TENANT_DATABASE_URL", "postgres://organization_rt@localhost/control")
 	t.Setenv("ORGANIZATION_PROVIDER_DATABASE_URL", "postgres://organization_provider_rt@localhost/control")
+	t.Setenv("ORGANIZATION_RESOLUTION_DATABASE_URL", "postgres://organization_resolution_rt@localhost/control")
 	t.Setenv("ORGANIZATION_TOKEN_ISSUER", "https://issuer.example")
 	t.Setenv("ORGANIZATION_TOKEN_AUDIENCE", "organization-control")
 	t.Setenv("ORGANIZATION_JWKS_URL", "https://issuer.example/jwks")
@@ -78,6 +93,32 @@ func TestAPresentButUnparseableProvisioningValueIsAnError(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load accepted a timeout with no unit")
+	}
+}
+
+// TestAResolutionCredentialSharedWithAnotherPoolIsRefused guards the one misconfiguration that
+// would leave every test in the estate passing.
+//
+// The provider role replays an abandoned delivery and holds no UPDATE on platform.dead_letter; the
+// resolution role closes the incident against the evidence that replay produced. Pointed at the
+// same DSN, one credential does both, the separation that makes the evidence meaningful is gone --
+// and nothing fails, because the resolver simply runs as the wider role.
+func TestAResolutionCredentialSharedWithAnotherPoolIsRefused(t *testing.T) {
+	for _, shared := range []string{
+		"ORGANIZATION_PROVIDER_DATABASE_URL", "ORGANIZATION_TENANT_DATABASE_URL",
+	} {
+		t.Run(shared, func(t *testing.T) {
+			required(t)
+			t.Setenv("ORGANIZATION_RESOLUTION_DATABASE_URL", os.Getenv(shared))
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load accepted a resolution DSN identical to %s", shared)
+			}
+			if !strings.Contains(err.Error(), "ORGANIZATION_RESOLUTION_DATABASE_URL") {
+				t.Errorf("the refusal did not name the variable an operator has to change:\n%v", err)
+			}
+		})
 	}
 }
 

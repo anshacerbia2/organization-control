@@ -48,6 +48,24 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_dispatch_rt') THEN
         CREATE ROLE organization_dispatch_rt NOLOGIN NOSUPERUSER NOCREATEDB NOBYPASSRLS;
     END IF;
+
+    -- Resolving a dead letter. A fourth role rather than a fourth capability on the provider
+    -- one, because closing a security incident is the estate's most consequential operator
+    -- act: it is what makes the frontier stop reporting a debt, and therefore what lets every
+    -- consumer serve again.
+    --
+    -- The separation is not symbolic. The provider role replays an abandoned delivery and
+    -- holds no UPDATE on platform.dead_letter, so it cannot close what it just put back on the
+    -- wire. One credential doing both would make "replay" and "declare it delivered" the same
+    -- act performed by the same process, and the evidence between them decorative.
+    --
+    -- What it may touch is granted in grants.sql, and it is narrow by design: the resolution
+    -- columns of the incident, the receipt that justifies closing it, the consumer registry
+    -- that says whose receipt counts, and the audit table. Nothing else -- not a business
+    -- table, not the outbox.
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_resolution_rt') THEN
+        CREATE ROLE organization_resolution_rt NOLOGIN NOSUPERUSER NOCREATEDB NOBYPASSRLS;
+    END IF;
 END
 $$;
 
@@ -56,9 +74,15 @@ $$;
 -- discovered later by the privilege test. ADR-GLB-002 §5.2 names SUPERUSER and BYPASSRLS
 -- specifically: a role holding either makes every policy in this database inert while the
 -- catalog still reports RLS as enabled.
-ALTER ROLE organization_migrator    NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
-ALTER ROLE organization_rt          NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
-ALTER ROLE organization_provider_rt NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+-- All four, not the first three. organization_dispatch_rt was created above and then left out
+-- of this list, so the one role whose whole justification is being narrower than the others was
+-- the one whose attributes nothing re-asserted. A role is only narrow while nobody widens it,
+-- and this is the statement that says so every run.
+ALTER ROLE organization_migrator      NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+ALTER ROLE organization_rt            NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+ALTER ROLE organization_provider_rt   NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+ALTER ROLE organization_dispatch_rt   NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+ALTER ROLE organization_resolution_rt NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 
 -- The schemas are NOT created here. Atlas creates them, and that differs from
 -- identity-control on purpose.

@@ -52,6 +52,7 @@ type Services struct {
 	Publisher     *projection.Publisher
 	Reconciler    *projection.Reconciler
 	Replayer      *projection.Replayer
+	Resolver      *projection.Resolver
 	Contexts      *occontext.Service
 }
 
@@ -215,6 +216,10 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// resolution consumes the evidence this may produce.
 	api.HandleFunc("POST /v1/dead-letters/{event_id}/replay", h.replayDeadLetter)
 
+	// And the second act, under a different database role. Replay puts the event back on the
+	// wire; this closes the incident once the evidence that delivery produced is there.
+	api.HandleFunc("POST /v1/dead-letters/{event_id}/resolve", h.resolveDeadLetter)
+
 	api.HandleFunc("POST /v1/context/verify", h.verifyContext)
 	api.HandleFunc("POST /v1/context/switch-eligible", h.switchEligible)
 	api.HandleFunc("POST /v1/context/rate", h.recordRate)
@@ -249,6 +254,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the projection reconciler is required")
 	case s.Replayer == nil:
 		return errors.New("httpapi: the dead-letter replayer is required")
+	case s.Resolver == nil:
+		return errors.New("httpapi: the dead-letter resolver is required")
 	case s.Contexts == nil:
 		return errors.New("httpapi: the context service is required")
 	}

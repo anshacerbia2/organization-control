@@ -111,6 +111,8 @@ var registry = map[string]error{
 	"projection.ErrDeadLetterNotFound": projection.ErrDeadLetterNotFound,
 	"projection.ErrAlreadyResolved":    projection.ErrAlreadyResolved,
 	"projection.ErrUnreplayable":       projection.ErrUnreplayable,
+	"projection.ErrNoActiveConsumer":   projection.ErrNoActiveConsumer,
+	"projection.ErrNoAppliedEvidence":  projection.ErrNoAppliedEvidence,
 
 	"context.ErrInvalid":         context.ErrInvalid,
 	"context.ErrNotRegistered":   context.ErrNotRegistered,

@@ -91,6 +91,12 @@ func testSurface(t *testing.T) Surface {
 	must(err, "projection reconciler")
 	replayer, err := projection.NewReplayer(providerPool)
 	must(err, "dead-letter replayer")
+	// The resolver's role is separate in production; this suite is not asserting the privilege
+	// boundary, so it shares the pool. internal/controldb is where that boundary is proven.
+	resolutionPool, err := db.NewResolutionPool(transactor, stubRecorder{})
+	must(err, "resolution scope pool")
+	resolver, err := projection.NewResolver(resolutionPool)
+	must(err, "dead-letter resolver")
 	contexts, err := occontext.New(providerPool)
 	must(err, "context service")
 	// The raw transactor, as production wires it: the frontier reads outbox aggregates carrying no
@@ -104,7 +110,7 @@ func testSurface(t *testing.T) Surface {
 			Organizations: organizations,
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
-			Replayer: replayer,
+			Replayer: replayer, Resolver: resolver,
 			Frontier: frontier,
 		},
 		Database: okProber{},
@@ -512,6 +518,8 @@ func testSurfaceServices(t *testing.T) Services {
 	publisher, _ := projection.NewPublisher(providerPool, registry)
 	reconciler, _ := projection.NewReconciler(providerPool)
 	replayer, _ := projection.NewReplayer(providerPool)
+	resolutionPool, _ := db.NewResolutionPool(transactor, stubRecorder{})
+	resolver, _ := projection.NewResolver(resolutionPool)
 	contexts, _ := occontext.New(providerPool)
 	// The raw transactor, as production wires it: the frontier reads outbox aggregates that carry no
 	// tenant column, so it takes no scope and writes no privileged-access record per poll.
@@ -522,7 +530,7 @@ func testSurfaceServices(t *testing.T) Services {
 		Organizations: organizations,
 		Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 		Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
-		Replayer: replayer,
+		Replayer: replayer, Resolver: resolver,
 		Frontier: frontier,
 	}
 }
