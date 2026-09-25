@@ -15,10 +15,11 @@ cross-repository dependency is `foundation-platform`, which lands first.
 
 | TDD | Version | Subject | Status |
 | :-- | :-- | :-- | :-- |
-| `TDD-organization-control-001` | 1.0.0 | Tenant isolation and Row-Level Security | approved |
-| `TDD-organization-control-002` | 1.0.0 | Membership authority, revocation, projection publication | approved |
-| `TDD-organization-control-003` | 1.2.0 | Organization, Tenant, and Workspace lifecycle | approved |
-| `TDD-organization-control-004` | 1.2.0 | Invitation, onboarding correlation, and offboarding obligations | approved |
+| `TDD-organization-control-001` | 1.1.0 | Tenant isolation and Row-Level Security | approved |
+| `TDD-organization-control-002` | 1.2.0 | Membership authority, revocation, projection publication | approved |
+| `TDD-organization-control-003` | 1.4.0 | Organization, Tenant, and Workspace lifecycle | approved |
+| `TDD-organization-control-004` | 1.5.0 | Invitation, onboarding correlation, and offboarding obligations | approved |
+| `TDD-organization-control-005` | 1.1.0 | Dead-letter resolution, scope and limits | approved |
 
 **No design now contradicts another, and none contradicts the implementation.** Every
 departure Weeks 1 and 2 recorded has been folded back into the design that was wrong, with
@@ -402,6 +403,47 @@ the `requested -> failed` question in §"Tenant State Machine", the desired-stat
 | **The two conflicts were first mapped to `VersionConflict`**, whose title is "The record changed since it was read" — false for a reused key, and it points the caller at re-reading the resource, which is the wrong fix | foundation-platform already declares `IdempotencyKeyConflict` and `RequestInProgress`. Found by reading the response body in the by-hand walkthrough rather than by reading the mapping table |
 | **One request can open two scoped transactions.** `internal/invitation` binds a tenant pool and a provider pool, and the second claim would read its own uncommitted first claim and refuse the request as in progress | The claim carries a consumption flag: the first transaction to reach it claims, the rest skip. Asserted by `TestOneRequestOpeningTwoScopesClaimsOnce` |
 
+## Dead-letter resolution · closed 2026-09-24
+
+✅ **Built and proven across real processes.** `TDD-organization-control-005` is the current statement of
+the design. It covers:
+
+- **Resolution:** `REPLAYED` only, and only on the active consumer's `consumer_applied` receipt.
+- **Provider API:** replay and resolve endpoints.
+- **The `organization_resolution_rt` role:** it may update only the four resolution columns, through its
+  own credential.
+- **Two audit records:** the attempt is written before the transaction, the outcome inside it.
+
+The closing evidence is foundation-reference CI run 36026176642, at organization-control `7aa69d7`,
+foundation-reference `3fff642`, and foundation-platform `v0.2.7` (producer) / `v0.2.6` (consumer). The
+review record is `RESPONSE-7` through `RESPONSE-26` in the architecture-description workspace.
+
+Nothing here reopens without a concrete violation of that contract. An improvement goes in the backlog
+below.
+
+## Backlog after dead-letter resolution
+
+Ordered. The first item blocks this service's production gate. The rest do not block it, but each
+has a named failure it prevents. The Source column gives the review record that decided the item.
+
+| # | Item | Why | Source |
+| :-- | :-- | :-- | :-- |
+| 1 | **`SUPERSEDED` resolution** | A dead-lettered event already overtaken by a newer version can never produce `consumer_applied` evidence, so it can never resolve. Debt is estate-wide, so one such row blocks every projection-backed check permanently (TDD-005 §Known permanent-block condition). **Required before the production gate** | RESPONSE-23, RESPONSE-24 |
+| 2 | **`grantcheck`** | Mechanises Layer 1 of the privilege model: grants derived from execution paths and checked by a tool rather than by review | RESPONSE-22 |
+| 3 | `RESNAPSHOTTED` resolution | Recovery by generation replacement. It must be built in full or not at all (TDD-005 §Scope) | RESPONSE-23 |
+| 4 | `WAIVED` resolution | A sanctioned operational exception, kept separate from repairing authority state | RESPONSE-23 |
+| 5 | Per-consumer debt attribution | Debt is estate-wide today, which is why only one projection consumer may be active | RESPONSE-23 |
+| 6 | Multi-consumer delivery substrate | Prerequisite for lifting the single-active-consumer restriction | RESPONSE-23 |
+| 7 | `platform.delivery_receipt` retention | The table is unbounded by design until retention is decided; owned upstream by foundation-platform | RESPONSE-20, RESPONSE-22 |
+| 8 | Coverage floor for this repository | foundation-platform enforces one, and this repository does not yet | RESPONSE-23 |
+| 9 | Scheduled cross-repository compatibility runs | The system proof runs on foundation-reference changes, and a producer change can break it unseen until the next consumer change | RESPONSE-23 |
+| 10 | Proof B: Keycloak drift | The identity-side counterpart of Proof A. Drift detection is a claim about the future, not about the closure | RESPONSE-23, RESPONSE-25 |
+
+Found while documenting the closure, and not yet fixed: **`POST /v1/dead-letters/{id}/resolve` with an
+`Idempotency-Key` header fails.** The idempotency claim is inserted inside the resolution transaction, and
+`organization_resolution_rt` holds no grant on `platform.idempotency_key`. The header is optional, and
+the system proof sends none, which is why nothing caught it. It fails closed, but it is a defect.
+
 ## Waiting on nothing
 
 No item above waits on the Keycloak proof-of-concept. The three questions that touch
@@ -423,14 +465,15 @@ prohibition structural rather than procedural, and it is asserted by test.
 
 ## Gates
 
-**Design gate. Met.** All four designs at `1.0.0`, no design contradicting another or the
+**Design gate. Met.** All five designs at `1.0.0` or later, no design contradicting another or the
 implementation, and `approved_version_not_stable` now refuses a regression in CI.
 
 **Production gate.** The design gate, plus: restore evidence for the Organization
 Database including outbox and projection cursor state, cross-tenant denial proven as
 the runtime role, measured accept-to-publication delay inside budget for priority
-events, and runbooks written for revocation not enforced within budget, projection
-drift repair, provider-access review, and stuck offboarding.
+events, `SUPERSEDED` resolution built (backlog item 1), and runbooks written for revocation
+not enforced within budget, projection drift repair, provider-access review, stuck
+offboarding, and dead-letter resolution.
 
 ## Debt, named rather than implied
 
