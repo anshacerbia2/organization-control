@@ -174,6 +174,57 @@ func TestAClosureRecordsItselfInsideTheTransactionThatMadeIt(t *testing.T) {
 	}
 }
 
+// A resolution carrying an Idempotency-Key claims it, and a retry is answered from the claim.
+//
+// The claim is made inside the resolution transaction, as it is for every keyed mutation, so it runs
+// under the resolution role. That role once held no grant on platform.idempotency_key, and a keyed
+// /resolve failed with permission denied. The header is optional and nothing sent one, so no test
+// saw it. The retry half is why the key is worth honouring here: without it, a client whose first
+// response was lost reads the incident as already resolved -- a 409 for a request that succeeded.
+func TestAKeyedResolutionClaimsItsKeyAndARetryIsAnsweredFromIt(t *testing.T) {
+	f := newFixture(t)
+	eventID, consumer := incident(t, f)
+	receipt(t, f, eventID, consumer, "consumer_applied")
+
+	claim := db.Claim{
+		Scope:  "compat-resolution:" + eventID.String(),
+		Key:    "resolve-" + eventID.String(),
+		Digest: db.Digest([]byte("POST /v1/dead-letters/" + eventID.String() + "/resolve")),
+	}
+	t.Cleanup(func() {
+		_ = f.setup.InTx(context.Background(), func(ctx context.Context, tx fdb.Tx) error {
+			_, _ = tx.Exec(ctx, `DELETE FROM platform.idempotency_key WHERE scope = $1`, claim.Scope)
+			return nil
+		})
+	})
+
+	r, _ := resolver(t, f)
+	first := db.WithClaim(f.ctx, claim)
+	if _, err := r.Resolve(first, eventID); err != nil {
+		t.Fatalf("a resolution carrying an idempotency key failed: %v", err)
+	}
+	if !db.ClaimMade(first) {
+		t.Fatal("the resolution committed without claiming the key it carried")
+	}
+
+	store, err := db.NewClaimStore(f.setup)
+	if err != nil {
+		t.Fatalf("NewClaimStore: %v", err)
+	}
+	if err := store.Complete(f.ctx, claim, 200, []byte(`{"event_id":"`+eventID.String()+`"}`)); err != nil {
+		t.Fatalf("completing the claim: %v", err)
+	}
+
+	_, err = r.Resolve(db.WithClaim(f.ctx, claim), eventID)
+	var replayed *db.Replayed
+	if !errors.As(err, &replayed) {
+		t.Fatalf("a retry with the same key returned %v, want the stored response replayed", err)
+	}
+	if replayed.Status != 200 {
+		t.Errorf("the retry replayed status %d, want the original 200", replayed.Status)
+	}
+}
+
 // And a refused closure leaves no account of a closure.
 //
 // This is the half that makes the record worth reading. If the outcome were written outside the

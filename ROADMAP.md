@@ -439,11 +439,6 @@ has a named failure it prevents. The Source column gives the review record that 
 | 9 | Scheduled cross-repository compatibility runs | The system proof runs on foundation-reference changes, and a producer change can break it unseen until the next consumer change | RESPONSE-23 |
 | 10 | Proof B: Keycloak drift | The identity-side counterpart of Proof A. Drift detection is a claim about the future, not about the closure | RESPONSE-23, RESPONSE-25 |
 
-Found while documenting the closure, and not yet fixed: **`POST /v1/dead-letters/{id}/resolve` with an
-`Idempotency-Key` header fails.** The idempotency claim is inserted inside the resolution transaction, and
-`organization_resolution_rt` holds no grant on `platform.idempotency_key`. The header is optional, and
-the system proof sends none, which is why nothing caught it. It fails closed, but it is a defect.
-
 ## Waiting on nothing
 
 No item above waits on the Keycloak proof-of-concept. The three questions that touch

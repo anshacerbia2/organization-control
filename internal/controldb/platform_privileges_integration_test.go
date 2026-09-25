@@ -63,6 +63,10 @@ var expectedPlatformPrivileges = map[string]map[string][]string{
 		// The evidence, read-only. A resolver that could write receipts could manufacture the proof
 		// it then consumes.
 		"delivery_receipt": {"SELECT"},
+		// claimWithin, inside the resolution transaction, for a /resolve carrying an
+		// Idempotency-Key. INSERT ... ON CONFLICT needs SELECT. Completion runs elsewhere, so no
+		// UPDATE.
+		"idempotency_key": {"INSERT", "SELECT"},
 	},
 	"organization_dispatch_rt": {
 		"outbox": {"SELECT", "UPDATE"},
