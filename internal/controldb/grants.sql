@@ -312,6 +312,13 @@ GRANT SELECT ON platform.delivery_receipt TO organization_resolution_rt;
 -- subject the evidence must be about.
 GRANT SELECT ON projection.consumer TO organization_resolution_rt;
 
+-- The idempotency claim. claimWithin runs inside every scoped transaction, the resolution one
+-- included, so a /resolve carrying an Idempotency-Key claims it under this role. idempotency.Claim
+-- is INSERT ... ON CONFLICT DO NOTHING, whose conflict target requires SELECT, followed by a
+-- SELECT of the stored row. No UPDATE: completion runs on the tenant connections, not here. This
+-- grant was missing, and a keyed /resolve failed with permission denied; no test sent the header.
+GRANT SELECT, INSERT ON platform.idempotency_key TO organization_resolution_rt;
+
 -- The outcome record, written inside the resolution transaction so it exists if and only if the
 -- closure does. The attempt record, written before that transaction opens so a failed attempt is
 -- still attributable, goes through the provider pool's recorder and does not use this grant.

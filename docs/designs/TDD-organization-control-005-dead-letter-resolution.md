@@ -121,6 +121,7 @@ platform.dead_letter        organization_dispatch_rt     INSERT, SELECT
 
 projection.consumer         organization_resolution_rt   SELECT   (the active consumer, derived server-side)
 audit.privileged_access     organization_resolution_rt   INSERT   (the outcome record)
+platform.idempotency_key    organization_resolution_rt   INSERT, SELECT   (the claim of a keyed /resolve)
 ```
 
 `SELECT` for the dispatcher is not for reading incidents. `ON CONFLICT` with a conflict target
@@ -161,6 +162,10 @@ accepted from the request. `resolved_by` is the authenticated operator.
 | No active projection consumer registered | `412` |
 | No `consumer_applied` receipt for the active consumer | `412` |
 | Replay only: the row cannot re-append itself (no envelope, or a null `aggregate_id` or `priority`) | `412` |
+
+Both honour `Idempotency-Key`. The claim is made inside the operation's own transaction, and a
+retry after a lost response replays the stored answer. Without the key, a retried `resolve` would
+read the incident as already resolved and answer `409` to a request that succeeded.
 
 The `412` for missing evidence names the active consumer and lists the receipts it did find as
 `consumer (evidence)`. A receipt under another consumer name therefore reads as a
@@ -301,6 +306,7 @@ test red, not assumed to.
 | :-- | :-- |
 | An incident closes on applied evidence, sets all four columns, and clears the frontier debt | `internal/projection/resolve_integration_test.go` `TestAnIncidentClosesOnAppliedEvidence` |
 | No evidence, another consumer's receipt, or a `transport_accepted` receipt resolves nothing | same file: `TestAnIncidentWithNoEvidenceStaysOpen`, `TestAReceiptUnderAnotherConsumerNameResolvesNothing`, `TestTransportAcceptanceIsNotResolutionEvidence` |
+| A keyed resolution claims its key under the resolution role, and a retry replays the stored response | same file: `TestAKeyedResolutionClaimsItsKeyAndARetryIsAnsweredFromIt` |
 | A closed or unknown incident is refused; nothing registered to enforce is refused | same file: `TestResolvingAClosedIncidentIsRefused`, `TestResolvingAnUnknownEventIsRefused`, `TestTheResolverRefusesWhenNothingIsRegisteredToEnforce` |
 | The resolution role cannot rewrite the incident or manufacture its own evidence | same file: `TestTheResolutionRoleCannotRewriteTheIncident`, `TestTheResolutionRoleCannotManufactureItsOwnEvidence` |
 | The replay role cannot resolve what it replayed | `internal/projection/replay_integration_test.go` `TestTheReplayRoleCannotResolveWhatItReplayed` |
