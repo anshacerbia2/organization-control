@@ -312,8 +312,9 @@ GRANT SELECT ON platform.delivery_receipt TO organization_resolution_rt;
 -- subject the evidence must be about.
 GRANT SELECT ON projection.consumer TO organization_resolution_rt;
 
--- The access record, written before the resolution transaction opens so an attempt that fails is
--- still attributable.
+-- The outcome record, written inside the resolution transaction so it exists if and only if the
+-- closure does. The attempt record, written before that transaction opens so a failed attempt is
+-- still attributable, goes through the provider pool's recorder and does not use this grant.
 GRANT INSERT ON audit.privileged_access TO organization_resolution_rt;
 
 -- Nothing inherited, for the same reason as the dispatcher: a table added later must be granted
