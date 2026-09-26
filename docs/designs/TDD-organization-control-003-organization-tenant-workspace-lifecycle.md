@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.4.0
+  version: 1.5.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-08-23
+  last_reviewed: 2026-09-27
   parent_sad: SAD-004
 ---
 
@@ -246,6 +246,18 @@ questions — `version` orders two events about this row and backs the optimisti
 `tenant_security_version` decides whether a token a consumer is holding is stale. Carrying
 only the second would leave a restore-then-suspend pair with the same value on one of the
 two events and no ordering between them.
+
+### Tenant Event History
+
+`tenant.tenant_event` records, for every event `tenant.Service` publishes, the Tenant and the
+`tenant_security_version` the event carries. It is written in the transaction that appends the
+event to the outbox, so the row exists if and only if the event does. Every published
+transition after activation increments the security version, and activation is the first, so
+`UNIQUE (tenant_id, tenant_security_version)` holds and the version identifies the event within
+its Tenant. The consumer orders Tenant state by that version, which lets the dead-letter
+resolver prove that a newer applied Tenant event made a dead-lettered one moot.
+`TDD-organization-control-005` §"The resolution predicate" owns that use and the table's privileges.
+`tenant.lifecycle.requested` is published by intake, carries no authority, and has no row.
 
 ### Workspace
 
@@ -568,6 +580,8 @@ at the transport.
   the status change and the outbox append: the status, `version`,
   `tenant_security_version`, and the outbox are all unchanged afterwards, and the same
   transition then succeeds once the injection is removed.
+- Every published Tenant event has a `tenant.tenant_event` row with the version it carries,
+  and a rolled-back transition leaves none (`TestEveryPublishedTenantEventRecordsItsSecurityVersion`).
 
 ### Lifecycle Timestamps and Lanes
 

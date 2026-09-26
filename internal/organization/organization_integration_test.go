@@ -132,6 +132,7 @@ func (f *fixture) register(t *testing.T, classification Classification, parent *
 	}
 	t.Cleanup(func() {
 		f.exec(t, `DELETE FROM platform.outbox WHERE aggregate_id = $1`, record.OrganizationID.String())
+		f.exec(t, `DELETE FROM tenant.tenant_event WHERE tenant_id IN (SELECT tenant_id FROM tenant.tenant WHERE organization_id = $1)`, record.OrganizationID.String())
 		f.exec(t, `DELETE FROM tenant.tenant WHERE organization_id = $1`, record.OrganizationID.String())
 		f.exec(t, `DELETE FROM organization.organization WHERE parent_id = $1`, record.OrganizationID.String())
 		f.exec(t, `DELETE FROM organization.organization WHERE organization_id = $1`, record.OrganizationID.String())

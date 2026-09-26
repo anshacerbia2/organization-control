@@ -48,6 +48,7 @@ func (f *fixture) forget(t *testing.T, tenantID id.UUID) {
 	t.Cleanup(func() {
 		f.exec(t, `DELETE FROM platform.outbox WHERE aggregate_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM tenant.provisioning_request WHERE tenant_id = $1`, tenantID.String())
+		f.exec(t, `DELETE FROM tenant.tenant_event WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM tenant.tenant WHERE tenant_id = $1`, tenantID.String())
 	})
 }

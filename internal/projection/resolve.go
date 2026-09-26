@@ -19,6 +19,10 @@ package projection
 // missed. Without this reason such an incident could never close: replaying produces no applied
 // evidence, and the consumer is correct with no sanctioned way to say so.
 //
+// A Tenant event is superseded the same way. It carries the Tenant's complete status and its
+// tenant_security_version, and the consumer applies it only when that version is higher than the one
+// it holds, so tenant.tenant_event plays the part membership.membership_event plays below.
+//
 // "Newer" is read from membership.membership_event, never from the receipt or the stream. A replay
 // reassigns stream_position, so an older event replayed after a revocation would carry the higher
 // position; a predicate reading positions would let that replay close the revocation's incident
@@ -129,13 +133,22 @@ const otherReceipts = `SELECT coalesce(string_agg(DISTINCT consumer || ' (' || e
 //
 // One row always, NULL when absent: this package may not name the driver, so "no rows" is not an
 // error it can recognise.
-const failedVersion = `SELECT h.membership_id::text, h.membership_version
+//
+// Two histories, one per aggregate whose events carry complete state and a version the consumer
+// orders by: the Membership's membership_version and the Tenant's tenant_security_version. An event
+// is in at most one of them. Written as constants rather than assembled from a table of names, so
+// tools/grantcheck can read every statement this package runs.
+const failedMembershipVersion = `SELECT h.membership_id::text, h.membership_version
   FROM (SELECT 1) one
   LEFT JOIN membership.membership_event h ON h.event_id = $1`
 
-// supersedingEvidence finds the lowest newer version of the same Membership the active consumer
+const failedTenantVersion = `SELECT h.tenant_id::text, h.tenant_security_version
+  FROM (SELECT 1) one
+  LEFT JOIN tenant.tenant_event h ON h.event_id = $1`
+
+// The superseding queries find the lowest newer version of the same aggregate the active consumer
 // applied. The lowest, so the reference names the first event that made the failed one moot.
-const supersedingEvidence = `SELECT s.event_id::text, s.membership_version, s.event_type
+const supersedingMembership = `SELECT s.event_id::text, s.membership_version, s.event_type
   FROM (SELECT 1) one
   LEFT JOIN LATERAL (
         SELECT r.event_id, h.membership_version, h.event_type
@@ -146,6 +159,19 @@ const supersedingEvidence = `SELECT s.event_id::text, s.membership_version, s.ev
            AND h.membership_id = $2::uuid
            AND h.membership_version > $3
          ORDER BY h.membership_version
+         LIMIT 1) s ON TRUE`
+
+const supersedingTenant = `SELECT s.event_id::text, s.tenant_security_version, s.event_type
+  FROM (SELECT 1) one
+  LEFT JOIN LATERAL (
+        SELECT r.event_id, h.tenant_security_version, h.event_type
+          FROM platform.delivery_receipt r
+          JOIN tenant.tenant_event h ON h.event_id = r.event_id
+         WHERE r.consumer = $1
+           AND r.evidence = 'consumer_applied'
+           AND h.tenant_id = $2::uuid
+           AND h.tenant_security_version > $3
+         ORDER BY h.tenant_security_version
          LIMIT 1) s ON TRUE`
 
 const closeDeadLetter = `UPDATE platform.dead_letter
@@ -201,16 +227,25 @@ func replayedEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer s
 }
 
 func supersededEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer string) (string, string, error) {
+	// Which aggregate the failed event concerns, and at which version: a Membership event first, then
+	// a Tenant event.
+	aggregate, superseding := "Membership", supersedingMembership
 	var (
-		membershipID *string
-		version      *int64
+		aggregateID *string
+		version     *int64
 	)
-	if err := tx.QueryRow(ctx, failedVersion, eventID.String()).Scan(&membershipID, &version); err != nil {
+	if err := tx.QueryRow(ctx, failedMembershipVersion, eventID.String()).Scan(&aggregateID, &version); err != nil {
 		return "", "", fmt.Errorf("projection: reading the version %s carried: %w", eventID, err)
 	}
-	if membershipID == nil || version == nil {
-		return "", "", fmt.Errorf("%w: %s has no Membership version on record; it is not a "+
-			"Membership event, or it was published before the history existed, so replay it instead",
+	if aggregateID == nil || version == nil {
+		aggregate, superseding = "Tenant", supersedingTenant
+		if err := tx.QueryRow(ctx, failedTenantVersion, eventID.String()).Scan(&aggregateID, &version); err != nil {
+			return "", "", fmt.Errorf("projection: reading the version %s carried: %w", eventID, err)
+		}
+	}
+	if aggregateID == nil || version == nil {
+		return "", "", fmt.Errorf("%w: %s has no Membership or Tenant version on record; it carries "+
+			"neither aggregate's state, or it was published before the history existed, so replay it instead",
 			ErrNotSuperseded, eventID)
 	}
 
@@ -219,19 +254,19 @@ func supersededEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer
 		newerVersion *int64
 		newerType    *string
 	)
-	if err := tx.QueryRow(ctx, supersedingEvidence, consumer, *membershipID, *version).Scan(
+	if err := tx.QueryRow(ctx, superseding, consumer, *aggregateID, *version).Scan(
 		&newer, &newerVersion, &newerType); err != nil {
 		return "", "", fmt.Errorf("projection: reading superseding receipts for %s: %w", eventID, err)
 	}
 	if newer == nil || newerVersion == nil || newerType == nil {
-		return "", "", fmt.Errorf("%w: the active consumer %q has applied no event for Membership "+
+		return "", "", fmt.Errorf("%w: the active consumer %q has applied no event for %s "+
 			"%s above version %d, which %s carried; replay it, or wait for the newer event to be applied",
-			ErrNotSuperseded, consumer, *membershipID, *version, eventID)
+			ErrNotSuperseded, consumer, aggregate, *aggregateID, *version, eventID)
 	}
 
 	return outbox.ReceiptReference(*newer, consumer),
-		fmt.Sprintf("; Membership %s version %d superseded by version %d (%s)",
-			*membershipID, *version, *newerVersion, *newerType), nil
+		fmt.Sprintf("; %s %s version %d superseded by version %d (%s)",
+			aggregate, *aggregateID, *version, *newerVersion, *newerType), nil
 }
 
 // close is what both reasons share: the incident must exist and be open, the evidence must be about

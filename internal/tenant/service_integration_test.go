@@ -156,6 +156,7 @@ func (f *fixture) seed(t *testing.T, status State, sponsorStatus string) Tenant 
 	t.Cleanup(func() {
 		f.exec(t, `DELETE FROM platform.outbox WHERE aggregate_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM tenant.provisioning_request WHERE tenant_id = $1`, tenantID.String())
+		f.exec(t, `DELETE FROM tenant.tenant_event WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM tenant.tenant WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM organization.organization WHERE organization_id = $1`, organizationID.String())
 	})
@@ -333,6 +334,54 @@ func TestBothWithdrawalDirectionsTakeThePriorityLane(t *testing.T) {
 		if !events[i].occurred.Equal(f.fixed) {
 			t.Errorf("event %d carries %s, want the accepted instant %s", i, events[i].occurred, f.fixed)
 		}
+	}
+}
+
+// TestEveryPublishedTenantEventRecordsItsSecurityVersion is the Tenant half of SUPERSEDED: the history
+// row exists if and only if the event does, and says what the event says.
+//
+// Asserted through a failure as well as a success. A history row surviving a rolled-back transition
+// would be a newer security version the resolver believes in, attached to an event nobody published.
+func TestEveryPublishedTenantEventRecordsItsSecurityVersion(t *testing.T) {
+	f := newFixture(t)
+	seeded := f.seed(t, StateActive, "active")
+
+	if _, err := f.service.Suspend(f.ctx, command(seeded.TenantID, 1)); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	injected := errors.New("failure inside the publishing transaction")
+	f.service.beforeAppend = func(context.Context) error { return injected }
+	if _, err := f.service.Restore(f.ctx, command(seeded.TenantID, 2)); !errors.Is(err, injected) {
+		t.Fatalf("error = %v, want the injected failure", err)
+	}
+	f.service.beforeAppend = nil
+
+	if _, err := f.service.Restore(f.ctx, command(seeded.TenantID, 2)); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	var matching, total, events int
+	if err := f.setup.InTx(f.ctx, func(ctx context.Context, tx fdb.Tx) error {
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*) FILTER (WHERE o.event_id IS NOT NULL
+			                          AND o.aggregate_id = h.tenant_id
+			                          AND o.event_type = h.event_type
+			                          AND (o.envelope->'data'->>'tenant_security_version')::bigint = h.tenant_security_version),
+			       count(*)
+			  FROM tenant.tenant_event h
+			  LEFT JOIN platform.outbox o ON o.event_id = h.event_id
+			 WHERE h.tenant_id = $1`, seeded.TenantID.String()).Scan(&matching, &total); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM platform.outbox WHERE aggregate_id = $1`,
+			seeded.TenantID.String()).Scan(&events)
+	}); err != nil {
+		t.Fatalf("reading tenant history: %v", err)
+	}
+	if events != 2 || total != events || matching != events {
+		t.Errorf("%d events published, %d history rows, %d agreeing with their event; want 2 of each",
+			events, total, matching)
 	}
 }
 

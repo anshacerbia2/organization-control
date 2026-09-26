@@ -57,12 +57,13 @@ var RuntimeRoles = []string{"organization_rt", "organization_provider_rt"}
 // AdditionalPolicies are the policies a table may carry beyond its tenant-scope and provider-scope
 // pair, by name. Anything else found on a protected table is a problem.
 //
-// membership.membership_event is read by the dead-letter resolver, which runs as its own role
+// membership.membership_event and tenant.tenant_event are read by the dead-letter resolver, which runs as its own role
 // (organization_resolution_rt) so that closing an incident cannot be done with the credential that
 // replays one. That role needs a SELECT policy of its own here; the two runtime roles' policies do not
 // name it.
 var AdditionalPolicies = map[string][]string{
 	"membership.membership_event": {"membership_event_resolution_read"},
+	"tenant.tenant_event":         {"tenant_event_resolution_read"},
 }
 
 // TableProtection is the posture of one table.

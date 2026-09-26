@@ -165,6 +165,7 @@ func (f *fixture) seedTenant(t *testing.T) id.UUID {
 		f.exec(t, `DELETE FROM membership.membership_event WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM membership.membership WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM workspace.workspace WHERE tenant_id = $1`, tenantID.String())
+		f.exec(t, `DELETE FROM tenant.tenant_event WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM tenant.tenant WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM organization.organization WHERE organization_id = $1`, organizationID.String())
 	})
