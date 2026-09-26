@@ -157,6 +157,7 @@ const frontierStatement = `WITH observed AS (
       FROM platform.dead_letter
      WHERE resolved_at IS NULL
        AND event_type = ANY ($1::text[])
+       AND ($2 = '' OR consumer IS NULL OR consumer = $2)
 )
 SELECT observed.at,
        coalesce(committed.mark, 0),
@@ -166,7 +167,26 @@ SELECT observed.at,
        extract(epoch FROM observed.at - debt.oldest)::double precision
   FROM observed, committed, owed, debt`
 
+// Frontier is the estate-wide view: every unresolved authority-bearing dead letter, whichever
+// consumer refused it. It is what a provider reads.
 func (f *FrontierReader) Frontier(ctx context.Context) (Frontier, error) {
+	return f.FrontierFor(ctx, "")
+}
+
+// FrontierFor is the view of one consumer: the debt counted is the consumer's own, plus every dead
+// letter that names no consumer.
+//
+// The dispatcher records which consumer refused an event (foundation-platform v0.2.8). Before that,
+// every dead letter was nobody's, so one consumer's poison event blinded every projection-backed
+// consumer in the estate. Attributed, consumer B is not refused for a delivery only consumer A
+// refused -- and a consumer retired with debt outstanding stops blocking the one registered after
+// it, which bootstraps from a snapshot taken after the event.
+//
+// A dead letter with no consumer is counted for everyone. Rows from before v0.2.8 carry NULL, and
+// reading NULL as nobody's would clear the debt of every incident that predates the column.
+//
+// The empty consumer is the estate view, and is Frontier.
+func (f *FrontierReader) FrontierFor(ctx context.Context, consumer string) (Frontier, error) {
 	var frontier Frontier
 
 	err := f.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
@@ -174,7 +194,7 @@ func (f *FrontierReader) Frontier(ctx context.Context) (Frontier, error) {
 		// zero, so "owes nothing" stays distinguishable from "owes something created at the epoch".
 		var owedSeconds, debtSeconds *float64
 
-		if err := tx.QueryRow(ctx, frontierStatement, f.events).Scan(
+		if err := tx.QueryRow(ctx, frontierStatement, f.events, consumer).Scan(
 			&frontier.ObservedAt,
 			&frontier.HighestCommittedMark,
 			&frontier.OldestUnpublishedMark,

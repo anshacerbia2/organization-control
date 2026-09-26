@@ -793,11 +793,13 @@ type frontierResponse struct {
 // consumer's runtime concern, unlike econcile, which reports across every consumer and stays an
 // operator action.
 func (h *handlers) frontier(w http.ResponseWriter, r *http.Request) {
-	if _, _, ok := requireConsumerSelfOrProvider(w, r, ""); !ok {
+	// A consumer reads its own debt; a provider, naming no consumer, reads the estate's.
+	_, consumer, ok := requireConsumerSelfOrProvider(w, r, "")
+	if !ok {
 		return
 	}
 
-	report, err := h.services.Frontier.Frontier(r.Context())
+	report, err := h.services.Frontier.FrontierFor(r.Context(), consumer)
 	if err != nil {
 		writeError(w, r, err)
 		return

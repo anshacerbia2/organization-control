@@ -10,7 +10,7 @@ import (
 
 type FrontierReader struct{ tx db.Transactor }
 
-func (f *FrontierReader) Frontier(ctx context.Context) error {
+func (f *FrontierReader) FrontierFor(ctx context.Context) error {
 	return f.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		_, err := tx.Exec(ctx, frontierStatement)
 		return err
@@ -110,6 +110,6 @@ func (r *Rogue) Do(ctx context.Context) error {
 // connection, so its statement belongs to its declared role, not to the tenant role around it.
 func Freshness(ctx context.Context, tenant *db.TenantPool, reader *FrontierReader) error {
 	return db.WithTenantScope(ctx, tenant, func(ctx context.Context, tx db.Tx) error {
-		return reader.Frontier(ctx)
+		return reader.FrontierFor(ctx)
 	})
 }

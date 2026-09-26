@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 1.2.1
+  version: 1.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -51,9 +51,19 @@ newer event close the failed one's effect is in **Algorithms / Logic**.
 
 The enforcement scope is also one producer and one projection consumer. `projection.consumer`
 refuses a second active registration, and the database enforces it through a partial unique
-index rather than through the registry alone. Security debt is reported estate-wide rather
-than per consumer, so a second consumer's poison event would refuse the first consumer's
-traffic.
+index rather than through the registry alone.
+
+Security debt is reported per consumer. The dispatcher records which consumer refused each
+event in `platform.dead_letter.consumer` (foundation-platform v0.2.8). When a consumer reads the
+frontier, it counts only its own dead letters plus those that name no consumer. A provider reads
+the whole estate. Rows from before v0.2.8 carry `NULL` and are counted for everyone, because
+reading `NULL` as nobody's would clear every incident that predates the column. So one
+consumer's poison event no longer refuses another consumer's traffic. A consumer retired with
+debt outstanding also stops blocking the one registered after it, which bootstraps from a
+snapshot taken after the event. Attribution is the half of lifting the single-consumer
+restriction that this repository can make. The other half is delivering one event to several
+consumers with separate outcomes, and that needs a delivery substrate the outbox does not have
+(ROADMAP backlog item 6).
 
 ## Technical Context
 
@@ -140,7 +150,8 @@ platform.delivery_receipt   organization_dispatch_rt     INSERT, SELECT
                             organization_resolution_rt   SELECT
                             organization_rt              none
                             organization_provider_rt     none
-                            no role                      UPDATE, DELETE
+                            no runtime role              UPDATE, DELETE
+                            organization_migrator        DELETE, only through retention (below)
 
 platform.dead_letter        organization_dispatch_rt     INSERT, SELECT
                             organization_provider_rt     SELECT   (frontier debt facts, replay source)
@@ -156,6 +167,15 @@ projection.consumer         organization_resolution_rt   SELECT   (the active co
 audit.privileged_access     organization_resolution_rt   INSERT   (the outcome record)
 platform.idempotency_key    organization_resolution_rt   INSERT, SELECT   (the claim of a keyed /resolve)
 ```
+
+**Retention.** `organization-migrate -stage=maintenance` runs daily as the migration role. Among
+its other steps it deletes receipts older than 90 days through foundation-platform's
+`PruneDeliveryReceipts`. That function deletes nothing while any dead letter is unresolved,
+because the receipt that closes an incident may be for a different event, as with `SUPERSEDED`.
+It also never deletes a receipt that a closure's `resolution_reference` cites, because the
+closure record is permanent. The resolver builds that reference with `outbox.ReceiptReference`,
+which is exactly the form pruning recognises. The same stage removes payloads of dead letters
+resolved more than 90 days ago, and exits 3 while an incident has been open longer than 24 hours.
 
 `SELECT` for the dispatcher is not for reading incidents. `ON CONFLICT` with a conflict target
 makes PostgreSQL require it on the table being inserted into. This was measured per table rather

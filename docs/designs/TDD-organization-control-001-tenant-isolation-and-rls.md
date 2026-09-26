@@ -332,7 +332,7 @@ of place:
   | :-- | :-- | :-- |
   | `access.Recorder.RecordProviderAccess` | `organization_provider_rt` | `access.New(providerConns)` |
   | `db.ClaimStore.Complete` | `organization_rt` | `db.NewClaimStore(tenantConns)` |
-  | `projection.FrontierReader.Frontier` | `organization_provider_rt` | `projection.NewFrontierReader(providerConns)` |
+  | `projection.FrontierReader.FrontierFor` | `organization_provider_rt` | `projection.NewFrontierReader(providerConns)` |
 
   Changing that wiring means changing the tool's table in the same change.
 

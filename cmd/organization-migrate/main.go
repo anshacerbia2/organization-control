@@ -14,6 +14,14 @@
 //	atlas migrate apply --env ci        # the eight owned schemas and their tables
 //	organization-migrate -stage=post    # platform schema, then RLS, then privileges
 //
+// A fourth stage is not part of a deploy. It is run on a schedule, daily, as the same role:
+//
+//	organization-migrate -stage=maintenance   # partitions, retention, the stale-incident count
+//
+// It exits 3 when an unresolved dead letter is older than -stale-alert, after doing its work, so
+// the scheduler alerts on the one condition retention must never touch. controldb.RunMaintenance
+// says what each step does.
+//
 // # Why the platform schema is applied after Atlas rather than before
 //
 // identity-control applies it first, and this service cannot. Atlas refuses to apply against a
@@ -48,26 +56,40 @@ import (
 )
 
 const (
-	stagePre  = "pre"
-	stagePost = "post"
+	stagePre         = "pre"
+	stagePost        = "post"
+	stageMaintenance = "maintenance"
 )
 
+// errStale reports stale incidents after a maintenance run that otherwise succeeded.
+var errStale = errors.New("unresolved dead letters are older than the alert boundary")
+
 func main() {
-	stage := flag.String("stage", "", "pre (cluster roles) or post (platform schema, Row-Level Security, privileges)")
+	stage := flag.String("stage", "", "pre (cluster roles), post (platform schema, Row-Level Security, privileges), or maintenance (partitions and retention, run on a schedule)")
 	timeout := flag.Duration("timeout", 2*time.Minute, "upper bound on the whole run")
+	maintenance := controldb.DefaultMaintenance
+	flag.IntVar(&maintenance.PartitionsAhead, "partitions-ahead", maintenance.PartitionsAhead, "maintenance: days of outbox partitions created ahead")
+	flag.DurationVar(&maintenance.OutboxRetention, "outbox-retention", maintenance.OutboxRetention, "maintenance: published partitions older than this are dropped")
+	flag.DurationVar(&maintenance.DeadLetterRetention, "dead-letter-retention", maintenance.DeadLetterRetention, "maintenance: resolved dead letters lose their payload after this")
+	flag.DurationVar(&maintenance.ReceiptRetention, "receipt-retention", maintenance.ReceiptRetention, "maintenance: uncited receipts are pruned after this, while no incident is open")
+	flag.DurationVar(&maintenance.StaleAlert, "stale-alert", maintenance.StaleAlert, "maintenance: unresolved dead letters older than this exit 3")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if err := run(*stage, *timeout, logger); err != nil {
+	if err := run(*stage, *timeout, maintenance, logger); err != nil {
+		if errors.Is(err, errStale) {
+			logger.Error("maintenance completed with stale incidents", slog.String("error", err.Error()))
+			os.Exit(3)
+		}
 		logger.Error("migration failed", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 }
 
-func run(stage string, timeout time.Duration, logger *slog.Logger) error {
-	if stage != stagePre && stage != stagePost {
-		return fmt.Errorf("-stage must be %q or %q, got %q", stagePre, stagePost, stage)
+func run(stage string, timeout time.Duration, maintenance controldb.MaintenanceConfig, logger *slog.Logger) error {
+	if stage != stagePre && stage != stagePost && stage != stageMaintenance {
+		return fmt.Errorf("-stage must be %q, %q or %q, got %q", stagePre, stagePost, stageMaintenance, stage)
 	}
 
 	dsn := os.Getenv("ORGANIZATION_MIGRATION_DATABASE_URL")
@@ -101,6 +123,8 @@ func run(stage string, timeout time.Duration, logger *slog.Logger) error {
 	switch stage {
 	case stagePre:
 		return applyStage(ctx, pool, controldb.StageRoles, logger)
+	case stageMaintenance:
+		return runMaintenance(ctx, pool, maintenance, logger)
 	default:
 		// The platform schema first: grants.sql names its tables, and the RLS stage runs
 		// between them so a window where privileges exist without policies never opens.
@@ -190,6 +214,25 @@ func applyPlatform(ctx context.Context, pool *db.Pool, logger *slog.Logger) erro
 		logger.Info("applied",
 			slog.String("source", "foundation-platform"),
 			slog.String("migration", migration.Name))
+	}
+	return nil
+}
+
+// runMaintenance runs the scheduled stage and logs what it did.
+func runMaintenance(ctx context.Context, pool *db.Pool, cfg controldb.MaintenanceConfig, logger *slog.Logger) error {
+	report, err := controldb.RunMaintenance(ctx, pool, cfg)
+	if err != nil {
+		return err
+	}
+	logger.Info("maintenance",
+		slog.Time("observed_at", report.ObservedAt),
+		slog.Int("partitions_ensured", len(report.PartitionsEnsured)),
+		slog.Any("partitions_dropped", report.PartitionsDropped),
+		slog.Int64("dead_letters_disposed", report.DeadLettersDisposed),
+		slog.Int64("receipts_pruned", report.ReceiptsPruned),
+		slog.Int64("stale_unresolved", report.StaleUnresolved))
+	if report.StaleUnresolved > 0 {
+		return fmt.Errorf("%w: %d older than %s", errStale, report.StaleUnresolved, cfg.StaleAlert)
 	}
 	return nil
 }

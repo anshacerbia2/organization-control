@@ -37,6 +37,7 @@ import (
 	"fmt"
 
 	"github.com/anshacerbia2/foundation-platform/id"
+	"github.com/anshacerbia2/foundation-platform/outbox"
 
 	"github.com/anshacerbia2/organization-control/internal/db"
 )
@@ -193,8 +194,10 @@ func replayedEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer s
 	}
 
 	// The reference points at the receipt that justified this, by its own key. Not a sentence: an
-	// investigation reading resolution_reference should be able to go and look at the row.
-	return fmt.Sprintf("platform.delivery_receipt:%s:%s", eventID, consumer), "", nil
+	// investigation reading resolution_reference should be able to go and look at the row. Built by
+	// the platform, because receipt retention recognises exactly this form: a receipt cited this way
+	// is kept for as long as the closure citing it, which is forever.
+	return outbox.ReceiptReference(eventID.String(), consumer), "", nil
 }
 
 func supersededEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer string) (string, string, error) {
@@ -226,7 +229,7 @@ func supersededEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer
 			ErrNotSuperseded, consumer, *membershipID, *version, eventID)
 	}
 
-	return fmt.Sprintf("platform.delivery_receipt:%s:%s", *newer, consumer),
+	return outbox.ReceiptReference(*newer, consumer),
 		fmt.Sprintf("; Membership %s version %d superseded by version %d (%s)",
 			*membershipID, *version, *newerVersion, *newerType), nil
 }
