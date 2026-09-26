@@ -13,13 +13,16 @@ cross-repository dependency is `foundation-platform`, which lands first.
 
 ## Design status
 
-| TDD | Version | Subject | Status |
-| :-- | :-- | :-- | :-- |
-| `TDD-organization-control-001` | 1.1.0 | Tenant isolation and Row-Level Security | approved |
-| `TDD-organization-control-002` | 1.2.0 | Membership authority, revocation, projection publication | approved |
-| `TDD-organization-control-003` | 1.4.0 | Organization, Tenant, and Workspace lifecycle | approved |
-| `TDD-organization-control-004` | 1.5.0 | Invitation, onboarding correlation, and offboarding obligations | approved |
-| `TDD-organization-control-005` | 1.1.0 | Dead-letter resolution, scope and limits | approved |
+Each design's version is in its own `doc_meta` and is not repeated here, because a copy of it
+went stale on every change.
+
+| TDD | Subject | Status |
+| :-- | :-- | :-- |
+| `TDD-organization-control-001` | Tenant isolation, Row-Level Security, and grant derivation | approved |
+| `TDD-organization-control-002` | Membership authority, revocation, projection publication | approved |
+| `TDD-organization-control-003` | Organization, Tenant, and Workspace lifecycle | approved |
+| `TDD-organization-control-004` | Invitation, onboarding correlation, and offboarding obligations | approved |
+| `TDD-organization-control-005` | Dead-letter resolution, scope and limits | approved |
 
 **No design now contradicts another, and none contradicts the implementation.** Every
 departure Weeks 1 and 2 recorded has been folded back into the design that was wrong, with
@@ -437,7 +440,7 @@ failure it prevents. The Source column gives the review record that decided the 
 | 5 | Per-consumer debt attribution | Debt is estate-wide today, which is why only one projection consumer may be active | RESPONSE-23 |
 | 6 | Multi-consumer delivery substrate | Prerequisite for lifting the single-active-consumer restriction | RESPONSE-23 |
 | 7 | `platform.delivery_receipt` retention | The table is unbounded by design until retention is decided; owned upstream by foundation-platform | RESPONSE-20, RESPONSE-22 |
-| 8 | Coverage floor for this repository | foundation-platform enforces one, and this repository does not yet | RESPONSE-23 |
+| 8 | ✅ Coverage floor for this repository | Done. CI fails below 65% over shipped packages, measured with the integration suites as the real roles (68.3% at introduction), mirroring foundation-platform's mechanism. It bounds what a green falsification run covers (README §Coverage floor) | RESPONSE-22 |
 | 9 | Scheduled cross-repository compatibility runs | The system proof runs on foundation-reference changes, and a producer change can break it unseen until the next consumer change | RESPONSE-23 |
 | 10 | Proof B: Keycloak drift | The identity-side counterpart of Proof A. Drift detection is a claim about the future, not about the closure | RESPONSE-23, RESPONSE-25 |
 
