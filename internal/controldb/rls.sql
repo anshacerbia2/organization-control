@@ -34,6 +34,7 @@ BEGIN
       FROM (VALUES
               ('tenant.tenant'),
               ('tenant.provisioning_request'),
+              ('tenant.tenant_event'),
               ('workspace.workspace'),
               ('membership.membership'),
               ('membership.membership_event'),
@@ -182,6 +183,13 @@ $$;
 -- exists.
 DROP POLICY IF EXISTS membership_event_resolution_read ON membership.membership_event;
 CREATE POLICY membership_event_resolution_read ON membership.membership_event
+    FOR SELECT
+    TO organization_resolution_rt
+    USING (current_setting('app.provider_scope', false)::boolean);
+
+-- tenant.tenant_event, the Tenant half of the same predicate, read the same way.
+DROP POLICY IF EXISTS tenant_event_resolution_read ON tenant.tenant_event;
+CREATE POLICY tenant_event_resolution_read ON tenant.tenant_event
     FOR SELECT
     TO organization_resolution_rt
     USING (current_setting('app.provider_scope', false)::boolean);

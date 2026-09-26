@@ -27,6 +27,7 @@ BEGIN
               ('organization.external_reference'),
               ('tenant.tenant'),
               ('tenant.provisioning_request'),
+              ('tenant.tenant_event'),
               ('workspace.workspace'),
               ('membership.membership'),
               ('membership.membership_event'),
@@ -128,6 +129,11 @@ GRANT SELECT, INSERT, UPDATE ON tenant.tenant TO organization_provider_rt;
 -- tenant.provisioning_request -- provider only: the provisioning coordinator and offboarding's
 -- deprovisioning request.
 GRANT SELECT, INSERT, UPDATE ON tenant.provisioning_request TO organization_provider_rt;
+
+-- tenant.tenant_event -- INSERT, provider only, in the transaction that appends a Tenant event.
+-- History, and history is not edited: no role may UPDATE or DELETE a row, for the reason
+-- membership.membership_event gives. The resolver reads it through its own role, below.
+GRANT INSERT ON tenant.tenant_event TO organization_provider_rt;
 
 -- workspace.workspace -- tenant only. The Workspace service runs under tenant scope, and no
 -- provider path reads or writes a Workspace.
@@ -379,7 +385,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
 -- performing both would make replay and "declare it delivered" the same act, and the evidence
 -- between them decorative.
 
-GRANT USAGE ON SCHEMA platform, projection, audit, membership TO organization_resolution_rt;
+GRANT USAGE ON SCHEMA platform, projection, audit, membership, tenant TO organization_resolution_rt;
 
 -- Column-level UPDATE, not table-level.
 --
@@ -425,6 +431,9 @@ GRANT INSERT ON audit.privileged_access TO organization_resolution_rt;
 -- predicate. Read-only, and on this one table of the schema; rls.sql gives it the matching policy.
 GRANT SELECT ON membership.membership_event TO organization_resolution_rt;
 
+-- And which Tenant, at which security version: the Tenant half of the same predicate.
+GRANT SELECT ON tenant.tenant_event TO organization_resolution_rt;
+
 -- Nothing inherited, for the same reason as the dispatcher: a table added later must be granted
 -- deliberately rather than arrive in the hands of a role whose scope is four objects.
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
@@ -434,5 +443,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA projection
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA audit
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_resolution_rt;
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA membership
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_resolution_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA tenant
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_resolution_rt;
 

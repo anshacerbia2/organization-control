@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 1.4.0
+  version: 1.5.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -19,8 +19,10 @@ doc_meta:
 Record what may close an authority-bearing dead letter, how the closure is built, and what this
 scope still cannot recover from.
 
-An authority-bearing dead letter is a Membership security event the dispatcher abandoned
-after the consumer refused it permanently. While one is unresolved, the publication
+An authority-bearing dead letter is a Membership or Tenant event the dispatcher abandoned
+after the consumer refused it permanently. Tenant events count because the authority refuses
+every member of a Tenant that is not active, so a dead-lettered Tenant suspension withdraws
+every member at once. `projection.AuthorityEventTypes` lists the eight types. While one is unresolved, the publication
 frontier reports security debt and every projection-backed enforcement check refuses. So
 resolving one is the act that returns service, and resolving one wrongly is the act that
 returns service to a consumer holding a revocation it never received.
@@ -35,7 +37,7 @@ Two resolution reasons are in scope:
 
 ```
 REPLAYED      the active consumer applied this event
-SUPERSEDED    the active consumer applied a newer event for the same Membership
+SUPERSEDED    the active consumer applied a newer event for the same Membership or Tenant
 ```
 
 A waiver is also in scope, and it is not a third resolution reason:
@@ -108,8 +110,9 @@ repository applies that schema and owns the grants on it, which is why the privi
 | `projection.FrontierReader` | Reports publication facts and unresolved security debt. Computes no verdict. |
 | `projection.Registry` | Registers and retires projection consumers, and refuses a second active one. |
 | `projection.Replayer` | Re-appends a dead letter to the outbox under its original `event_id` and priority, from the row itself. Leaves the dead letter untouched. |
-| `projection.Resolver` | Closes a dead letter as `REPLAYED` on the active consumer's `consumer_applied` receipt for the event, or as `SUPERSEDED` on that consumer's `consumer_applied` receipt for a newer version of the same Membership. Nothing else. |
+| `projection.Resolver` | Closes a dead letter as `REPLAYED` on the active consumer's `consumer_applied` receipt for the event, or as `SUPERSEDED` on that consumer's `consumer_applied` receipt for a newer version of the same Membership or Tenant. Nothing else. |
 | `membership.Service` | Writes `membership.membership_event` beside every Membership event it publishes, in the publishing transaction. |
+| `tenant.Service` | Writes `tenant.tenant_event` beside every Tenant event it publishes, in the publishing transaction. |
 | `db.ResolutionPool` | The only pool that can write the resolution columns. It connects as `organization_resolution_rt` through its own credential. |
 
 ## Data Model
@@ -151,6 +154,21 @@ not: a replay reassigns it, which is why the `SUPERSEDED` predicate reads this t
 positions. There is no backfill. An event published before the table existed has no row and
 cannot be closed as `SUPERSEDED`. Nothing was in production when the table arrived.
 
+`tenant.tenant_event` does the same for Tenant events, keyed on the Tenant's security version:
+
+```
+event_id                  uuid, primary key       the published event
+tenant_id                 uuid, FK tenant         the aggregate and the RLS discriminator
+tenant_security_version   bigint                  the version the event carries
+event_type                text
+recorded_at               timestamptz
+UNIQUE (tenant_id, tenant_security_version)
+```
+
+Every published Tenant event increments `tenant_security_version`, so the version identifies the
+event within its Tenant. The same rules hold: written in the publishing transaction, fixed at
+publication, and no backfill.
+
 `platform.delivery_receipt` is keyed `(event_id, consumer)` and carries an `evidence` column
 constrained to `consumer_applied` or `transport_accepted`. It is the root of trust for
 resolution: a row asserting that this event reached this consumer. The first receipt wins
@@ -171,6 +189,11 @@ platform.dead_letter        organization_dispatch_rt     INSERT, SELECT
                             organization_resolution_rt   SELECT, and UPDATE on the four resolution columns
                                                          and the four waiver columns only
                             organization_rt              none
+
+tenant.tenant_event         organization_provider_rt     INSERT   (written when publishing)
+                            organization_resolution_rt   SELECT   (the SUPERSEDED predicate)
+                            organization_rt              none
+                            no runtime role              UPDATE, DELETE, TRUNCATE
 
 membership.membership_event organization_rt              INSERT   (written when publishing)
                             organization_resolution_rt   SELECT   (the SUPERSEDED predicate)
@@ -198,13 +221,14 @@ alone.
 
 The resolution role can close an incident and can do nothing else to it. It cannot change
 `failure_class` or the envelope, cannot insert or delete a dead letter, cannot write a receipt,
-and cannot write Membership history. It cannot manufacture the evidence it closes on, and it
+and cannot write Membership or Tenant history. It cannot manufacture the evidence it closes on, and it
 cannot rewrite the incident it closes.
 
 `membership.membership_event` is under the same Row-Level Security as every table in the
 `membership` schema: the tenant-scope and provider-scope policies, plus one declared extra,
 `membership_event_resolution_read`. That is a `SELECT` policy for the resolution role, keyed on
-the provider binding. `controldb.AssertIsolation` checks policies by name and accepts an extra
+the provider binding. `tenant.tenant_event` carries the same arrangement with
+`tenant_event_resolution_read`. `controldb.AssertIsolation` checks policies by name and accepts an extra
 one only when it is declared in `AdditionalPolicies`.
 
 The request path holds nothing on either table. A caller able to insert a `consumer_applied`
@@ -299,6 +323,14 @@ membership.membership_event holds E.event_id for the same M, with version W > V
 
 The reference names the lowest such `E`.
 
+A Tenant event is superseded the same way. `tenant.tenant_event` holds `X.event_id` with Tenant
+`T` and security version `V`, and `E` is an applied event for the same `T` with
+`tenant_security_version W > V`. Tenant events carry the Tenant's complete status and its
+security version, and the consumer orders them by that version, so the same proof holds.
+Without it, a Tenant suspension dead-lettered and then overtaken by a restoration could never
+close. A replay is discarded, so `REPLAYED` never gets its receipt, and the incident would block
+every check.
+
 This is domain proof and not a version comparison alone. Every Membership event carries the
 complete security state and its version, not a delta, and the consumer applies an event only
 when its version is higher than the one it holds. Once the consumer has applied `W`, the event at
@@ -306,7 +338,7 @@ when its version is higher than the one it holds. Once the consumer has applied 
 consumer already holds a state at least as new as the one it missed. The receipt proves the
 consumer applied `W`, and the history proves `W` is newer than `V` for the same Membership.
 
-Versions come from `membership.membership_event`, never from stream positions, receipts, or the
+Versions come from `membership.membership_event` and `tenant.tenant_event`, never from stream positions, receipts, or the
 dead letter's envelope. A replay reassigns `stream_position`, so an older grant replayed after a
 dead-lettered revocation carries the higher position. A predicate reading positions would close
 the revocation's incident while the consumer holds the older grant, clearing the debt for a
@@ -474,8 +506,10 @@ Two states remain that neither reason closes except by `REPLAYED`:
 - **A terminal event with nothing after it.** A revocation is the last event its Membership
   carries, so no newer version can supersede it. That is correct: the only acceptable proof is
   the revocation itself being applied.
-- **An event with no history row.** It was published before `membership.membership_event`
-  existed, or it is not a Membership event.
+- **A retirement with nothing after it.** `tenant.lifecycle.retired` is terminal for its Tenant
+  in the same way.
+- **An event with no history row.** It was published before its history table existed, or it is
+  neither a Membership nor a Tenant event.
 
 **A retired consumer's incident** has no corrective path at all, because no replay reaches its
 consumer. It no longer blocks the active consumer (§Scope), and it is waived rather than closed
@@ -513,6 +547,10 @@ test red, not assumed to.
 | A newer event that is weakly receipted, receipted by another consumer, or about another Membership supersedes nothing; an event with no recorded version cannot be superseded | same file: `TestANewerEventThatIsNotEvidenceSupersedesNothing`, `TestAnIncidentWithNoRecordedVersionCannotBeSuperseded` |
 | A newer applied event does not close an incident as `REPLAYED` | same file: `TestANewerAppliedEventDoesNotCloseAnIncidentAsReplayed` |
 | The resolution role cannot insert, renumber, or erase Membership history | same file: `TestTheResolutionRoleCannotRewriteMembershipHistory` |
+| A Tenant event closes as `SUPERSEDED` on a newer applied one for the same Tenant, and an older one never supersedes it. A mutation replacing the version comparison was observed turning it red | `internal/projection/superseded_tenant_integration_test.go` `TestATenantEventClosesAsSupersededOnANewerAppliedOne`, `TestAnOlderTenantEventDoesNotSupersedeANewerOne` |
+| The resolution role reads Tenant history and cannot insert, renumber, or erase it | same file: `TestTheResolutionRoleCannotRewriteTenantHistory` |
+| Every published Tenant event has a history row that agrees with it, and a rolled-back transition leaves none | `internal/tenant/service_integration_test.go` `TestEveryPublishedTenantEventRecordsItsSecurityVersion` |
+| The frontier counts every type the Membership and Tenant state machines publish, and nothing else | `internal/httpapi/frontier_debt_test.go` `TestTheFrontierDebtCoversEveryAuthorityEvent` |
 | A retired consumer's incident is waived and stays open: `resolved_at` stays null, the estate frontier still reports the debt, the active consumer is not charged with it, and no closure record is filed | `internal/projection/waive_integration_test.go` `TestARetiredConsumersIncidentIsWaivedAndStaysOpen` |
 | A waiver is refused for the active consumer's incident and for one naming no consumer, and the refusal names the corrective path. It is also refused without a reason, or with an expiry outside (now, now + 90 days]. A mutation making the active consumer's incident waivable was observed turning it red | same file: `TestAWaiverIsRefusedWhereItWouldHideALiveOutage` |
 | A standing waiver is not stacked, and a resolved incident is not waived | same file: `TestAWaiverIsNotStackedOrAppliedToAClosedIncident` |

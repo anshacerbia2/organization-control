@@ -31,16 +31,26 @@ import (
 // a withdrawal that will never reach the consumer by itself, and a consumer that cannot see the
 // difference must either ignore all of them or refuse on all of them.
 //
-// It mirrors internal/membership's action-to-event-type table, which this package may not import:
-// arch.json gives internal/projection edges to internal/db and internal/system only, because a
-// read-only publisher with a path into the Membership state machine is a mutation path behind a
-// snapshot. TestTheFrontierDebtCoversEveryMembershipAuthorityEvent in internal/httpapi — which
-// already imports both — keeps the copy honest.
+// Membership events and Tenant events both. The authority refuses every member of a Tenant that is
+// not active, and a consumer answers the same way only if it holds the Tenant's state -- so a
+// dead-lettered Tenant suspension is a withdrawal of every member at once, and must count as debt as
+// surely as one revocation does. The Tenant types are the ones the Tenant state machine publishes;
+// the consumer applies exactly these (foundation-reference, projection.tenant).
+//
+// It mirrors internal/membership's and internal/tenant's action-to-event-type tables, which this
+// package may not import: arch.json gives internal/projection edges to internal/db and
+// internal/system only, because a read-only publisher with a path into a state machine is a mutation
+// path behind a snapshot. TestTheFrontierDebtCoversEveryAuthorityEvent in internal/httpapi -- which
+// imports all three -- keeps the copy honest.
 var AuthorityEventTypes = []string{
 	"com.scnehaux.organization.membership.lifecycle.granted",
 	"com.scnehaux.organization.membership.lifecycle.restored",
 	"com.scnehaux.organization.membership.security.suspended",
 	"com.scnehaux.organization.membership.security.revoked",
+	"com.scnehaux.organization.tenant.lifecycle.activated",
+	"com.scnehaux.organization.tenant.security.suspended",
+	"com.scnehaux.organization.tenant.security.restored",
+	"com.scnehaux.organization.tenant.lifecycle.retired",
 }
 
 // Frontier is the answer, as facts.

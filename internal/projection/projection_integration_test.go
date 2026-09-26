@@ -172,6 +172,7 @@ func (f *fixture) seedTenant(t *testing.T) id.UUID {
 	f.exec(t, `INSERT INTO tenant.tenant (tenant_id, organization_id, display_name, status, isolation_profile)
 	    VALUES ($1, $2, 'projection suite', 'active', 'pooled')`, tenantID.String(), organizationID.String())
 	t.Cleanup(func() {
+		f.exec(t, `DELETE FROM tenant.tenant_event WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM tenant.tenant WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM organization.organization WHERE organization_id = $1`, organizationID.String())
 	})

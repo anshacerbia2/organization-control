@@ -341,8 +341,21 @@ func (s *Service) appendEvent(ctx context.Context, tx db.Tx, action Action, reco
 	if err := outbox.Append(ctx, tx, record.TenantID, envelope, opts...); err != nil {
 		return false, fmt.Errorf("tenant: append event: %w", err)
 	}
+
+	// Which security version this event carries, recorded in the same transaction as the event, so
+	// the row exists if and only if the event does. The SUPERSEDED resolution predicate reads it: a
+	// delivery receipt names only an event, and this says which Tenant, at which point in its
+	// security history, the event concerns. See membership.membership_event for the same record.
+	if _, err := tx.Exec(ctx, recordEventStatement, envelope.ID.String(), record.TenantID.String(),
+		record.SecurityVersion, string(eventType)); err != nil {
+		return false, fmt.Errorf("tenant: record the event's security version: %w", err)
+	}
 	return true, nil
 }
+
+const recordEventStatement = `INSERT INTO tenant.tenant_event
+    (event_id, tenant_id, tenant_security_version, event_type)
+VALUES ($1::uuid, $2::uuid, $3, $4)`
 
 func load(ctx context.Context, tx db.Tx, tenantID id.UUID) (Tenant, error) {
 	var (

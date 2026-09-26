@@ -325,6 +325,59 @@ table "provisioning_request" {
   }
 }
 
+// Which Tenant security version each published Tenant event carries.
+//
+// The Tenant half of the SUPERSEDED resolution predicate (TDD-organization-control-005), the same
+// shape as membership.membership_event. A consumer applies a Tenant event only when its security
+// version is higher than the one it holds, so once it has applied version W, a dead-lettered Tenant
+// event at V < W can never take effect -- and without this record the incident could never close:
+// a replay is discarded, so REPLAYED never gets its receipt. Written by the tenant service in the
+// transaction that appends the event, so a row exists if and only if the event does.
+//
+// Immutable: grants.sql gives the provider role INSERT only.
+table "tenant_event" {
+  schema  = schema.tenant
+  comment = "Tenant security version carried by each published Tenant event. Immutable. RLS-protected."
+
+  column "event_id" {
+    null = false
+    type = uuid
+  }
+  column "tenant_id" {
+    null = false
+    type = uuid
+  }
+  column "tenant_security_version" {
+    null = false
+    type = bigint
+  }
+  column "event_type" {
+    null = false
+    type = text
+  }
+  column "recorded_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.event_id]
+  }
+
+  foreign_key "tenant_event_tenant_fk" {
+    columns     = [column.tenant_id]
+    ref_columns = [table.tenant.column.tenant_id]
+  }
+
+  // One published event per security version. Every publishing transition but activation
+  // increments it, and activation is the first, so two rows at one version would be two events
+  // claiming the same point in the Tenant's history.
+  unique "tenant_event_version_unique" {
+    columns = [column.tenant_id, column.tenant_security_version]
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // workspace — RLS.
 // ---------------------------------------------------------------------------------------------
