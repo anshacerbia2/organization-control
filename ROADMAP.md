@@ -430,7 +430,8 @@ failure it prevents. The Source column gives the review record that decided the 
 | # | Item | Why | Source |
 | :-- | :-- | :-- | :-- |
 | 1 | ✅ **`SUPERSEDED` resolution** | Built. A dead letter closes as `SUPERSEDED` on the active consumer's `consumer_applied` receipt for a newer version of the same Membership, with versions read from `membership.membership_event` rather than stream positions, which a replay reassigns (TDD-005 §The resolution predicate). Without it, an overtaken event could never resolve, and estate-wide debt blocked every projection-backed check permanently | RESPONSE-23, RESPONSE-24 |
-| 2 | **`grantcheck`** | Mechanises Layer 1 of the privilege model: grants derived from execution paths and checked by a tool rather than by review | RESPONSE-22 |
+| 2 | ✅ **`grantcheck`** | Built. `tools/grantcheck` derives which role runs which statement from the code, and PostgreSQL judges each one as that role: a missing grant fails on every derived path, and a grant nothing needs is reported (TDD-001 §Grant Derivation). Runs in CI, with a mutation for each direction | RESPONSE-22 |
+| 2a | Narrow the `grants.sql` schema loop | `grantcheck` found 52 grants no statement needs, mostly `DELETE` and cross-schema DML the loop gives both runtime roles. They are listed in `tools/grantcheck/unused-baseline.txt`; revoking them is a change to TDD-001's role model | grantcheck |
 | 3 | `RESNAPSHOTTED` resolution | Recovery by generation replacement. It must be built in full or not at all (TDD-005 §Scope) | RESPONSE-23 |
 | 4 | `WAIVED` resolution | A sanctioned operational exception, kept separate from repairing authority state | RESPONSE-23 |
 | 5 | Per-consumer debt attribution | Debt is estate-wide today, which is why only one projection consumer may be active | RESPONSE-23 |

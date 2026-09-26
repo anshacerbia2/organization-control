@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.1.0
+  version: 1.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-08-23
+  last_reviewed: 2026-09-26
   parent_sad: SAD-004
 ---
 
@@ -298,6 +298,92 @@ holds `SUPERUSER` or `BYPASSRLS`, or when either holds a DDL privilege.
 Grants and policies drift through migrations. Asserting them on every build is what
 keeps the boundary real after the engineer who wrote it has moved on.
 
+### Grant Derivation
+
+The privilege model is checked in three layers, and each is named for what it does rather
+than called a proof:
+
+| Layer | Mechanism | What it establishes | Its limit |
+| :-- | :-- | :-- | :-- |
+| Derivation | `tools/grantcheck` | Which role runs which statement, read from the code, and whether the grants match | The declared boundaries below are an input, not a derivation |
+| Falsification | The integration suite, run as the real roles | A tested path that needs a missing grant fails | Only the paths the suite executes |
+| Drift detection | Catalog assertions such as `platform_privileges_integration_test.go` | The catalog still matches what was declared | Asserts the declaration, not whether it is right |
+
+`grantcheck` runs in two steps, each with one source of truth.
+
+**Which role runs which statement: the code.** A statement runs under the role of the
+connection its transaction was opened on. In this repository that is decided in two kinds
+of place:
+
+- A scope wrapper in `internal/db`. `WithTenantScope` is `organization_rt`.
+  `WithProviderScope` and `WithProviderSnapshot` are `organization_provider_rt`.
+  `WithResolutionScope` is `organization_resolution_rt`.
+- A declared boundary: a struct that holds a `Transactor` and opens its own transaction on
+  it. Its role is whatever the composition root hands it, so it is declared in the tool with
+  the `main.go` line it mirrors:
+
+  | Boundary | Role | Wired in `cmd/organization-control/main.go` |
+  | :-- | :-- | :-- |
+  | `access.Recorder.RecordProviderAccess` | `organization_provider_rt` | `access.New(providerConns)` |
+  | `db.ClaimStore.Complete` | `organization_rt` | `db.NewClaimStore(tenantConns)` |
+  | `projection.FrontierReader.Frontier` | `organization_provider_rt` | `projection.NewFrontierReader(providerConns)` |
+
+  Changing that wiring means changing the tool's table in the same change.
+
+The tool builds SSA for the service and a VTA call graph. From each wrapper call site it
+walks everything the body can reach, including through interface calls and captured
+function values, and collects every SQL constant. Two rules keep the attribution honest:
+
+- A body passed to a wrapper is entered only from its own call site. `withRecordedScope`
+  is shared by the provider and resolution wrappers, so following its body parameter would
+  attribute every provider statement to the resolution role and every resolution statement
+  to the provider role.
+- A declared boundary is entered only as its own root. A tenant body that reads the
+  frontier does not give `organization_rt` the frontier's statements.
+
+When the tool cannot read something, the run fails. That covers:
+
+- a SQL call whose statement is not a constant, a choice between constants, a parameter
+  every caller fills with one, or a function returning one;
+- a SQL constant no wrapper or boundary reaches;
+- a raw transaction outside the wrappers that is not a declared boundary;
+- a wrapper body the tool cannot resolve.
+
+This is why `tenant.apply` uses written-out constants rather than assembling its `UPDATE`.
+`TestEveryTransitionStatementMatchesItsRule` assembles each constant from `transitions`, so
+the constants cannot drift from the state machine.
+
+**What each statement needs: PostgreSQL.** The tool does not parse SQL or restate the
+privilege rules. Those rules are the engine's: `ON CONFLICT` with a target needs `SELECT`,
+`RETURNING` needs `SELECT` on the returned columns, and column grants follow their own
+rules. PostgreSQL checks privileges when it builds a plan, so `EXPLAIN` is enough and
+nothing executes. For each (role, statement) the tool runs `SET LOCAL ROLE`, then
+`PREPARE`, then `EXPLAIN (VERBOSE, FORMAT JSON) EXECUTE` with a generic plan.
+
+- **Missing.** A privilege refusal is a grant the code needs and the database does not
+  give. This holds on every derived path, not only the paths the suite executes.
+- **Unused.** Each grant a runtime role holds is revoked inside a transaction that is rolled
+  back, and every statement of that role is planned again. If none is refused, nothing in
+  this repository needs the grant. Every statement is re-planned, not only those whose plan
+  shows the table. The engine checks every relation a statement names, while a plan shows
+  only what survived planning.
+- **Sequences** are the one place the tool reads SQL text. `nextval` checks its privilege
+  when it runs, not when it is planned. A statement calling a sequence function is
+  therefore checked with `has_sequence_privilege`, using PostgreSQL's rule for that
+  function.
+
+Unused grants found when the tool arrived are listed in `tools/grantcheck/unused-baseline.txt`.
+The baseline is debt written down, not an allowance. The run fails on an unused grant the
+file does not list, and on a line that is no longer an unused grant. So an entry leaves the
+file only when the grant is revoked or code starts to need it, and the file says which.
+Most entries come from the schema loop in `grants.sql`, which grants DML on every table in
+every RLS schema to both runtime roles. Narrowing that loop is a change to this design and
+has not been made.
+
+The tool runs only against a database whose name ends in `_test`, owned by a role able to
+revoke: `make grantcheck` locally and the CI database. The dispatch role is out of scope,
+because its statements live in foundation-platform and run in foundation-reference.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -348,8 +434,15 @@ administrative connection is explicitly not accepted as evidence.
 - Every table in the RLS schemas has a non-nullable `tenant_id`.
 - Neither runtime role owns a table, holds `SUPERUSER`, holds `BYPASSRLS`, or holds a
   DDL privilege.
-- `SET LOCAL app.` appears in no package other than `db`.
+- `SET LOCAL app.` appears in no package other than `db`. `tools/grantcheck` is the one
+  exception: it binds no request, and sets both values only inside the rolled-back
+  transactions it plans statements in.
 - A new table added to an RLS schema without a policy fails the migration test.
+- `grantcheck` finds no missing grant, no unlisted unused grant, and no statement it cannot
+  attribute. Its CI step revokes a grant the resolver needs and adds one nothing needs, and
+  requires a finding for each. Its own tests run it on a fixture module with one case for
+  every attribution rule and every refusal, and a mutation to either walk rule turns them
+  red.
 
 ### Negative
 

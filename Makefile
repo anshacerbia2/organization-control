@@ -179,7 +179,7 @@ CI_DSN ?= postgres://$(CI_OWNER):$(CI_OWNER_PASSWORD)@localhost:5432/$(CI_DATABA
 # there is one place holding local credentials.
 ADMIN_DSN ?= $(TEST_DATABASE_URL)
 
-.PHONY: ci-db test-ci
+.PHONY: ci-db test-ci grantcheck
 
 # Every psql call puts its options BEFORE the connection string and passes it with -d.
 #
@@ -204,6 +204,11 @@ ci-db:
 
 test-ci: ci-db
 	@set "TEST_DATABASE_URL=$(CI_DSN)"&& set "REQUIRE_INTEGRATION=1"&& go test -race -count=1 -p 1 ./internal/...
+
+# The grant derivation, against the same disposable database CI uses. -dsn is passed explicitly:
+# TEST_DATABASE_URL in .env is the administrative connection ci-db builds from, not a test database.
+grantcheck: ci-db
+	go run ./tools/grantcheck -dsn "$(CI_DSN)"
 
 gates: fmt vet build arch tidy test
 	@echo All gates passed.

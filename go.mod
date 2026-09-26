@@ -5,7 +5,10 @@ module github.com/anshacerbia2/organization-control
 // and GO_VERSION in ci.yml is a testing choice. See foundation-platform README §Go versions.
 go 1.25.0
 
-require github.com/anshacerbia2/foundation-platform v0.2.7
+require (
+	github.com/anshacerbia2/foundation-platform v0.2.7
+	golang.org/x/tools v0.48.0
+)
 
 require (
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -18,6 +21,7 @@ require (
 	go.opentelemetry.io/otel v1.38.0 // indirect
 	go.opentelemetry.io/otel/metric v1.38.0 // indirect
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
+	golang.org/x/mod v0.38.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
 )

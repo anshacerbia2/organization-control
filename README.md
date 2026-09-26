@@ -97,6 +97,7 @@ every other consumer uses; sharing a foundation grants no privileged interface.
 | `internal/context/` | Operating-context eligibility and the authoritative fresh check |
 | `internal/offboarding/` | Obligation tracking and retirement |
 | `internal/projection/` | Snapshots, consumer registry, reconciliation |
+| `tools/grantcheck/` | Derives which role runs which statement and has PostgreSQL judge the grants; `make grantcheck` |
 | `docs/designs/` | Technical Design Documents |
 
 Outbox, dispatcher, event envelope, deduplication, idempotency, problem details, and
