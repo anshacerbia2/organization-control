@@ -448,6 +448,21 @@ at these revisions:
 - foundation-reference `3fff64200a6e25a07fcfcbfbf62b2ea10add7822`
 - foundation-platform `v0.2.7` on the producer, `v0.2.6` on the consumer
 
+**Keeping the proof current.** The closure run is pinned: foundation-reference proves this
+repository at one revision, which keeps the run reproducible, but a change here never ran it. Two
+more runs close that gap (RESPONSE-24 §3). Neither replaces the pin, and both are logged as
+`UNPINNED`, so neither can be mistaken for a closure record:
+
+- **`system-proof` in this repository's CI.** On every pull request it runs the same proof
+  against the PR head, with foundation-reference at the revision in
+  `systemproof/foundation-reference.rev`. On the daily schedule it uses foundation-reference's
+  `main`.
+- **`system-proof-main` in foundation-reference's CI.** Daily, it runs the proof against this
+  repository's `main`.
+
+A red scheduled run means the two repositories have drifted apart. Fix the side that broke the
+contract, then bump the pins deliberately.
+
 The system proof covers `REPLAYED`. `SUPERSEDED` has no cross-process proof yet. Its predicate
 runs entirely in this service's database, and the integration suite above runs it as the real
 resolution role against real receipts and history.

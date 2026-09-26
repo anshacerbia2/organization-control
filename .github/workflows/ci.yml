@@ -7,8 +7,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Daily, not weekly: the scheduled system-proof run is where drift against foundation-reference's
+  # main surfaces, and a week of it is a week found only by whoever bumps the pin next.
   schedule:
-    - cron: "41 3 * * 1"
+    - cron: "41 3 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -391,6 +394,89 @@ jobs:
           path: coverage.out
           if-no-files-found: ignore
           retention-days: 7
+
+  # Proof A, run by the producer.
+  #
+  # The system proof lives in foundation-reference and pins this repository to one revision, which
+  # keeps its green run a reproducible closure record -- and means a change here never ran it. The
+  # break surfaced when somebody next bumped that pin (RESPONSE-24 §3). This job runs the same proof
+  # against this pull request, with foundation-reference at the revision pinned in
+  # systemproof/foundation-reference.rev. On the schedule it runs against foundation-reference's
+  # main instead, which is the other direction of the same drift.
+  #
+  # SYSTEMPROOF_UNPINNED lifts foundation-reference's pin on this repository and nothing else: this
+  # checkout must still be a clean commit, and the run is logged as UNPINNED, never as a closure.
+  system-proof:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      SYSTEMPROOF_ADMIN_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+      SYSTEMPROOF_ORGANIZATION_CONTROL_SRC: ${{ github.workspace }}/organization-control
+      SYSTEMPROOF_LOG_DIR: ${{ github.workspace }}/systemproof-logs
+      SYSTEMPROOF_UNPINNED: "1"
+      TEST_RUNTIME_PASSWORD: runtime
+      TEST_PROVIDER_PASSWORD: provider
+      TEST_DISPATCH_PASSWORD: dispatch
+      TEST_RESOLUTION_PASSWORD: resolution
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: organization-control
+
+      - name: choose the foundation-reference revision
+        id: consumer
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+            echo "running against foundation-reference main"
+            exit 0
+          fi
+          rev="$(tr -d '[:space:]' < organization-control/systemproof/foundation-reference.rev)"
+          if ! printf '%s' "$rev" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::systemproof/foundation-reference.rev must hold one full commit SHA, found '$rev'"
+            exit 1
+          fi
+          echo "ref=$rev" >> "$GITHUB_OUTPUT"
+          echo "running against foundation-reference $rev (pinned)"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: anshacerbia2/foundation-reference
+          ref: ${{ steps.consumer.outputs.ref }}
+          path: foundation-reference
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      - name: Proof A against this revision
+        working-directory: foundation-reference
+        run: go test -tags systemproof ./systemproof -run TestProofAAcrossTheProcessBoundary -count=1 -v -timeout 10m
+
+      - name: process logs
+        if: failure()
+        run: |
+          for f in systemproof-logs/*.log; do
+            echo "==================== $f"
+            cat "$f"
+          done
 
   supply-chain:
     runs-on: ubuntu-latest
