@@ -175,6 +175,11 @@ var mapping = []struct {
 	{projection.ErrNoActiveConsumer, platform.PreconditionUnmet},
 	{projection.ErrNoAppliedEvidence, platform.PreconditionUnmet},
 	{projection.ErrNotSuperseded, platform.PreconditionUnmet},
+	// A waiver the rules forbid: the request is well formed and the estate refuses it, and the
+	// refusal names the corrective path to take instead. A second waiver while one stands is a
+	// state conflict, not a precondition.
+	{projection.ErrNotWaivable, platform.PreconditionUnmet},
+	{projection.ErrAlreadyWaived, platform.StateTransitionRefused},
 
 	// Context.
 	{context.ErrInvalid, platform.ValidationFailed},

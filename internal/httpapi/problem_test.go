@@ -114,6 +114,8 @@ var registry = map[string]error{
 	"projection.ErrNoActiveConsumer":   projection.ErrNoActiveConsumer,
 	"projection.ErrNoAppliedEvidence":  projection.ErrNoAppliedEvidence,
 	"projection.ErrNotSuperseded":      projection.ErrNotSuperseded,
+	"projection.ErrNotWaivable":        projection.ErrNotWaivable,
+	"projection.ErrAlreadyWaived":      projection.ErrAlreadyWaived,
 
 	"context.ErrInvalid":         context.ErrInvalid,
 	"context.ErrNotRegistered":   context.ErrNotRegistered,

@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 1.3.0
+  version: 1.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -38,12 +38,25 @@ REPLAYED      the active consumer applied this event
 SUPERSEDED    the active consumer applied a newer event for the same Membership
 ```
 
-Two are out, and each is out for a stated reason rather than by omission:
+A waiver is also in scope, and it is not a third resolution reason:
+
+```
+WAIVED        known, accepted, until a date: silences the alert, never clears the debt
+```
+
+A waiver records an operational exception, in foundation-platform v0.2.9's four waiver columns.
+It never touches the resolution columns, so it cannot make an incident look delivered, and the
+frontier keeps counting the incident as debt. See **WAIVED**.
+
+One reason is out, by decision rather than by omission:
 
 | Reason | Why it is out |
 | :-- | :-- |
-| `RESNAPSHOTTED` | Requires generation replacement in full: a generation built empty, dual-apply during the rebuild, atomic promotion, generation-scoped lookup, and a race proof. Implementing part is worse than none, because a promotion that reads do not respect is a pointer swap, not a replacement. |
-| `WAIVED` | An operational exception. Closing an incident is not repairing authority state, and one column serving both conflates them. |
+| `RESNAPSHOTTED` | Requires generation replacement in full: a generation built empty, dual-apply during the rebuild, atomic promotion, generation-scoped lookup, and a race proof. Implementing part is worse than none, because a promotion that reads do not respect is a pointer swap, not a replacement. Its case is covered instead by rebuilding the consumer under a new identity (§Rebuilding a consumer), the "honest outage" RESPONSE-13 named as the alternative. It is not built "just to complete an older checklist" (RESPONSE-18). |
+
+**Reopen when** a consumer cannot afford the outage a rebuild costs. That is the one thing
+generation replacement buys over a rebuild: serving from the old generation while the new one
+builds.
 
 `SUPERSEDED` rests on the same evidence as `REPLAYED`: a `consumer_applied` receipt from the
 active consumer. What differs is which event the receipt is for. The domain proof that lets a
@@ -155,7 +168,8 @@ platform.delivery_receipt   organization_dispatch_rt     INSERT, SELECT
 
 platform.dead_letter        organization_dispatch_rt     INSERT, SELECT
                             organization_provider_rt     SELECT   (frontier debt facts, replay source)
-                            organization_resolution_rt   SELECT, and UPDATE on the four resolution columns only
+                            organization_resolution_rt   SELECT, and UPDATE on the four resolution columns
+                                                         and the four waiver columns only
                             organization_rt              none
 
 membership.membership_event organization_rt              INSERT   (written when publishing)
@@ -206,6 +220,7 @@ Two provider-only operations. Each requires an `X-Administrative-Reason`.
 ```
 POST /v1/dead-letters/{event_id}/replay    202  {event_id, event_type, position, resolved: false}
 POST /v1/dead-letters/{event_id}/resolve   200  {event_id, consumer, resolution_type, resolution_reference}
+POST /v1/dead-letters/{event_id}/waive     200  {event_id, consumer, waived_until, waiver_reason, resolved: false}
 ```
 
 `resolve` takes an optional body naming the reason:
@@ -232,6 +247,9 @@ unknown field is `400`, never a fallback to `REPLAYED`.
 | No active projection consumer registered | `412` |
 | `REPLAYED`: no `consumer_applied` receipt for the active consumer | `412` |
 | `SUPERSEDED`: no recorded version for the event, or no newer version of the Membership applied by the active consumer | `412` |
+| Waive: no reason, no expiry, or an expiry not after now or beyond 90 days | `400` |
+| Waive: the incident names no consumer, or names the active one | `412` |
+| Waive: already under an unexpired waiver, or already resolved | `409` |
 | Replay only: the row cannot re-append itself (no envelope, or a null `aggregate_id` or `priority`) | `412` |
 
 Both honour `Idempotency-Key`. The claim is made inside the operation's own transaction, and a
@@ -331,6 +349,82 @@ A refused closure therefore leaves an attempt and no account of a closure. Both 
 `audit.privileged_access`. The attempt is written through the provider pool's recorder, and the
 outcome by the resolution role.
 
+### WAIVED
+
+Some incidents have no corrective path. When the consumer that refused the event has been
+retired, no replay can reach it, and no receipt will justify `REPLAYED` or `SUPERSEDED`. Left
+alone, the row alerts as stale forever and keeps its restricted payload forever. A waiver records
+that an operator knows about it, why, and until when:
+
+```
+waive X until T because R
+  X is unresolved and not under an unexpired waiver
+  X names a consumer, and it is not the active consumer, derived server-side
+  now < T <= now + 90 days, on the database clock
+  R is not blank
+  -> waived_at = now, waived_until = T, waived_by = the operator, waiver_reason = R
+```
+
+**A waiver is not a closure.** `resolved_at` stays `NULL`. The estate frontier keeps counting
+the incident as debt, and the closure record stays empty. The outcome audit record says
+"waived", never "closed". The response carries `resolved: false`, as a replay's does.
+
+**It never makes a consumer fresh.** The consumer's own frontier never counted another
+consumer's dead letter in the first place (§Scope). The two refusals keep it that way:
+
+- **The active consumer's incident.** This is a live outage with corrective paths: replay it,
+  or supersede it. Silencing its alert would hide exactly what the alert exists to show.
+- **An incident naming no consumer.** It predates attribution and counts against every
+  consumer, the active one included.
+
+**What it changes is operational.** foundation-platform's helpers read the waiver columns:
+
+- the stale alert is silenced until `waived_until`;
+- the payload is disposed 90 days after `waived_at`;
+- the incident no longer holds receipt pruning.
+
+**It expires.** A waiver past `waived_until` alerts again, so an exception somebody forgot
+becomes a question again. A waiver is not renewed in place: waiving again after expiry is a new
+decision, recorded as one.
+
+It runs as `organization_resolution_rt`, which holds `UPDATE` on the four waiver columns and on
+no other part of the row. It files the same two records as a resolution: the attempt before the
+transaction, and the outcome inside it.
+
+### Rebuilding a consumer
+
+This is the case `RESNAPSHOTTED` was for: a consumer whose projection has to be rebuilt from a
+new snapshot, rather than repaired event by event. The rebuild is done under a new consumer
+identity, which is generation replacement at the level the estate already enforces. A new
+identity has no debt, no applied position, and nothing inherited.
+
+```
+1. retire the consumer:           POST /v1/projections/consumers/{old}/retire
+2. register the new identity:     POST /v1/projections/consumers        {consumer_id: new, ...}
+3. point all three names at it:   DISPATCH_CONSUMER_NAME, REFERENCE_CONSUMER_NAME, and the
+                                  registration, which must agree (§Configuration)
+4. bootstrap from a snapshot:     POST /v1/projections/consumers/{new}/bootstrap, then the
+                                  snapshot pages; the consumer rebuilds its projection empty,
+                                  from a snapshot that already reflects every committed event
+5. waive the old identity's incidents (§WAIVED): they no longer block anyone, and waiving them
+   stops their alert and lets their payload be disposed
+```
+
+It is an outage, and it is chosen rather than inherited. Between steps 1 and 4 the consumer
+serves nothing projection-backed. That is the honest form of a rebuild RESPONSE-13 named, and
+the cost generation replacement would have avoided.
+
+Why it is sound, step by step:
+
+- **Old debt is shed without being declared delivered.** Debt is attributed to the consumer that
+  refused the event (§Scope), so the old identity's dead letters are never counted for the new
+  one.
+- **The new projection cannot miss the failed event's effect.** A snapshot reads the
+  authoritative tables, and the failed event committed before it was ever dead-lettered.
+- **Unattributed dead letters are the exception.** Those from before foundation-platform v0.2.8
+  name no consumer, so they count for the new identity too. They are replayed or superseded,
+  not rebuilt around.
+
 ### Why scalar progress is not evidence
 
 A consumer's highest applied mark does not establish that any particular event was applied.
@@ -383,6 +477,10 @@ Two states remain that neither reason closes except by `REPLAYED`:
 - **An event with no history row.** It was published before `membership.membership_event`
   existed, or it is not a Membership event.
 
+**A retired consumer's incident** has no corrective path at all, because no replay reaches its
+consumer. It no longer blocks the active consumer (§Scope), and it is waived rather than closed
+(§WAIVED).
+
 ## Configuration
 
 | Setting | Effect |
@@ -415,6 +513,10 @@ test red, not assumed to.
 | A newer event that is weakly receipted, receipted by another consumer, or about another Membership supersedes nothing; an event with no recorded version cannot be superseded | same file: `TestANewerEventThatIsNotEvidenceSupersedesNothing`, `TestAnIncidentWithNoRecordedVersionCannotBeSuperseded` |
 | A newer applied event does not close an incident as `REPLAYED` | same file: `TestANewerAppliedEventDoesNotCloseAnIncidentAsReplayed` |
 | The resolution role cannot insert, renumber, or erase Membership history | same file: `TestTheResolutionRoleCannotRewriteMembershipHistory` |
+| A retired consumer's incident is waived and stays open: `resolved_at` stays null, the estate frontier still reports the debt, the active consumer is not charged with it, and no closure record is filed | `internal/projection/waive_integration_test.go` `TestARetiredConsumersIncidentIsWaivedAndStaysOpen` |
+| A waiver is refused for the active consumer's incident and for one naming no consumer, and the refusal names the corrective path. It is also refused without a reason, or with an expiry outside (now, now + 90 days]. A mutation making the active consumer's incident waivable was observed turning it red | same file: `TestAWaiverIsRefusedWhereItWouldHideALiveOutage` |
+| A standing waiver is not stacked, and a resolved incident is not waived | same file: `TestAWaiverIsNotStackedOrAppliedToAClosedIncident` |
+| A malformed waiver, or one from a tenant caller, is refused before the database | `internal/httpapi/dead_letter_resolve_test.go` `TestAMalformedWaiverIsRefusedBeforeTheDatabase`, `TestAWaiverIsProviderScoped` |
 | Every published Membership event has a history row that agrees with it, and a rolled-back transition leaves none | `internal/membership/service_integration_test.go` `TestEveryPublishedEventRecordsItsVersion` |
 | A missing or undeclared RLS policy is reported by name | `internal/controldb/assert_integration_test.go` `TestAssertIsolationDetectsEachWeakening` |
 | An unsupported `resolution_type`, a lower-case spelling, or an unknown field is `400` before the database is reached | `internal/httpapi/dead_letter_resolve_test.go` `TestAResolutionNamingAnUnsupportedReasonIsRefused` |
@@ -499,6 +601,10 @@ Skipping step 3 leads to a resolve with no evidence behind it, which the predica
 a newer event for the Membership was already delivered and applied, step 2 is unnecessary for
 the older dead letters: resolve them as `SUPERSEDED` directly.
 
+A dead letter refused by a consumer that has since been retired no longer blocks anyone. Waive it
+with a reason and an expiry within 90 days, so the stale alert stops and the payload can be
+disposed. If it is still there when the waiver expires, it alerts again.
+
 ## Security Notes
 
 The evidence chain is the control. Three properties carry it, and each is enforced rather than
@@ -506,7 +612,8 @@ documented:
 
 - Applied evidence cannot be produced without the consumer's own marker.
 - The tables holding that evidence are not writable by the request path.
-- The only role able to close an incident can write nothing but the four resolution columns.
+- The only role able to close or waive an incident can write nothing but the four resolution
+  columns and the four waiver columns, and a waiver cannot clear debt.
 - The Membership history that orders versions is written only in the publishing transaction,
   and no runtime role can edit it.
 

@@ -219,6 +219,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// And the second act, under a different database role. Replay puts the event back on the
 	// wire; this closes the incident once the evidence that delivery produced is there.
 	api.HandleFunc("POST /v1/dead-letters/{event_id}/resolve", h.resolveDeadLetter)
+	api.HandleFunc("POST /v1/dead-letters/{event_id}/waive", h.waiveDeadLetter)
 
 	api.HandleFunc("POST /v1/context/verify", h.verifyContext)
 	api.HandleFunc("POST /v1/context/switch-eligible", h.switchEligible)
