@@ -71,6 +71,13 @@ func TestScopeBindingLivesInExactlyOnePackage(t *testing.T) {
 		if dir == "internal/db" || dir == "internal/controldb" {
 			return nil
 		}
+		// tools/grantcheck is not a deployable and binds no request. It sets both values inside
+		// the rolled-back transactions it plans statements in, against a database it refuses to
+		// touch unless its name ends in _test, and its fixture mirrors this package's wrappers so
+		// its derivation can be tested.
+		if dir == "tools/grantcheck" || strings.HasPrefix(dir, "tools/grantcheck/testdata/") {
+			return nil
+		}
 		offending = append(offending, filepath.ToSlash(relative))
 		return nil
 	})

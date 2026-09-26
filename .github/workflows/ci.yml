@@ -312,6 +312,50 @@ jobs:
         env:
           PGPASSWORD: organization
 
+      # Layer 1 of the privilege model, derived rather than read. grantcheck finds which role runs
+      # which statement from the code, then has PostgreSQL plan each one as that role and revoke
+      # each grant in a rolled-back transaction. See TDD-organization-control-001 §Grant derivation.
+      - name: grants derived from the code
+        run: |
+          go build -o "$RUNNER_TEMP/grantcheck" ./tools/grantcheck
+          "$RUNNER_TEMP/grantcheck"
+
+      # And it can fail in both directions. A binary rather than go run, so exit status 1 (findings)
+      # is told apart from 2 (the tool could not run), and the finding itself is matched: a check
+      # that crashed would otherwise pass this step.
+      - name: the grant derivation is load-bearing
+        run: |
+          expect_finding() {
+            set +e
+            output=$("$RUNNER_TEMP/grantcheck" 2>&1)
+            status=$?
+            set -e
+            echo "$output" | tail -n 5
+            if [ "$status" -ne 1 ] || ! echo "$output" | grep -q "$1"; then
+              echo "::error::grantcheck exited $status without a '$1' finding: $2"
+              return 1
+            fi
+          }
+
+          # MISSING: the resolver reads its evidence from platform.delivery_receipt.
+          psql -v ON_ERROR_STOP=1 -q -c "REVOKE SELECT ON platform.delivery_receipt FROM organization_resolution_rt" -d "$TEST_DATABASE_URL"
+          expect_finding "^MISSING  organization_resolution_rt cannot run internal/projection.appliedEvidence" \
+            "a grant the resolver needs was revoked and grantcheck did not see it" \
+            || { go run ./cmd/organization-migrate -stage=post; exit 1; }
+          go run ./cmd/organization-migrate -stage=post
+
+          # UNUSED: nothing in this repository deletes a delivery receipt, and no role may.
+          psql -v ON_ERROR_STOP=1 -q -c "GRANT DELETE ON platform.delivery_receipt TO organization_resolution_rt" -d "$TEST_DATABASE_URL"
+          restore="REVOKE DELETE ON platform.delivery_receipt FROM organization_resolution_rt"
+          expect_finding "^UNUSED   organization_resolution_rt DELETE ON platform.delivery_receipt" \
+            "a grant nothing needs was added and grantcheck did not see it" \
+            || { psql -q -c "$restore" -d "$TEST_DATABASE_URL"; exit 1; }
+          psql -v ON_ERROR_STOP=1 -q -c "$restore" -d "$TEST_DATABASE_URL"
+          "$RUNNER_TEMP/grantcheck" > /dev/null
+          echo "grantcheck is load-bearing: a revoked needed grant and an added unused grant both fail it"
+        env:
+          PGPASSWORD: organization
+
       # Reused from foundation-platform rather than reimplemented. The rules live in arch.json
       # beside the code they constrain.
       - name: architecture boundaries

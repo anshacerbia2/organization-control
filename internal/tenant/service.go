@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/anshacerbia2/foundation-platform/event"
@@ -232,39 +231,64 @@ type versions struct {
 	securityVersion int64
 }
 
-// apply builds the UPDATE for one action.
+// The UPDATE for each action, written out.
 //
-// Assembled rather than written out five times, because the parts that vary between actions are
-// exactly the parts that must not drift: whether the security version increments, and which
-// lifecycle timestamp is stamped. Five hand-written statements would let one of them forget the
-// increment, and the omission reads as a missing line rather than as a wrong one.
+// Constants rather than assembled from `transitions`, so tools/grantcheck can read every statement
+// this package runs and derive the privileges it needs. The parts that vary between actions are
+// exactly the parts that must not drift -- whether the security version increments, and which
+// lifecycle timestamp is stamped -- so TestEveryTransitionStatementMatchesItsRule assembles each one
+// from `transitions` and fails when a constant disagrees with its rule.
 //
-// The column names are interpolated and the values are not. Both come from `transitions`, which is
-// a constant table in this package — no request field reaches this string, and a column named here
-// that does not exist in schema.hcl fails on the first call rather than silently.
+// `version = version + 1` rather than a value computed in Go: two transitions that read the same
+// version would have one write a number the other already used. The row lock serialises them, and
+// this keeps the increment correct even if the lock is ever removed. A stamp takes the accepted
+// instant ($3) rather than now(), so the lifecycle fact in the row and the time in the published
+// envelope are the same instant; `updated_at` keeps now() because it is housekeeping.
+const (
+	applyPlain = `UPDATE tenant.tenant SET status = $2, version = version + 1, updated_at = now()` +
+		` WHERE tenant_id = $1 RETURNING version, tenant_security_version`
+	applyActivate = `UPDATE tenant.tenant SET status = $2, version = version + 1, updated_at = now(),` +
+		` activated_at = $3 WHERE tenant_id = $1 RETURNING version, tenant_security_version`
+	applySuspend = `UPDATE tenant.tenant SET status = $2, version = version + 1, updated_at = now(),` +
+		` tenant_security_version = tenant_security_version + 1, suspended_at = $3` +
+		` WHERE tenant_id = $1 RETURNING version, tenant_security_version`
+	applyRestore = `UPDATE tenant.tenant SET status = $2, version = version + 1, updated_at = now(),` +
+		` tenant_security_version = tenant_security_version + 1, suspended_at = NULL` +
+		` WHERE tenant_id = $1 RETURNING version, tenant_security_version`
+	applyBeginOffboarding = `UPDATE tenant.tenant SET status = $2, version = version + 1, updated_at = now(),` +
+		` tenant_security_version = tenant_security_version + 1, offboarding_started_at = $3` +
+		` WHERE tenant_id = $1 RETURNING version, tenant_security_version`
+	applyRetire = `UPDATE tenant.tenant SET status = $2, version = version + 1, updated_at = now(),` +
+		` tenant_security_version = tenant_security_version + 1, retired_at = $3` +
+		` WHERE tenant_id = $1 RETURNING version, tenant_security_version`
+)
+
+func applyStatement(action Action) string {
+	switch action {
+	case ActionProvision, ActionFail:
+		return applyPlain
+	case ActionActivate:
+		return applyActivate
+	case ActionSuspend:
+		return applySuspend
+	case ActionRestore:
+		return applyRestore
+	case ActionBeginOffboarding:
+		return applyBeginOffboarding
+	case ActionRetire:
+		return applyRetire
+	}
+	return ""
+}
+
+// apply runs the UPDATE for one action.
 func apply(ctx context.Context, tx db.Tx, action Action, tenantID id.UUID, next State,
 	acceptedAt time.Time) (versions, error) {
 	r := transitions[action]
-
-	// `version = version + 1` rather than a value computed in Go: two transitions that read the
-	// same version would have one write a number the other already used. The row lock above
-	// serialises them, and this keeps the increment correct even if the lock is ever removed.
-	sets := []string{"status = $2", "version = version + 1", "updated_at = now()"}
-	if r.securityVersion {
-		sets = append(sets, "tenant_security_version = tenant_security_version + 1")
+	statement := applyStatement(action)
+	if statement == "" {
+		return versions{}, fmt.Errorf("%w: %s", ErrUnknownAction, action)
 	}
-	if r.stamp != "" {
-		// Stamped with the accepted instant rather than with now(), so the lifecycle fact in the
-		// row and the time in the published envelope are the same instant. `updated_at` keeps
-		// now() because it is database housekeeping and answers a different question.
-		sets = append(sets, r.stamp+" = $3")
-	}
-	if r.clear != "" {
-		sets = append(sets, r.clear+" = NULL")
-	}
-
-	statement := `UPDATE tenant.tenant SET ` + strings.Join(sets, ", ") +
-		` WHERE tenant_id = $1 RETURNING version, tenant_security_version`
 
 	args := []any{tenantID.String(), string(next)}
 	if r.stamp != "" {
