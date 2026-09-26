@@ -22,8 +22,8 @@ package controldb_test
 // lost one migration at a time.
 //
 // Neither layer proves the matrix is complete. They detect the database drifting from what is
-// declared here, which is a different and narrower claim — the contract's content rests on the
-// derivation recorded in grants.sql, and that is a reading of code.
+// declared here, which is a different and narrower claim. The contract's content is derived by
+// tools/grantcheck, which reads the code and has PostgreSQL judge each grant.
 
 import (
 	"context"
@@ -50,9 +50,11 @@ var expectedPlatformPrivileges = map[string]map[string][]string{
 		// database, and referenced nowhere in this repository's Go code.
 	},
 	"organization_provider_rt": {
-		"outbox":          {"INSERT", "SELECT"},
-		"dead_letter":     {"SELECT"},
-		"idempotency_key": {"INSERT", "SELECT", "UPDATE"},
+		"outbox":      {"INSERT", "SELECT"},
+		"dead_letter": {"SELECT"},
+		// claimWithin inside withProviderScope. Completion runs on the tenant connections, so no
+		// UPDATE; grantcheck found the one the old schema-wide grant carried unused.
+		"idempotency_key": {"INSERT", "SELECT"},
 	},
 	// The resolver. Column-level UPDATE does not appear in table_privileges as UPDATE unless it is
 	// table-wide, so the absence of UPDATE here is the assertion: this role may write four columns

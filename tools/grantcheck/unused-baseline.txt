@@ -2,55 +2,6 @@
 # Debt, not an allowance: remove a line by revoking the grant in internal/controldb/grants.sql,
 # or because code now needs it. grantcheck fails on any unused grant missing from this file and
 # on any line here that is no longer an unused grant. Rewrite with: go run ./tools/grantcheck -write-baseline
-organization_provider_rt DELETE ON invitation.invitation
-organization_provider_rt DELETE ON membership.membership
-organization_provider_rt DELETE ON operation.offboarding
-organization_provider_rt DELETE ON operation.offboarding_obligation
-organization_provider_rt DELETE ON organization.external_reference
-organization_provider_rt DELETE ON organization.organization
-organization_provider_rt DELETE ON projection.consumer
-organization_provider_rt DELETE ON tenant.provisioning_request
-organization_provider_rt DELETE ON tenant.tenant
-organization_provider_rt DELETE ON workspace.workspace
-organization_provider_rt INSERT ON invitation.invitation
-organization_provider_rt INSERT ON membership.membership
-organization_provider_rt INSERT ON membership.membership_event
-organization_provider_rt INSERT ON organization.external_reference
-organization_provider_rt INSERT ON workspace.workspace
-organization_provider_rt SELECT ON SEQUENCE platform.outbox_sequence
-organization_provider_rt SELECT ON membership.membership_event
-organization_provider_rt SELECT ON organization.external_reference
-organization_provider_rt SELECT ON workspace.workspace
-organization_provider_rt UPDATE ON membership.membership
-organization_provider_rt UPDATE ON organization.external_reference
-organization_provider_rt UPDATE ON platform.idempotency_key
-organization_provider_rt UPDATE ON workspace.workspace
-organization_provider_rt USAGE ON SCHEMA workspace
-organization_rt DELETE ON invitation.invitation
-organization_rt DELETE ON membership.membership
-organization_rt DELETE ON operation.offboarding
-organization_rt DELETE ON operation.offboarding_obligation
-organization_rt DELETE ON projection.consumer
-organization_rt DELETE ON tenant.provisioning_request
-organization_rt DELETE ON tenant.tenant
-organization_rt DELETE ON workspace.workspace
-organization_rt INSERT ON operation.offboarding
-organization_rt INSERT ON operation.offboarding_obligation
-organization_rt INSERT ON projection.consumer
-organization_rt INSERT ON tenant.provisioning_request
-organization_rt INSERT ON tenant.tenant
-organization_rt SELECT ON SEQUENCE platform.outbox_sequence
-organization_rt SELECT ON membership.membership_event
-organization_rt SELECT ON operation.offboarding
-organization_rt SELECT ON operation.offboarding_obligation
-organization_rt SELECT ON projection.consumer
-organization_rt SELECT ON tenant.provisioning_request
-organization_rt UPDATE ON operation.offboarding
-organization_rt UPDATE ON operation.offboarding_obligation
-organization_rt UPDATE ON projection.consumer
-organization_rt UPDATE ON tenant.provisioning_request
-organization_rt UPDATE ON tenant.tenant
-organization_rt USAGE ON SCHEMA audit
-organization_rt USAGE ON SCHEMA operation
-organization_rt USAGE ON SCHEMA organization
-organization_rt USAGE ON SCHEMA projection
+#
+# Empty since grants.sql moved to explicit per-table grants. An unused grant appearing now is a
+# grant someone added without a statement that needs it: revoke it rather than listing it here.

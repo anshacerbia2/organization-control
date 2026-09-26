@@ -1,4 +1,4 @@
--- Privileges for the two runtime roles across every schema.
+-- Privileges for every runtime role across every schema.
 --
 -- Applied by `organization-migrate -stage=post`, after the platform migrations and after Atlas
 -- has applied the owned schemas. It runs last because GRANT names objects, and an object that
@@ -66,47 +66,133 @@ ALTER SCHEMA projection   OWNER TO organization_migrator;
 ALTER SCHEMA audit        OWNER TO organization_migrator;
 ALTER SCHEMA platform     OWNER TO organization_migrator;
 
--- CREATE on a schema is a DDL privilege. PostgreSQL grants it to the schema owner only, but
--- PUBLIC retains USAGE on schemas in some configurations, so both are stated rather than
--- assumed.
+-- ---------------------------------------------------------------------------------------------
+-- The owned schemas, deny by default
+-- ---------------------------------------------------------------------------------------------
+--
+-- Every schema starts closed to both runtime roles, and every grant below names a table and a
+-- privilege that a statement in this repository needs. tools/grantcheck derives which role runs
+-- which statement and has PostgreSQL judge each grant (TDD-organization-control-001 §Grant
+-- Derivation); `go run ./tools/grantcheck -matrix` shows the statements behind every line here.
+--
+-- This replaced a loop that granted SELECT, INSERT, UPDATE and DELETE on every table in every
+-- owned schema to both roles, and had new tables inherit the same. The loop's argument was that
+-- a table the runtime cannot read surfaces on the first deploy. grantcheck makes that argument
+-- unnecessary: a statement needing a grant this file does not give fails CI as MISSING, before
+-- the deploy. The loop's cost was the other direction, which nothing reported -- the first run of
+-- grantcheck found 52 grants no statement needed, among them DELETE on every business table for
+-- both roles, and the tenant-scoped role able to create Tenants and provisioning requests.
+--
+-- A new table is therefore closed to both roles until this file grants it, the same rule
+-- `platform` has always had.
 DO $$
 DECLARE
     target TEXT;
 BEGIN
-    -- `platform` is deliberately absent. It is the one schema here that organization-control
-    -- does not own: it arrives from foundation-platform on a different release cadence, so a
-    -- table can appear in this database without a line of code in this repository changing.
-    --
-    -- The inheritance below is a considered trade for the schemas this repository DOES own --
-    -- their migrations and the code that needs them ship together, so a table the runtime
-    -- cannot read is a bug that surfaces on the first deploy and is fixed in the same commit.
-    -- That assumption does not hold for a schema someone else versions, and the failure runs
-    -- the other way: a new platform table arrives already writable by the request path, and
-    -- nothing fails, nothing logs. platform.delivery_receipt would have arrived that way --
-    -- the root of trust for dead-letter resolution, INSERT-able by organization_rt.
-    --
-    -- So platform is granted explicitly below, table by table, from execution paths that
-    -- exist. See "platform, by capability".
     FOREACH target IN ARRAY ARRAY['organization','tenant','workspace','membership',
                                   'invitation','operation','projection','audit']
     LOOP
+        -- CREATE on a schema is a DDL privilege. PostgreSQL grants it to the schema owner only,
+        -- but PUBLIC retains USAGE on schemas in some configurations, so both are stated.
         EXECUTE format('REVOKE ALL ON SCHEMA %I FROM PUBLIC', target);
-        EXECUTE format('GRANT USAGE ON SCHEMA %I TO organization_rt, organization_provider_rt', target);
+        EXECUTE format('REVOKE ALL ON SCHEMA %I FROM organization_rt, organization_provider_rt', target);
 
-        -- DML only. CREATE, TRUNCATE, and REFERENCES are withheld: TRUNCATE on platform.outbox
-        -- would let a runtime discard undelivered security events in one statement, which is
-        -- the operation the partition retention job exists to perform under the migration role.
-        EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO organization_rt, organization_provider_rt', target);
-        EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO organization_rt, organization_provider_rt', target);
+        -- Withdraws what the loop granted, on a database that already ran it. Before the grants
+        -- below, not after, or it would remove them again.
+        EXECUTE format('REVOKE ALL ON ALL TABLES    IN SCHEMA %I FROM organization_rt, organization_provider_rt', target);
+        EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM organization_rt, organization_provider_rt', target);
 
-        -- A table added by a future migration inherits these. Without it, the next schema
-        -- change ships a table the runtime cannot read and the failure appears at request time
-        -- rather than at deploy time.
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO organization_rt, organization_provider_rt', target);
-        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO organization_rt, organization_provider_rt', target);
+        -- And the inheritance: a table added later arrives closed.
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA %I REVOKE ALL ON TABLES FROM organization_rt, organization_provider_rt', target);
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA %I REVOKE ALL ON SEQUENCES FROM organization_rt, organization_provider_rt', target);
     END LOOP;
 END
 $$;
+
+-- No DELETE anywhere, for either role. Nothing in this repository deletes a business row: a
+-- Membership is revoked, a Tenant retired, an invitation expired, an obligation resolved. A
+-- request path able to delete could remove the record of a decision instead of making a new one.
+-- No TRUNCATE, REFERENCES or TRIGGER either; none is granted below.
+
+-- tenant.tenant
+--   organization_rt          SELECT            invitation and membership read status and
+--                                              tenant_security_version inside their transactions
+--   organization_provider_rt SELECT, INSERT,   the Tenant lifecycle, organization retirement,
+--                            UPDATE            the projection snapshot, the fresh context check
+--
+-- The tenant-scoped role cannot create or change a Tenant. The loop gave it both.
+GRANT USAGE ON SCHEMA tenant TO organization_rt, organization_provider_rt;
+GRANT SELECT                 ON tenant.tenant TO organization_rt;
+GRANT SELECT, INSERT, UPDATE ON tenant.tenant TO organization_provider_rt;
+
+-- tenant.provisioning_request -- provider only: the provisioning coordinator and offboarding's
+-- deprovisioning request.
+GRANT SELECT, INSERT, UPDATE ON tenant.provisioning_request TO organization_provider_rt;
+
+-- workspace.workspace -- tenant only. The Workspace service runs under tenant scope, and no
+-- provider path reads or writes a Workspace.
+GRANT USAGE ON SCHEMA workspace TO organization_rt;
+GRANT SELECT, INSERT, UPDATE ON workspace.workspace TO organization_rt;
+
+-- membership.membership
+--   organization_rt          SELECT, INSERT,   the Membership service, invitation acceptance,
+--                            UPDATE            the offboarding freeze, Workspace retirement checks
+--   organization_provider_rt SELECT            the projection snapshot and reconciliation, the
+--                                              fresh context check
+--
+-- Membership authority changes only under tenant scope. The provider role reads it and cannot
+-- write it, which the loop allowed.
+GRANT USAGE ON SCHEMA membership TO organization_rt, organization_provider_rt;
+GRANT SELECT, INSERT, UPDATE ON membership.membership TO organization_rt;
+GRANT SELECT                 ON membership.membership TO organization_provider_rt;
+
+-- membership.membership_event -- INSERT, tenant only, in the transaction that bumps the version.
+--
+-- History, and history is not edited: no role may UPDATE or DELETE a row, and neither runtime role
+-- may read it. A runtime able to rewrite a version could make an older event look like the newer
+-- one and close a revocation's dead letter as superseded by it. The resolver reads it through its
+-- own role, below.
+GRANT INSERT ON membership.membership_event TO organization_rt;
+
+-- invitation.invitation
+--   organization_rt          SELECT, INSERT, UPDATE   issue, accept, revoke
+--   organization_provider_rt SELECT, UPDATE           expiry sweep across Tenants
+GRANT USAGE ON SCHEMA invitation TO organization_rt, organization_provider_rt;
+GRANT SELECT, INSERT, UPDATE ON invitation.invitation TO organization_rt;
+GRANT SELECT, UPDATE         ON invitation.invitation TO organization_provider_rt;
+
+-- operation.offboarding, operation.offboarding_obligation -- provider only. Offboarding is a
+-- provider operation; its freeze of Memberships runs under tenant scope and touches only
+-- membership.membership.
+GRANT USAGE ON SCHEMA operation TO organization_provider_rt;
+GRANT SELECT, INSERT, UPDATE ON operation.offboarding            TO organization_provider_rt;
+GRANT SELECT, INSERT, UPDATE ON operation.offboarding_obligation TO organization_provider_rt;
+
+-- organization.organization -- provider only.
+--
+-- TDD-organization-control-001 classifies this schema outside the RLS set because an
+-- Organization sponsors several Tenants, so scoping it to one would be wrong. That leaves it with
+-- no row-level control at all, which makes the grant the only boundary: a tenant-scoped caller
+-- with SELECT here could read every customer in the estate.
+--
+-- organization.external_reference is granted to nobody: no statement in this repository uses it.
+GRANT USAGE ON SCHEMA organization TO organization_provider_rt;
+GRANT SELECT, INSERT, UPDATE ON organization.organization TO organization_provider_rt;
+
+-- projection.consumer -- provider only: the consumer registry, progress reports, the snapshot
+-- mark, and the fresh check's metering. The resolver reads it through its own role, below.
+GRANT USAGE ON SCHEMA projection TO organization_provider_rt;
+GRANT SELECT, INSERT, UPDATE ON projection.consumer TO organization_provider_rt;
+
+-- audit.privileged_access -- INSERT, provider only. The recorder writes on the provider
+-- connections; the outcome record of a resolution is written by the resolution role, below.
+--
+-- Nothing reads it and nothing may change it. Evidence whose writer can amend it is not evidence,
+-- and a tenant-scoped caller able to INSERT could attribute an access to somebody else. The
+-- evidence carries no tenant_id and sits outside the RLS set by construction, so this grant is
+-- its only boundary.
+GRANT USAGE ON SCHEMA audit TO organization_provider_rt;
+GRANT INSERT ON audit.privileged_access TO organization_provider_rt;
 
 -- ---------------------------------------------------------------------------------------------
 -- platform, by capability
@@ -163,8 +249,9 @@ GRANT INSERT ON platform.outbox TO organization_provider_rt;
 GRANT SELECT ON platform.outbox TO organization_provider_rt;
 
 -- platform.outbox_sequence -- outbox.Append takes its position from nextval in the same
--- statement, so the sequence travels with the INSERT.
-GRANT USAGE, SELECT ON SEQUENCE platform.outbox_sequence
+-- statement, so the sequence travels with the INSERT. USAGE is what nextval needs; SELECT, which
+-- only currval and lastval use, is not granted.
+GRANT USAGE ON SEQUENCE platform.outbox_sequence
     TO organization_rt, organization_provider_rt;
 
 -- platform.dead_letter -- SELECT, provider only
@@ -176,16 +263,18 @@ GRANT USAGE, SELECT ON SEQUENCE platform.outbox_sequence
 -- security event rather than resolve it.
 GRANT SELECT ON platform.dead_letter TO organization_provider_rt;
 
--- platform.idempotency_key -- SELECT, INSERT, UPDATE for both runtime roles
+-- platform.idempotency_key
 --
--- organization_rt          -> httpapi idempotency middleware -> db.Claim/Complete
--- organization_provider_rt -> claimWithin, called inside withProviderScope
+-- organization_rt          -> claimWithin inside WithTenantScope -> SELECT, INSERT
+--                          -> db.ClaimStore.Complete, on the tenant connections -> UPDATE
+-- organization_provider_rt -> claimWithin inside withProviderScope -> SELECT, INSERT
 --
 -- Deny-by-default is not deny-everything. This is the table that proves it: the claim store
 -- runs on the tenant connections by design, so a rule of "no platform access for the request
--- path" would refuse every idempotent request and every Membership mutation in one deploy.
-GRANT SELECT, INSERT, UPDATE ON platform.idempotency_key
-    TO organization_rt, organization_provider_rt;
+-- path" would refuse every idempotent request and every Membership mutation in one deploy. The
+-- provider role claims and never completes, so it holds no UPDATE.
+GRANT SELECT, INSERT, UPDATE ON platform.idempotency_key TO organization_rt;
+GRANT SELECT, INSERT         ON platform.idempotency_key TO organization_provider_rt;
 
 -- platform.processed_event -- nothing, for either runtime role.
 --
@@ -340,64 +429,3 @@ ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA audit
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA membership
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_resolution_rt;
 
--- membership.membership_event is history, and history is not edited. The schema loop above gave
--- both runtime roles full DML here; the membership service needs INSERT, in the transaction that
--- bumps the version, and nothing needs to change or remove a row. A runtime able to rewrite a
--- version could make an older event look like the newer one and close a revocation's dead letter
--- as superseded by it.
-REVOKE UPDATE, DELETE, TRUNCATE ON membership.membership_event FROM organization_rt, organization_provider_rt;
-
--- The tenant-scoped role holds no privilege on `organization`.
---
--- TDD-organization-control-001 classifies that schema outside the RLS set because an
--- Organization sponsors several Tenants, so scoping it to one would be wrong. That leaves it
--- with no row-level control at all, which makes the grant the only boundary: a tenant-scoped
--- caller with SELECT here could read every customer in the estate. Provider traffic reaches it
--- through its own role, where the access is attributable at the connection level.
---
--- Applied after the loop rather than by excluding the schema from it, so a schema added later
--- is granted by default and only this one is special.
-REVOKE ALL ON ALL TABLES IN SCHEMA organization FROM organization_rt;
-ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA organization
-    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_rt;
-
--- The tenant-scoped role holds nothing in `audit`.
---
--- The evidence there records actions taken across Tenants, so it carries no tenant_id and sits
--- outside the RLS set by construction — that is why it is its own schema rather than a table in
--- `operation`. See schema.hcl and rls.sql. That leaves the grant as the only boundary, exactly as it
--- is for `organization`: a tenant-scoped caller with SELECT here could read which provider operators
--- touched which correlations across the whole estate, and one with INSERT could write evidence
--- attributing an access to somebody else.
---
--- Whole-schema rather than per-table, so a second evidence table added later is covered without
--- anyone remembering to extend a list — the same reasoning rls.sql uses for its policy set.
-REVOKE ALL ON ALL TABLES IN SCHEMA audit FROM organization_rt;
-ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA audit
-    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_rt;
-
--- The provider role may append evidence and may not change it.
---
--- The loop above grants SELECT, INSERT, UPDATE, and DELETE on every table in every owned schema,
--- which on this schema hands the role being audited the ability to rewrite or erase its own audit
--- trail. That is the one place a uniform grant is wrong: evidence whose writer can amend it is not
--- evidence, and an operator investigating a cross-Tenant access would have no way to tell a missing
--- row from an access that never happened.
---
--- Found by querying has_table_privilege after the first clean deploy rather than by reading this
--- file — the same way identity-control found Atlas's revision table sitting inside a schema the
--- runtime could write.
---
--- SELECT goes too, on least privilege: internal/access only inserts, and nothing in the repository
--- reads this table. A read surface for an investigation would come with its own grant and its own
--- role, rather than being available in advance to the role under investigation.
-REVOKE SELECT, UPDATE, DELETE ON ALL TABLES IN SCHEMA audit FROM organization_provider_rt;
-ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA audit
-    REVOKE SELECT, UPDATE, DELETE ON TABLES FROM organization_provider_rt;
-
--- The provider role holds nothing on the outbox.
---
--- A provider operation publishes through the same transactional outbox as any other, but the
--- dispatcher and the retention job run under the migration role. Withholding DELETE from the
--- provider role specifically would be arbitrary; what matters is that neither runtime role can
--- TRUNCATE, which the loop already withholds.
