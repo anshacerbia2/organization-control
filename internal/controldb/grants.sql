@@ -393,6 +393,13 @@ GRANT SELECT ON platform.dead_letter TO organization_resolution_rt;
 GRANT UPDATE (resolved_at, resolution_type, resolved_by, resolution_reference)
     ON platform.dead_letter TO organization_resolution_rt;
 
+-- The waiver, on its own four columns. A waiver is an operational exception, never a closure, and
+-- it is kept in columns the frontier's debt query does not read, so this grant cannot make an
+-- incident look delivered. projection.Resolver.Waive refuses the cases that would hide a live
+-- outage; see TDD-organization-control-005 §WAIVED.
+GRANT UPDATE (waived_at, waived_until, waived_by, waiver_reason)
+    ON platform.dead_letter TO organization_resolution_rt;
+
 -- The evidence, read-only. A resolver that could write receipts could manufacture the proof it
 -- then consumes, which is the whole predicate defeated in one grant.
 GRANT SELECT ON platform.delivery_receipt TO organization_resolution_rt;

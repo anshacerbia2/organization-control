@@ -1054,6 +1054,53 @@ func (h *handlers) resolveDeadLetter(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type waiveRequest struct {
+	Reason    string    `json:"reason"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type waiveResponse struct {
+	EventID      string `json:"event_id"`
+	Consumer     string `json:"consumer"`
+	WaivedUntil  string `json:"waived_until"`
+	WaiverReason string `json:"waiver_reason"`
+	Resolved     bool   `json:"resolved"`
+}
+
+// waiveDeadLetter records an operational exception on an incident no corrective path can close.
+//
+// Provider-only, and run as the resolution role like a resolution. The response carries
+// `resolved: false` for the reason the replay response does: a waiver is not a closure, the
+// frontier still counts the incident, and a client reading this answer must not conclude that the
+// debt is gone. The rules -- which consumer, how long -- are projection.Resolver.Waive's.
+func (h *handlers) waiveDeadLetter(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	eventID, ok := pathUUID(w, r, "event_id")
+	if !ok {
+		return
+	}
+	body, ok := decode[waiveRequest](w, r)
+	if !ok {
+		return
+	}
+
+	result, err := h.services.Resolver.Waive(r.Context(), eventID, body.Reason, body.ExpiresAt)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+
+	respond(w, http.StatusOK, waiveResponse{
+		EventID:      result.EventID.String(),
+		Consumer:     result.Consumer,
+		WaivedUntil:  result.Until.Format(time.RFC3339),
+		WaiverReason: result.Reason,
+		Resolved:     false,
+	})
+}
+
 type resolveRequest struct {
 	ResolutionType string `json:"resolution_type"`
 }

@@ -55,3 +55,43 @@ func TestAResolutionIsProviderScoped(t *testing.T) {
 		t.Errorf("a tenant caller answered %d, want 403", recorder.Code)
 	}
 }
+
+// A waiver is refused at the boundary when it does not say why or until when, or names a field the
+// body does not have. None of these may reach the database: the fixture's transactor fails the test
+// if one does.
+func TestAMalformedWaiverIsRefusedBeforeTheDatabase(t *testing.T) {
+	t.Parallel()
+
+	caller := providerCaller(t)
+	handler := mounted(t, &caller)
+	headers := map[string]string{ReasonHeader: "an incident review"}
+	path := "/v1/dead-letters/" + mustID(t).String() + "/waive"
+
+	for _, body := range []string{
+		``,
+		`{"reason":"decommissioned"}`,
+		`{"expires_at":"2030-01-01T00:00:00Z"}`,
+		`{"reason":"   ","expires_at":"2030-01-01T00:00:00Z"}`,
+		`{"reason":"decommissioned","expires_at":"next week"}`,
+		`{"reason":"decommissioned","expires_at":"2030-01-01T00:00:00Z","resolution_type":"WAIVED"}`,
+	} {
+		recorder := post(t, handler, path, body, headers)
+		if recorder.Code != http.StatusBadRequest {
+			t.Errorf("body %q answered %d, want 400", body, recorder.Code)
+		}
+	}
+}
+
+func TestAWaiverIsProviderScoped(t *testing.T) {
+	t.Parallel()
+
+	caller := tenantCaller(t)
+	handler := mounted(t, &caller)
+	path := "/v1/dead-letters/" + mustID(t).String() + "/waive"
+
+	recorder := post(t, handler, path, `{"reason":"x","expires_at":"2030-01-01T00:00:00Z"}`,
+		map[string]string{ReasonHeader: "an incident review"})
+	if recorder.Code != http.StatusForbidden {
+		t.Errorf("a tenant caller answered %d, want 403", recorder.Code)
+	}
+}
