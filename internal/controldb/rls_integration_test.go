@@ -413,19 +413,22 @@ func TestWriteIntoAnotherTenantIsRefused(t *testing.T) {
 		}
 	})
 
+	// Refused before the policy is consulted: the tenant-scoped role holds no DELETE on any business
+	// table, because nothing in this repository deletes a business row. That is stronger than the
+	// policy filtering the delete to zero rows, and the assertion says so rather than accepting
+	// either outcome -- a DELETE grant reappearing is a change to the role model, not a pass.
 	t.Run("delete reaching another Tenant", func(t *testing.T) {
-		if err := bound(ctx, pool, tenantA, func(ctx context.Context, tx db.Tx) error {
+		err := bound(ctx, pool, tenantA, func(ctx context.Context, tx db.Tx) error {
 			tag, execErr := tx.Exec(ctx,
 				`DELETE FROM membership.membership WHERE tenant_id = $1`, tenantB)
-			if execErr != nil {
-				return execErr
-			}
-			if tag.RowsAffected() != 0 {
+			if execErr == nil && tag.RowsAffected() != 0 {
 				t.Errorf("a delete bound to Tenant A removed %d row(s) from Tenant B", tag.RowsAffected())
 			}
-			return nil
-		}); err != nil {
-			t.Fatalf("bound delete: %v", err)
+			return execErr
+		})
+		if err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Fatalf("a bound delete returned %v, want permission denied: the tenant-scoped role "+
+				"holds no DELETE", err)
 		}
 	})
 }

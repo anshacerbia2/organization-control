@@ -403,9 +403,12 @@ func TestAMutationInFlightDuringASnapshotIsNotSilentlyLost(t *testing.T) {
 	rolledBack := make(chan error, 1)
 	errAbandon := errors.New("abandon the in-flight transaction")
 
+	// On the owner connection: the property under test is snapshot visibility, not a role. A
+	// Membership is written under tenant scope in production, and the provider role this used to
+	// borrow holds no INSERT on membership.membership.
 	go func() {
-		rolledBack <- db.WithProviderScope(f.ctx, f.provider, "in-flight transaction under test",
-			func(ctx context.Context, tx db.Tx) error {
+		rolledBack <- f.setup.InTx(f.ctx,
+			func(ctx context.Context, tx fdb.Tx) error {
 				principalID := mustID(t)
 				if _, err := tx.Exec(ctx, `INSERT INTO membership.membership
 				    (membership_id, principal_id, tenant_id, subject_type, status, membership_version, valid_from, provenance)

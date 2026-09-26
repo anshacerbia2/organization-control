@@ -12,8 +12,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 
+	fdb "github.com/anshacerbia2/foundation-platform/db"
 	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/idempotency"
 
@@ -84,12 +86,28 @@ func (f *claimFixture) keyState(claim db.Claim) (exists bool, completed bool) {
 	return exists, completed
 }
 
+// forgetKey and forgetMembership clean up on the owner connection. Neither runtime role holds
+// DELETE on either table -- nothing in production deletes a claim or a Membership -- so cleanup
+// through the tenant pool failed silently and left rows behind for later runs.
 func (f *claimFixture) forgetKey(claim db.Claim) {
-	_ = db.WithTenantScope(f.ctx, f.pool, func(ctx context.Context, tx db.Tx) error {
-		_, err := tx.Exec(ctx, `DELETE FROM platform.idempotency_key WHERE scope = $1 AND key = $2`,
-			claim.Scope, claim.Key)
+	f.asOwner(`DELETE FROM platform.idempotency_key WHERE scope = $1 AND key = $2`, claim.Scope, claim.Key)
+}
+
+func (f *claimFixture) asOwner(statement string, args ...any) {
+	f.t.Helper()
+	owner, err := fdb.Open(context.Background(), fdb.Config{
+		Name: "db-test-owner", DSN: os.Getenv("TEST_DATABASE_URL"), MaxConns: 1})
+	if err != nil {
+		f.t.Errorf("open the owner connection for cleanup: %v", err)
+		return
+	}
+	defer owner.Close()
+	if err := owner.InTx(context.Background(), func(ctx context.Context, tx fdb.Tx) error {
+		_, err := tx.Exec(ctx, statement, args...)
 		return err
-	})
+	}); err != nil {
+		f.t.Errorf("cleanup %q: %v", statement, err)
+	}
 }
 
 // grantMembership is a real mutation in a Row-Level-Security-protected table, so the claim is
@@ -116,11 +134,7 @@ func (f *claimFixture) membershipExists(membershipID id.UUID) bool {
 }
 
 func (f *claimFixture) forgetMembership(membershipID id.UUID) {
-	_ = db.WithTenantScope(f.ctx, f.pool, func(ctx context.Context, tx db.Tx) error {
-		_, err := tx.Exec(ctx, `DELETE FROM membership.membership WHERE membership_id = $1`,
-			membershipID.String())
-		return err
-	})
+	f.asOwner(`DELETE FROM membership.membership WHERE membership_id = $1`, membershipID.String())
 }
 
 // TestAClaimCommitsWithTheEffectItGuards is the whole reason the claim is made here.

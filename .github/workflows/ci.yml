@@ -227,21 +227,21 @@ jobs:
       # DML for both runtime roles -- which is how platform.delivery_receipt, the root of trust
       # for dead-letter resolution, would have become INSERT-able by the ordinary request path.
       #
-      # The mutation restores that posture: platform back into the loop, and the compensating
-      # revokes removed. Two edits rather than one, because either alone is cancelled by the
-      # other -- putting platform back in the loop while the explicit block still revokes leaves
-      # the database correct, and a gate that cannot reproduce the defect proves nothing about
-      # the assertion guarding it.
+      # The mutation restores that posture: a schema-wide DML grant on platform for both runtime
+      # roles, and the default privilege that hands every later table the same, appended at the
+      # end of the file so no revoke above can cancel it.
       - name: the platform privilege posture is load-bearing
         run: |
           file=internal/controldb/grants.sql
           cp "$file" "$file.orig"
-          sed -i "s/'projection','audit'\]/'projection','audit','platform']/" "$file"
-          sed -i "/^REVOKE ALL ON ALL TABLES    IN SCHEMA platform FROM organization_rt, organization_provider_rt;$/d;/^REVOKE ALL ON ALL SEQUENCES IN SCHEMA platform FROM organization_rt, organization_provider_rt;$/d" "$file"
-          perl -0pi -e 's/ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform\n    REVOKE ALL ON (?:TABLES|SEQUENCES) FROM organization_rt, organization_provider_rt;\n//g' "$file"
+          cat >> "$file" <<'SQL'
+          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA platform TO organization_rt, organization_provider_rt;
+          ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
+              GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO organization_rt, organization_provider_rt;
+          SQL
           changed=$(git diff --numstat "$file" | awk '{print $1+$2}')
-          if [ "${changed:-0}" -lt 6 ]; then
-            echo "::error::the mutation changed ${changed:-0} lines; the loop entry or the compensating revokes were not found, and this check is silently passing"
+          if [ "${changed:-0}" -lt 3 ]; then
+            echo "::error::the mutation changed ${changed:-0} lines; this check is silently passing"
             mv "$file.orig" "$file"
             exit 1
           fi

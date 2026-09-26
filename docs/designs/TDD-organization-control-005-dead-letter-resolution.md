@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 1.2.0
+  version: 1.2.1
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-09-17
-  last_reviewed: 2026-09-26
+  last_reviewed: 2026-09-27
   parent_sad: SAD-004
 ---
 
@@ -147,9 +147,9 @@ platform.dead_letter        organization_dispatch_rt     INSERT, SELECT
                             organization_resolution_rt   SELECT, and UPDATE on the four resolution columns only
                             organization_rt              none
 
-membership.membership_event organization_rt              INSERT, SELECT   (written when publishing)
-                            organization_provider_rt     INSERT, SELECT
+membership.membership_event organization_rt              INSERT   (written when publishing)
                             organization_resolution_rt   SELECT   (the SUPERSEDED predicate)
+                            organization_provider_rt     none
                             no runtime role              UPDATE, DELETE, TRUNCATE
 
 projection.consumer         organization_resolution_rt   SELECT   (the active consumer, derived server-side)

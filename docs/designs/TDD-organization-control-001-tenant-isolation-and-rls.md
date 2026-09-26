@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.2.0
+  version: 1.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-09-26
+  last_reviewed: 2026-09-27
   parent_sad: SAD-004
 ---
 
@@ -126,10 +126,16 @@ CREATE ROLE organization_provider_rt NOLOGIN;
 
 -- Neither runtime role owns a table, holds SUPERUSER, holds BYPASSRLS,
 -- or holds any DDL privilege.
-GRANT USAGE ON SCHEMA organization, tenant, workspace, membership,
-                      invitation, operation, projection, platform
-  TO organization_rt, organization_provider_rt;
 ```
+
+Privileges are deny by default in every schema. `grants.sql` revokes everything from both
+runtime roles, removes the default privileges that would hand a later table to them, and
+then grants each table and privilege a statement in this repository needs. Neither role holds
+`DELETE` on any business table, because nothing deletes a business row. The tenant-scoped
+role cannot create or change a Tenant, reach `organization`, `operation`, `projection` or
+`audit`, or read Membership history. The provider role reads Membership and cannot write
+it. `tools/grantcheck` keeps the grant list honest in both directions (§Grant Derivation):
+a statement needing an ungranted privilege fails CI, and so does a grant nothing needs.
 
 The process opens two pools, one per runtime role. Provider traffic is routed to the
 provider pool by the authorization layer, never by a request parameter. A defect in a
@@ -372,13 +378,12 @@ nothing executes. For each (role, statement) the tool runs `SET LOCAL ROLE`, the
   therefore checked with `has_sequence_privilege`, using PostgreSQL's rule for that
   function.
 
-Unused grants found when the tool arrived are listed in `tools/grantcheck/unused-baseline.txt`.
-The baseline is debt written down, not an allowance. The run fails on an unused grant the
-file does not list, and on a line that is no longer an unused grant. So an entry leaves the
-file only when the grant is revoked or code starts to need it, and the file says which.
-Most entries come from the schema loop in `grants.sql`, which grants DML on every table in
-every RLS schema to both runtime roles. Narrowing that loop is a change to this design and
-has not been made.
+`tools/grantcheck/unused-baseline.txt` lists unused grants the design has accepted as debt.
+It is empty. The first run found 52, from a schema loop in `grants.sql` that granted DML on
+every table in every owned schema to both runtime roles. The loop was replaced by explicit
+per-table grants, and the owned schemas became deny by default, as `platform` already was.
+The run fails on an unused grant the file does not list, and on a line that is no longer an
+unused grant. A grant appearing without a statement that needs it is revoked, not listed.
 
 The tool runs only against a database whose name ends in `_test`, owned by a role able to
 revoke: `make grantcheck` locally and the CI database. The dispatch role is out of scope,
