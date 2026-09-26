@@ -29,6 +29,7 @@ BEGIN
               ('tenant.provisioning_request'),
               ('workspace.workspace'),
               ('membership.membership'),
+              ('membership.membership_event'),
               ('invitation.invitation'),
               ('operation.offboarding'),
               ('operation.offboarding_obligation'),
@@ -289,7 +290,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
 -- performing both would make replay and "declare it delivered" the same act, and the evidence
 -- between them decorative.
 
-GRANT USAGE ON SCHEMA platform, projection, audit TO organization_resolution_rt;
+GRANT USAGE ON SCHEMA platform, projection, audit, membership TO organization_resolution_rt;
 
 -- Column-level UPDATE, not table-level.
 --
@@ -324,6 +325,10 @@ GRANT SELECT, INSERT ON platform.idempotency_key TO organization_resolution_rt;
 -- still attributable, goes through the provider pool's recorder and does not use this grant.
 GRANT INSERT ON audit.privileged_access TO organization_resolution_rt;
 
+-- Which Membership, at which version, a receipted event carries: the domain half of the SUPERSEDED
+-- predicate. Read-only, and on this one table of the schema; rls.sql gives it the matching policy.
+GRANT SELECT ON membership.membership_event TO organization_resolution_rt;
+
 -- Nothing inherited, for the same reason as the dispatcher: a table added later must be granted
 -- deliberately rather than arrive in the hands of a role whose scope is four objects.
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
@@ -332,6 +337,15 @@ ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA projection
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_resolution_rt;
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA audit
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_resolution_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA membership
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_resolution_rt;
+
+-- membership.membership_event is history, and history is not edited. The schema loop above gave
+-- both runtime roles full DML here; the membership service needs INSERT, in the transaction that
+-- bumps the version, and nothing needs to change or remove a row. A runtime able to rewrite a
+-- version could make an older event look like the newer one and close a revocation's dead letter
+-- as superseded by it.
+REVOKE UPDATE, DELETE, TRUNCATE ON membership.membership_event FROM organization_rt, organization_provider_rt;
 
 -- The tenant-scoped role holds no privilege on `organization`.
 --

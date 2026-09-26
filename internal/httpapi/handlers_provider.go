@@ -14,6 +14,9 @@ package httpapi
 // evidence before the transaction runs.
 
 import (
+	"bytes"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -1015,6 +1018,9 @@ type resolveResponse struct {
 // purpose: the operator chooses the action, the server chooses the subject the evidence must be
 // about. So is the author — resolved_by comes from the bound scope, because an author taken from
 // a body is an author anybody can write.
+//
+// The body is optional and names the reason only. No body is REPLAYED, which is what this route
+// meant before SUPERSEDED existed, so an existing caller keeps its meaning.
 func (h *handlers) resolveDeadLetter(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireProvider(w, r); !ok {
 		return
@@ -1023,8 +1029,16 @@ func (h *handlers) resolveDeadLetter(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	kind, ok := resolutionType(w, r)
+	if !ok {
+		return
+	}
 
-	result, err := h.services.Resolver.Resolve(r.Context(), eventID)
+	resolve := h.services.Resolver.Resolve
+	if kind == projection.ResolutionTypeSuperseded {
+		resolve = h.services.Resolver.Supersede
+	}
+	result, err := resolve(r.Context(), eventID)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -1036,4 +1050,39 @@ func (h *handlers) resolveDeadLetter(w http.ResponseWriter, r *http.Request) {
 		ResolutionType: result.Type,
 		Reference:      result.Reference,
 	})
+}
+
+type resolveRequest struct {
+	ResolutionType string `json:"resolution_type"`
+}
+
+// resolutionType reads the optional body of a resolution.
+//
+// An unknown reason is a 400, never a fallback to REPLAYED: a caller asking for WAIVED and getting
+// a REPLAYED attempt has been answered about a question it did not ask.
+func resolutionType(w http.ResponseWriter, r *http.Request) (string, bool) {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+	if err != nil {
+		platform.Problem(w, r, platform.ValidationFailed, "The body could not be read")
+		return "", false
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return projection.ResolutionTypeReplayed, true
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	body, ok := decode[resolveRequest](w, r)
+	if !ok {
+		return "", false
+	}
+	switch body.ResolutionType {
+	case "", projection.ResolutionTypeReplayed:
+		return projection.ResolutionTypeReplayed, true
+	case projection.ResolutionTypeSuperseded:
+		return projection.ResolutionTypeSuperseded, true
+	default:
+		platform.Problem(w, r, platform.ValidationFailed, fmt.Sprintf(
+			"resolution_type %q is not supported; use %q or %q",
+			body.ResolutionType, projection.ResolutionTypeReplayed, projection.ResolutionTypeSuperseded))
+		return "", false
+	}
 }

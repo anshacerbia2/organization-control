@@ -189,6 +189,7 @@ func (f *fixture) seedMembership(t *testing.T, tenantID id.UUID, version int64) 
 	    VALUES ($1, $2, $3, 'human', 'active', $4, now(), 'projection suite')`,
 		membershipID.String(), principalID.String(), tenantID.String(), version)
 	t.Cleanup(func() {
+		f.exec(t, `DELETE FROM membership.membership_event WHERE membership_id = $1`, membershipID.String())
 		f.exec(t, `DELETE FROM membership.membership WHERE membership_id = $1`, membershipID.String())
 	})
 	return membershipID

@@ -36,6 +36,7 @@ BEGIN
               ('tenant.provisioning_request'),
               ('workspace.workspace'),
               ('membership.membership'),
+              ('membership.membership_event'),
               ('invitation.invitation'),
               ('operation.offboarding'),
               ('operation.offboarding_obligation')
@@ -169,4 +170,19 @@ BEGIN
     END LOOP;
 END
 $$;
+
+-- membership.membership_event, read by the resolver.
+--
+-- The loop above gives the two runtime roles their policies on every table here. The resolution
+-- role gets one more, on this table only, and for SELECT only: the SUPERSEDED predicate
+-- (TDD-organization-control-005) reads which Membership, at which version, a receipted event
+-- carries. It runs under the provider binding the resolution scope sets, so the policy keys on the
+-- same setting the provider policy does. Without it, FORCE ROW LEVEL SECURITY would show the
+-- resolver no rows at all, and every SUPERSEDED closure would be refused for want of evidence that
+-- exists.
+DROP POLICY IF EXISTS membership_event_resolution_read ON membership.membership_event;
+CREATE POLICY membership_event_resolution_read ON membership.membership_event
+    FOR SELECT
+    TO organization_resolution_rt
+    USING (current_setting('app.provider_scope', false)::boolean);
 

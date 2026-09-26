@@ -129,6 +129,7 @@ func cleanup(t *testing.T, service *Service, ctx context.Context, membershipID i
 	t.Helper()
 	_ = ownerPool(t, ctx).InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
 		_, _ = tx.Exec(ctx, `DELETE FROM platform.outbox WHERE aggregate_id = $1`, membershipID.String())
+		_, _ = tx.Exec(ctx, `DELETE FROM membership.membership_event WHERE membership_id = $1`, membershipID.String())
 		_, _ = tx.Exec(ctx, `DELETE FROM membership.membership WHERE membership_id = $1`, membershipID.String())
 		return nil
 	})
@@ -250,6 +251,65 @@ func TestVersionNeverDecreases(t *testing.T) {
 	// would leave consumers on the previous state with no error anywhere.
 	if got := outboxCount(t, service, ctx, granted.Membership.MembershipID); got != len(versions) {
 		t.Errorf("the outbox holds %d events for %d transitions", got, len(versions))
+	}
+}
+
+// historyMatchingOutbox counts history rows that agree with a published event: same identifier,
+// same Membership, and the version the envelope carries. A row that disagrees with its event is the
+// SUPERSEDED predicate comparing the wrong number.
+func historyMatchingOutbox(t *testing.T, ctx context.Context, membershipID id.UUID) (matching, total int) {
+	t.Helper()
+	if err := ownerPool(t, ctx).InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT count(*) FILTER (WHERE o.event_id IS NOT NULL
+			                          AND o.aggregate_id = h.membership_id
+			                          AND o.event_type = h.event_type
+			                          AND (o.envelope->'data'->>'membership_version')::bigint = h.membership_version),
+			       count(*)
+			  FROM membership.membership_event h
+			  LEFT JOIN platform.outbox o ON o.event_id = h.event_id
+			 WHERE h.membership_id = $1`,
+			membershipID.String()).Scan(&matching, &total)
+	}); err != nil {
+		t.Fatalf("read membership history: %v", err)
+	}
+	return matching, total
+}
+
+// TestEveryPublishedEventRecordsItsVersion is the other half of SUPERSEDED: the history row exists
+// if and only if the event does, and says what the event says.
+//
+// Asserted through a failure as well as a success. A history insert outside the publishing
+// transaction would survive a rolled-back transition, and a version recorded for an event nobody
+// published is a newer version the resolver would believe in.
+func TestEveryPublishedEventRecordsItsVersion(t *testing.T) {
+	service, ctx, _ := newFixture(t)
+	granted := grantOne(t, service, ctx)
+	membershipID := granted.Membership.MembershipID
+
+	if _, err := service.Suspend(ctx, membershipID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if _, err := service.Restore(ctx, membershipID); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	injected := errors.New("failure inside the publishing transaction")
+	service.beforeAppend = func(context.Context) error { return injected }
+	if _, err := service.Revoke(ctx, membershipID); !errors.Is(err, injected) {
+		t.Fatalf("error = %v, want the injected failure", err)
+	}
+	service.beforeAppend = nil
+
+	if _, err := service.Revoke(ctx, membershipID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	matching, total := historyMatchingOutbox(t, ctx, membershipID)
+	events := outboxCount(t, service, ctx, membershipID)
+	if total != events || matching != events {
+		t.Errorf("%d events published, %d history rows, %d agreeing with their event; want all equal",
+			events, total, matching)
 	}
 }
 

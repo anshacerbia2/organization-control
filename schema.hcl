@@ -512,6 +512,66 @@ table "membership" {
 // invitation — RLS.
 // ---------------------------------------------------------------------------------------------
 
+// Which Membership version each published authority event carries.
+//
+// Written by the membership service in the transaction that bumps the version and appends the
+// event, so a row exists if and only if the event does. It is the domain half of the SUPERSEDED
+// resolution predicate (TDD-organization-control-005): a delivery receipt names only an event_id,
+// and this is what says which Membership that event concerns and at which version. The version
+// belongs to the event, not to a delivery of it, so a replay cannot move an event later in its
+// Membership's history -- which a stream position, reassigned on every replay, would.
+//
+// Kept outside platform.outbox on purpose: the outbox's partitions are dropped on retention, and
+// the predicate must still work for an event whose partition is gone.
+//
+// Immutable: grants.sql withholds UPDATE and DELETE from every runtime role.
+table "membership_event" {
+  schema  = schema.membership
+  comment = "Membership version carried by each published authority event. Immutable. RLS-protected."
+
+  column "event_id" {
+    null = false
+    type = uuid
+  }
+  column "membership_id" {
+    null = false
+    type = uuid
+  }
+  column "tenant_id" {
+    null = false
+    type = uuid
+  }
+  column "membership_version" {
+    null = false
+    type = bigint
+  }
+  column "event_type" {
+    null = false
+    type = text
+  }
+  column "recorded_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.event_id]
+  }
+
+  foreign_key "membership_event_membership_fk" {
+    columns     = [column.membership_id]
+    ref_columns = [table.membership.column.membership_id]
+  }
+
+  // One event per version. Every transition bumps the version once and appends once, so a second
+  // row at the same version would mean two events claiming the same point in the Membership's
+  // history -- and the predicate orders by exactly that.
+  unique "membership_event_version_unique" {
+    columns = [column.membership_id, column.membership_version]
+  }
+}
+
 table "invitation" {
   schema  = schema.invitation
   comment = "Intent to establish a future Membership. Not an identity proof. RLS-protected."

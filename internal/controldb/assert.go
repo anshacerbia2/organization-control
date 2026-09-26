@@ -54,6 +54,17 @@ var RLSSchemas = []string{"tenant", "workspace", "membership", "invitation", "op
 // that would make a policy inert.
 var RuntimeRoles = []string{"organization_rt", "organization_provider_rt"}
 
+// AdditionalPolicies are the policies a table may carry beyond its tenant-scope and provider-scope
+// pair, by name. Anything else found on a protected table is a problem.
+//
+// membership.membership_event is read by the dead-letter resolver, which runs as its own role
+// (organization_resolution_rt) so that closing an incident cannot be done with the credential that
+// replays one. That role needs a SELECT policy of its own here; the two runtime roles' policies do not
+// name it.
+var AdditionalPolicies = map[string][]string{
+	"membership.membership_event": {"membership_event_resolution_read"},
+}
+
 // TableProtection is the posture of one table.
 type TableProtection struct {
 	Schema   string
@@ -61,6 +72,9 @@ type TableProtection struct {
 	Enabled  bool
 	Forced   bool
 	Policies int
+
+	// PolicyNames are the policies found, sorted, so a problem can name what is missing or extra.
+	PolicyNames []string
 }
 
 // Qualified returns the schema-qualified name.
@@ -92,7 +106,7 @@ SELECT n.nspname,
        c.relname,
        c.relrowsecurity,
        c.relforcerowsecurity,
-       (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid),
+       ARRAY(SELECT p.polname::text FROM pg_policy p WHERE p.polrelid = c.oid ORDER BY 1),
        EXISTS (
          SELECT 1 FROM pg_attribute a
           WHERE a.attrelid = c.oid AND a.attname = 'tenant_id'
@@ -129,9 +143,10 @@ func AssertIsolation(ctx context.Context, pool *db.Pool) (IsolationReport, error
 				hasTenantID bool
 			)
 			if err := rows.Scan(&table.Schema, &table.Table, &table.Enabled,
-				&table.Forced, &table.Policies, &hasTenantID); err != nil {
+				&table.Forced, &table.PolicyNames, &hasTenantID); err != nil {
 				return fmt.Errorf("scan table protection: %w", err)
 			}
+			table.Policies = len(table.PolicyNames)
 			report.Tables = append(report.Tables, table)
 
 			if !table.Enabled {
@@ -146,13 +161,13 @@ func AssertIsolation(ctx context.Context, pool *db.Pool) (IsolationReport, error
 				report.Problems = append(report.Problems,
 					fmt.Sprintf("%s has row-level security enabled but not FORCED, so it does not apply to the owner", table.Qualified()))
 			}
-			// Two policies: one tenant-scoped, one provider-scoped. One policy means either a
-			// caller has no access path, or a single permissive policy serves both — which is
-			// the conflation the two roles exist to prevent.
-			if table.Policies != 2 {
-				report.Problems = append(report.Problems,
-					fmt.Sprintf("%s carries %d policies, want 2 (tenant scope and provider scope)",
-						table.Qualified(), table.Policies))
+			// Two policies by name: one tenant-scoped, one provider-scoped. A missing one means a
+			// caller has no access path, or a single permissive policy serves both — which is the
+			// conflation the two roles exist to prevent. Checked by name rather than by count, so a
+			// declared extra policy cannot hide a missing required one, and an undeclared one is
+			// reported rather than tolerated.
+			if problem := policyProblem(table); problem != "" {
+				report.Problems = append(report.Problems, problem)
 			}
 			// A protected table without the discriminator would make its policy raise at query
 			// time on a column that does not exist, turning a schema mistake into an outage.
@@ -232,4 +247,32 @@ func AssertIsolation(ctx context.Context, pool *db.Pool) (IsolationReport, error
 	// problems makes two identical failures look like different ones.
 	sort.Strings(report.Problems)
 	return report, nil
+}
+
+// policyProblem states what is wrong with a table's policies, or returns "".
+func policyProblem(table TableProtection) string {
+	required := []string{table.Table + "_tenant_scope", table.Table + "_provider_scope"}
+	allowed := map[string]bool{}
+	for _, name := range append(required, AdditionalPolicies[table.Qualified()]...) {
+		allowed[name] = true
+	}
+	found := map[string]bool{}
+	var extra []string
+	for _, name := range table.PolicyNames {
+		found[name] = true
+		if !allowed[name] {
+			extra = append(extra, name)
+		}
+	}
+	var missing []string
+	for _, name := range append(required, AdditionalPolicies[table.Qualified()]...) {
+		if !found[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 && len(extra) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s carries %d policies %v; missing %v, undeclared %v (want tenant scope and provider scope, plus any declared in AdditionalPolicies)",
+		table.Qualified(), len(table.PolicyNames), table.PolicyNames, missing, extra)
 }

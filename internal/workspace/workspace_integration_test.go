@@ -162,6 +162,7 @@ func (f *fixture) seedTenant(t *testing.T) id.UUID {
 	t.Cleanup(func() {
 		f.exec(t, `DELETE FROM platform.outbox WHERE aggregate_id IN (
 		    SELECT workspace_id FROM workspace.workspace WHERE tenant_id = $1)`, tenantID.String())
+		f.exec(t, `DELETE FROM membership.membership_event WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM membership.membership WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM workspace.workspace WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM tenant.tenant WHERE tenant_id = $1`, tenantID.String())
