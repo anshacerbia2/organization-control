@@ -211,6 +211,27 @@ jobs:
       - name: test with race detector
         run: go test ./... -race -count=1 -p 1
 
+      # The bound on the falsification layer. The integration suite runs as the real roles and
+      # refutes a grant or policy only on the paths it executes, so the share of statements it
+      # executes is the one number that says how much a green run covers. It is a floor, not a
+      # target, and it proves no completeness: TDD-organization-control-001 §Grant Derivation.
+      #
+      # Mirrors foundation-platform's floor: atomic mode, no -coverpkg, so a statement counts only
+      # when its own package's tests run it. Shipped packages only: tools/ is verified by its own
+      # tests, and cmd/ is the composition root, exercised by the deploy e2e and the system proof
+      # rather than by package tests. -p 1 for the same reason as the step above.
+      - name: coverage floor
+        run: |
+          pkgs=$(go list ./... | grep -v -e '/tools/' -e '/cmd/' | paste -sd ' ')
+          go test $pkgs -count=1 -p 1 -covermode=atomic -coverprofile=coverage.out
+          go tool cover -func=coverage.out | awk '/^total:/ {print}'
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}' | tr -d '%')
+          echo "shipped-package coverage: ${total}%"
+          if awk "BEGIN {exit !($total < 65)}"; then
+            echo "::error::coverage ${total}% is below the 65% floor"
+            exit 1
+          fi
+
       # This is the Week 1 exit criterion, asserted against the catalog and against the engine
       # rather than against the SQL that produced them. Verbose because each assertion names a
       # control, and a reviewer reading a red build should see which one.
@@ -360,6 +381,16 @@ jobs:
       # beside the code they constrain.
       - name: architecture boundaries
         run: go run github.com/anshacerbia2/foundation-platform/tools/archcheck
+
+      # Kept for a week so a drop can be read per function without rerunning the suite.
+      - name: upload coverage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: ignore
+          retention-days: 7
 
   supply-chain:
     runs-on: ubuntu-latest

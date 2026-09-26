@@ -461,3 +461,24 @@ the two suites hold.
 CI creates both login roles, seeds two Tenants, and sets `REQUIRE_INTEGRATION=1` so a service
 container that never came up fails the build rather than leaving every cross-tenant assertion
 unrun and the build green.
+
+### Coverage floor
+
+The floor is 65%, measured over shipped packages (`internal/`), with the integration suites
+running as the real roles. CI fails below it and keeps `coverage.out` for a week.
+
+It exists to put a number on what a green integration run covers, not to prove anything is
+complete. The suite refutes a grant, a policy or a rule only on the paths it executes, so the
+share of statements it executes is the bound on that claim. `tools/grantcheck` covers the
+grant half on every derived path regardless of coverage, which is why the floor is not the
+only thing standing between a missing grant and production.
+
+The mechanism mirrors foundation-platform's: atomic mode and no `-coverpkg`, so a statement
+counts only when its own package's tests run it. `tools/` is verified by its own tests, and
+`cmd/` is the composition root, exercised by the deploy e2e and the system proof.
+
+The number is set below the measured 68.3% at introduction, not at a round target. It is a
+floor, not a target: coverage raised by testing getters buys nothing. The lowest package is
+`internal/httpapi` at 40%. Its handlers are thin over services tested directly, and its
+refusals before the database are tested at the transport boundary. Raise the floor when a
+change raises the figure for a reason worth keeping.
