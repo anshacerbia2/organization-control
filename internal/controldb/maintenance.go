@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
+	"github.com/anshacerbia2/foundation-platform/migrations"
 	"github.com/anshacerbia2/foundation-platform/outbox"
 )
 
@@ -86,39 +87,21 @@ func RunMaintenance(ctx context.Context, pool *db.Pool, cfg MaintenanceConfig) (
 	}
 	now := report.ObservedAt
 
-	names := func(ctx context.Context, tx db.Tx, statement string, args ...any) ([]string, error) {
-		rows, err := tx.Query(ctx, statement, args...)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		var out []string
-		for rows.Next() {
-			var name string
-			if err := rows.Scan(&name); err != nil {
-				return nil, err
-			}
-			out = append(out, name)
-		}
-		return out, rows.Err()
-	}
-
 	steps := []struct {
 		name string
 		run  func(ctx context.Context, tx db.Tx) error
 	}{
 		{"ensure outbox partitions", func(ctx context.Context, tx db.Tx) error {
 			var err error
-			report.PartitionsEnsured, err = names(ctx, tx,
-				`SELECT partition_name FROM platform.ensure_outbox_partitions(
-				     ($1::timestamptz AT TIME ZONE 'UTC')::date,
-				     ($1::timestamptz AT TIME ZONE 'UTC')::date + $2::int)`, now, cfg.PartitionsAhead)
+			today := now.UTC()
+			report.PartitionsEnsured, err = migrations.EnsureOutboxPartitions(ctx, tx,
+				today, today.AddDate(0, 0, cfg.PartitionsAhead))
 			return err
 		}},
 		{"drop expired outbox partitions", func(ctx context.Context, tx db.Tx) error {
 			var err error
-			report.PartitionsDropped, err = names(ctx, tx,
-				`SELECT partition_name FROM platform.drop_outbox_partitions($1)`, now.Add(-cfg.OutboxRetention))
+			report.PartitionsDropped, err = migrations.DropPublishedOutboxPartitions(ctx, tx,
+				now.Add(-cfg.OutboxRetention))
 			return err
 		}},
 		{"dispose resolved dead letters", func(ctx context.Context, tx db.Tx) error {
