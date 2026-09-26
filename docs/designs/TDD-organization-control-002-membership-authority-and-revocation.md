@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.2.0
+  version: 1.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-08-23
+  last_reviewed: 2026-09-26
   parent_sad: SAD-004
 ---
 
@@ -205,6 +205,29 @@ When `workspace_id` is `NULL` the constraint is satisfied without a lookup, whic
 the tenant-scoped Membership case. `MATCH FULL` would reject that row and is therefore
 incorrect here. `tenant_id` keeps its own foreign key so it stays validated when no
 Workspace is referenced.
+
+### Event History
+
+Every Membership event the service publishes also writes one row to
+`membership.membership_event`, in the same transaction as the outbox append:
+
+```sql
+CREATE TABLE membership.membership_event (
+    event_id            UUID        PRIMARY KEY,
+    membership_id       UUID        NOT NULL REFERENCES membership.membership(membership_id),
+    tenant_id           UUID        NOT NULL,
+    membership_version  BIGINT      NOT NULL,
+    event_type          TEXT        NOT NULL,
+    recorded_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT membership_event_version_unique UNIQUE (membership_id, membership_version)
+);
+```
+
+It records which Membership, at which version, a published event concerns. A delivery receipt
+names only an event, and a stream position is reassigned by a replay, so neither can say whether
+one event is newer than another. This can. The `SUPERSEDED` dead-letter resolution reads it
+(`TDD-organization-control-005`). The row is immutable: no runtime role holds `UPDATE` or
+`DELETE`, and the foreign key keeps a Membership with published events from being deleted.
 
 ### Consumer Registry
 

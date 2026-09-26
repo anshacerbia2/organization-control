@@ -408,7 +408,8 @@ the `requested -> failed` question in §"Tenant State Machine", the desired-stat
 ✅ **Built and proven across real processes.** `TDD-organization-control-005` is the current statement of
 the design. It covers:
 
-- **Resolution:** `REPLAYED` only, and only on the active consumer's `consumer_applied` receipt.
+- **Resolution:** `REPLAYED`, only on the active consumer's `consumer_applied` receipt. `SUPERSEDED`
+  was added afterwards as backlog item 1, on the same receipt for a newer version of the Membership.
 - **Provider API:** replay and resolve endpoints.
 - **The `organization_resolution_rt` role:** it may update only the four resolution columns, through its
   own credential.
@@ -423,12 +424,12 @@ below.
 
 ## Backlog after dead-letter resolution
 
-Ordered. The first item blocks this service's production gate. The rest do not block it, but each
-has a named failure it prevents. The Source column gives the review record that decided the item.
+Ordered. None of the open items blocks this service's production gate, but each has a named
+failure it prevents. The Source column gives the review record that decided the item.
 
 | # | Item | Why | Source |
 | :-- | :-- | :-- | :-- |
-| 1 | **`SUPERSEDED` resolution** | A dead-lettered event already overtaken by a newer version can never produce `consumer_applied` evidence, so it can never resolve. Debt is estate-wide, so one such row blocks every projection-backed check permanently (TDD-005 §Known permanent-block condition). **Required before the production gate** | RESPONSE-23, RESPONSE-24 |
+| 1 | ✅ **`SUPERSEDED` resolution** | Built. A dead letter closes as `SUPERSEDED` on the active consumer's `consumer_applied` receipt for a newer version of the same Membership, with versions read from `membership.membership_event` rather than stream positions, which a replay reassigns (TDD-005 §The resolution predicate). Without it, an overtaken event could never resolve, and estate-wide debt blocked every projection-backed check permanently | RESPONSE-23, RESPONSE-24 |
 | 2 | **`grantcheck`** | Mechanises Layer 1 of the privilege model: grants derived from execution paths and checked by a tool rather than by review | RESPONSE-22 |
 | 3 | `RESNAPSHOTTED` resolution | Recovery by generation replacement. It must be built in full or not at all (TDD-005 §Scope) | RESPONSE-23 |
 | 4 | `WAIVED` resolution | A sanctioned operational exception, kept separate from repairing authority state | RESPONSE-23 |
@@ -466,7 +467,7 @@ implementation, and `approved_version_not_stable` now refuses a regression in CI
 **Production gate.** The design gate, plus: restore evidence for the Organization
 Database including outbox and projection cursor state, cross-tenant denial proven as
 the runtime role, measured accept-to-publication delay inside budget for priority
-events, `SUPERSEDED` resolution built (backlog item 1), and runbooks written for revocation
+events, `SUPERSEDED` resolution built (backlog item 1, done), and runbooks written for revocation
 not enforced within budget, projection drift repair, provider-access review, stuck
 offboarding, and dead-letter resolution.
 

@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
+
+	"github.com/anshacerbia2/organization-control/internal/controldb"
 )
 
 const (
@@ -191,8 +193,10 @@ func TestEveryTenantScopedTableIsProtected(t *testing.T) {
 		// Two: one tenant-scoped, one provider-scoped. A table with one policy is a table where
 		// one of the two callers has no access path, or where a single permissive policy serves
 		// both — which is the conflation TDD-organization-control-001 separates at the role level.
-		if p.policies != 2 {
-			t.Errorf("%s: %d policies, want 2 (tenant scope and provider scope)", p.name, p.policies)
+		// A declared extra policy -- the resolver's read on membership.membership_event -- is
+		// counted on top, and AssertIsolation checks the names.
+		if want := 2 + len(controldb.AdditionalPolicies[p.name]); p.policies != want {
+			t.Errorf("%s: %d policies, want %d (tenant scope and provider scope, plus declared)", p.name, p.policies, want)
 		}
 	}
 }

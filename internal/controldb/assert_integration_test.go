@@ -37,14 +37,15 @@ func TestAssertIsolationAcceptsAnIntactDatabase(t *testing.T) {
 	if !report.OK() {
 		t.Fatalf("a freshly migrated database reports problems: %v", report.Problems)
 	}
-	// Seven tables across five schemas. Asserted rather than left implicit, because every loop
+	// Eight tables across five schemas. Asserted rather than left implicit, because every loop
 	// in AssertIsolation is vacuous over an empty set — a report with no tables and no problems
 	// would otherwise read as intact.
-	if len(report.Tables) != 7 {
-		t.Errorf("report covers %d tables, want 7", len(report.Tables))
+	if len(report.Tables) != 8 {
+		t.Errorf("report covers %d tables, want 8", len(report.Tables))
 	}
 	for _, table := range report.Tables {
-		if !table.Enabled || !table.Forced || table.Policies != 2 {
+		want := 2 + len(controldb.AdditionalPolicies[table.Qualified()])
+		if !table.Enabled || !table.Forced || table.Policies != want {
 			t.Errorf("%s: enabled=%v forced=%v policies=%d", table.Qualified(), table.Enabled, table.Forced, table.Policies)
 		}
 	}
@@ -79,6 +80,21 @@ func TestAssertIsolationDetectsEachWeakening(t *testing.T) {
 			break_:  "DROP POLICY membership_tenant_scope ON membership.membership",
 			restore: tenantPolicyFor("membership", "membership"),
 			expect:  "carries 1 policies",
+		},
+		{
+			// Counted, a table with a required policy dropped and an undeclared one added would
+			// still carry two. Named, both are reported.
+			name: "a required policy replaced by an undeclared one",
+			// One DO block per side: the driver's extended protocol takes one statement at a time.
+			break_: `DO $$ BEGIN
+				DROP POLICY membership_provider_scope ON membership.membership;
+				CREATE POLICY membership_open ON membership.membership FOR ALL TO organization_provider_rt USING (true);
+			END $$`,
+			restore: `DO $$ BEGIN
+				DROP POLICY membership_open ON membership.membership;
+				` + providerPolicyFor("membership", "membership") + `;
+			END $$`,
+			expect: "undeclared [membership_open]",
 		},
 		{
 			name:   "a table in an RLS schema with no tenant_id",
@@ -150,6 +166,16 @@ func tenantPolicyFor(schema, table string) string {
 		    TO organization_rt
 		    USING      (tenant_id = current_setting('app.tenant_id', false)::uuid)
 		    WITH CHECK (tenant_id = current_setting('app.tenant_id', false)::uuid)`,
+		table, schema, table)
+}
+
+func providerPolicyFor(schema, table string) string {
+	return fmt.Sprintf(`
+		CREATE POLICY %s_provider_scope ON %s.%s
+		    FOR ALL
+		    TO organization_provider_rt
+		    USING      (current_setting('app.provider_scope', false)::boolean)
+		    WITH CHECK (current_setting('app.provider_scope', false)::boolean)`,
 		table, schema, table)
 }
 

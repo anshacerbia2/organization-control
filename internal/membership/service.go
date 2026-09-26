@@ -301,8 +301,22 @@ func (s *Service) appendEvent(ctx context.Context, tx db.Tx, action Action, reco
 	if err := outbox.Append(ctx, tx, record.MembershipID, envelope, opts...); err != nil {
 		return fmt.Errorf("membership: append event: %w", err)
 	}
+
+	// Which version this event carries, recorded in the same transaction as the event itself, so the
+	// row exists if and only if the event does. The SUPERSEDED resolution predicate reads it: a
+	// delivery receipt names only an event, and this says which Membership, at which point in its
+	// history, that event concerns. The version is the event's own, fixed here -- unlike the stream
+	// position, which a replay reassigns.
+	if _, err := tx.Exec(ctx, recordEventStatement, envelope.ID.String(), record.MembershipID.String(),
+		record.TenantID.String(), record.Version, string(eventType)); err != nil {
+		return fmt.Errorf("membership: record the event's version: %w", err)
+	}
 	return nil
 }
+
+const recordEventStatement = `INSERT INTO membership.membership_event
+    (event_id, membership_id, tenant_id, membership_version, event_type)
+VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5)`
 
 func load(ctx context.Context, tx db.Tx, membershipID id.UUID) (Membership, error) {
 	var (

@@ -6,25 +6,30 @@ package projection
 // therefore the act that lets every projection-backed check serve again. Everything else in this
 // file exists to make sure it happens for a reason that can be read back.
 //
-// # One reason, and why the others are absent
+// # Two reasons, and why the others are absent
 //
-// REPLAYED only. A dead letter closes when this producer's own dispatcher witnessed the consumer
-// accept the event — a delivery receipt carrying consumer_applied, for this event, for the
-// consumer that is actually enforcing. That is the only evidence in the contract which does not
-// rest on the consumer's report about its own progress.
+// REPLAYED: this producer's own dispatcher witnessed the consumer accept the event -- a delivery
+// receipt carrying consumer_applied, for this event, for the consumer that is actually enforcing.
 //
-// RESNAPSHOTTED needs generation replacement, SUPERSEDED needs domain proof that a newer event
-// closes the failed one's effect, and WAIVED is an operational exception rather than a correctness
-// proof. None is built, and a resolver that quietly accepted a weaker reason would be the whole
-// contract undone in one branch. See TDD-organization-control-005.
+// SUPERSEDED: the same witness, for a newer event about the same Membership. Every Membership event
+// carries the complete security state and its membership_version, and a consumer applies an event
+// only when its version is higher than the one it holds. So once the consumer has applied version
+// W, the failed event at version V < W can never take effect -- a replay of it would be discarded
+// by the monotonicity guard -- and the consumer already holds a state at least as new as the one it
+// missed. Without this reason such an incident could never close: replaying produces no applied
+// evidence, and the consumer is correct with no sanctioned way to say so.
 //
-// # What this cannot recover
+// "Newer" is read from membership.membership_event, never from the receipt or the stream. A replay
+// reassigns stream_position, so an older event replayed after a revocation would carry the higher
+// position; a predicate reading positions would let that replay close the revocation's incident
+// while the consumer holds the older grant. The version in the history row is the event's own,
+// written in the transaction that published it, and no runtime role can edit it.
 //
-// A dead letter whose event has been superseded can never be closed here: replaying it is
-// discarded by the monotonicity guard, so it never produces applied evidence. The consumer is in
-// the correct state and there is no sanctioned way to say so. That is written down rather than
-// discovered, and the replay procedure that avoids reaching it — lowest version first — is in the
-// same document.
+// Both reasons rest on a receipt, which is the only evidence in the contract that does not rest on
+// the consumer's report about its own progress. RESNAPSHOTTED needs generation replacement and
+// WAIVED is an operational exception rather than a correctness proof. Neither is built, and a
+// resolver that quietly accepted a weaker reason would be the whole contract undone in one branch.
+// See TDD-organization-control-005.
 
 import (
 	"context"
@@ -51,6 +56,12 @@ var (
 	// produces receipts under a name no resolution reads — and a refusal saying only "no
 	// evidence" sends an operator to look at the delivery path, which is working.
 	ErrNoAppliedEvidence = errors.New("projection: no applied-evidence receipt justifies closing this dead letter")
+
+	// ErrNotSuperseded refuses a SUPERSEDED closure that no newer applied event justifies.
+	//
+	// Separate from ErrNoAppliedEvidence because the operator's next move differs: here the
+	// answer is usually to replay the event itself, or to wait for the newer one to be applied.
+	ErrNotSuperseded = errors.New("projection: no newer applied event supersedes this dead letter")
 )
 
 // Resolution is what a closure recorded.
@@ -61,8 +72,11 @@ type Resolution struct {
 	Reference string
 }
 
-// ResolutionTypeReplayed is the one reason this resolver writes.
-const ResolutionTypeReplayed = "REPLAYED"
+// The reasons this resolver writes.
+const (
+	ResolutionTypeReplayed   = "REPLAYED"
+	ResolutionTypeSuperseded = "SUPERSEDED"
+)
 
 // Resolver closes dead letters that evidence supports.
 //
@@ -106,6 +120,33 @@ const otherReceipts = `SELECT coalesce(string_agg(DISTINCT consumer || ' (' || e
   FROM platform.delivery_receipt
  WHERE event_id = $1`
 
+// failedVersion is which Membership, at which version, the dead-lettered event concerned.
+//
+// No row means the event is not a Membership event, or was published before the history existed.
+// Either way there is no version to compare, and the envelope is not consulted instead: it is a
+// copy the dead-letter row carries, and the history row is the record the producer wrote.
+//
+// One row always, NULL when absent: this package may not name the driver, so "no rows" is not an
+// error it can recognise.
+const failedVersion = `SELECT h.membership_id::text, h.membership_version
+  FROM (SELECT 1) one
+  LEFT JOIN membership.membership_event h ON h.event_id = $1`
+
+// supersedingEvidence finds the lowest newer version of the same Membership the active consumer
+// applied. The lowest, so the reference names the first event that made the failed one moot.
+const supersedingEvidence = `SELECT s.event_id::text, s.membership_version, s.event_type
+  FROM (SELECT 1) one
+  LEFT JOIN LATERAL (
+        SELECT r.event_id, h.membership_version, h.event_type
+          FROM platform.delivery_receipt r
+          JOIN membership.membership_event h ON h.event_id = r.event_id
+         WHERE r.consumer = $1
+           AND r.evidence = 'consumer_applied'
+           AND h.membership_id = $2::uuid
+           AND h.membership_version > $3
+         ORDER BY h.membership_version
+         LIMIT 1) s ON TRUE`
+
 const closeDeadLetter = `UPDATE platform.dead_letter
    SET resolved_at          = now(),
        resolution_type      = $2,
@@ -114,12 +155,89 @@ const closeDeadLetter = `UPDATE platform.dead_letter
  WHERE event_id = $1
    AND resolved_at IS NULL`
 
-// Resolve closes the dead letter if applied evidence supports it, and refuses otherwise.
+// evidenceFinder returns the receipt reference a closure rests on and a sentence saying why, or a
+// refusal.
+type evidenceFinder func(ctx context.Context, tx db.Tx, eventID id.UUID, consumer string) (reference, why string, err error)
+
+// Resolve closes the dead letter as REPLAYED if applied evidence for the event itself supports it,
+// and refuses otherwise.
+func (r *Resolver) Resolve(ctx context.Context, eventID id.UUID) (Resolution, error) {
+	return r.close(ctx, eventID, ResolutionTypeReplayed, replayedEvidence)
+}
+
+// Supersede closes the dead letter as SUPERSEDED if the active consumer applied a newer event for
+// the same Membership, and refuses otherwise.
+func (r *Resolver) Supersede(ctx context.Context, eventID id.UUID) (Resolution, error) {
+	return r.close(ctx, eventID, ResolutionTypeSuperseded, supersededEvidence)
+}
+
+func replayedEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer string) (string, string, error) {
+	var applied bool
+	if err := tx.QueryRow(ctx, appliedEvidence, eventID.String(), consumer).Scan(&applied); err != nil {
+		return "", "", fmt.Errorf("projection: reading delivery receipts for %s: %w", eventID, err)
+	}
+	if !applied {
+		var others string
+		if err := tx.QueryRow(ctx, otherReceipts, eventID.String()).Scan(&others); err != nil {
+			return "", "", fmt.Errorf("projection: reading delivery receipts for %s: %w", eventID, err)
+		}
+		if others == "" {
+			return "", "", fmt.Errorf("%w: nothing has acknowledged %s; the event has not been "+
+				"delivered since it was abandoned, so replay it first",
+				ErrNoAppliedEvidence, eventID)
+		}
+		return "", "", fmt.Errorf("%w: the active consumer is %q and %s carries receipts from %s; "+
+			"a receipt under another name resolves nothing, and the commonest cause is "+
+			"DISPATCH_CONSUMER_NAME disagreeing with the registered consumer",
+			ErrNoAppliedEvidence, consumer, eventID, others)
+	}
+
+	// The reference points at the receipt that justified this, by its own key. Not a sentence: an
+	// investigation reading resolution_reference should be able to go and look at the row.
+	return fmt.Sprintf("platform.delivery_receipt:%s:%s", eventID, consumer), "", nil
+}
+
+func supersededEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer string) (string, string, error) {
+	var (
+		membershipID *string
+		version      *int64
+	)
+	if err := tx.QueryRow(ctx, failedVersion, eventID.String()).Scan(&membershipID, &version); err != nil {
+		return "", "", fmt.Errorf("projection: reading the version %s carried: %w", eventID, err)
+	}
+	if membershipID == nil || version == nil {
+		return "", "", fmt.Errorf("%w: %s has no Membership version on record; it is not a "+
+			"Membership event, or it was published before the history existed, so replay it instead",
+			ErrNotSuperseded, eventID)
+	}
+
+	var (
+		newer        *string
+		newerVersion *int64
+		newerType    *string
+	)
+	if err := tx.QueryRow(ctx, supersedingEvidence, consumer, *membershipID, *version).Scan(
+		&newer, &newerVersion, &newerType); err != nil {
+		return "", "", fmt.Errorf("projection: reading superseding receipts for %s: %w", eventID, err)
+	}
+	if newer == nil || newerVersion == nil || newerType == nil {
+		return "", "", fmt.Errorf("%w: the active consumer %q has applied no event for Membership "+
+			"%s above version %d, which %s carried; replay it, or wait for the newer event to be applied",
+			ErrNotSuperseded, consumer, *membershipID, *version, eventID)
+	}
+
+	return fmt.Sprintf("platform.delivery_receipt:%s:%s", *newer, consumer),
+		fmt.Sprintf("; Membership %s version %d superseded by version %d (%s)",
+			*membershipID, *version, *newerVersion, *newerType), nil
+}
+
+// close is what both reasons share: the incident must exist and be open, the evidence must be about
+// the consumer that is enforcing, and the closure and its account commit together.
 //
 // resolved_by comes from the bound scope rather than from the caller's request. An author taken
 // from a body is an author anybody can write, and the field exists so an investigation can ask who
 // decided this incident was over.
-func (r *Resolver) Resolve(ctx context.Context, eventID id.UUID) (Resolution, error) {
+func (r *Resolver) close(ctx context.Context, eventID id.UUID, kind string, find evidenceFinder) (Resolution, error) {
 	if eventID.IsNil() {
 		return Resolution{}, fmt.Errorf("%w: an event identifier is required", ErrInvalid)
 	}
@@ -153,33 +271,13 @@ func (r *Resolver) Resolve(ctx context.Context, eventID id.UUID) (Resolution, er
 				return fmt.Errorf("%w: %v", ErrNoActiveConsumer, err)
 			}
 
-			var applied bool
-			if err := tx.QueryRow(ctx, appliedEvidence, eventID.String(), consumer).Scan(&applied); err != nil {
-				return fmt.Errorf("projection: reading delivery receipts for %s: %w", eventID, err)
+			reference, why, err := find(ctx, tx, eventID, consumer)
+			if err != nil {
+				return err
 			}
-			if !applied {
-				var others string
-				if err := tx.QueryRow(ctx, otherReceipts, eventID.String()).Scan(&others); err != nil {
-					return fmt.Errorf("projection: reading delivery receipts for %s: %w", eventID, err)
-				}
-				if others == "" {
-					return fmt.Errorf("%w: nothing has acknowledged %s; the event has not been "+
-						"delivered since it was abandoned, so replay it first",
-						ErrNoAppliedEvidence, eventID)
-				}
-				return fmt.Errorf("%w: the active consumer is %q and %s carries receipts from %s; "+
-					"a receipt under another name resolves nothing, and the commonest cause is "+
-					"DISPATCH_CONSUMER_NAME disagreeing with the registered consumer",
-					ErrNoAppliedEvidence, consumer, eventID, others)
-			}
-
-			// The reference points at the receipt that justified this, by its own key. Not a
-			// sentence: an investigation reading resolution_reference should be able to go and
-			// look at the row.
-			reference := fmt.Sprintf("platform.delivery_receipt:%s:%s", eventID, consumer)
 
 			tag, err := tx.Exec(ctx, closeDeadLetter,
-				eventID.String(), ResolutionTypeReplayed, scope.Actor().String(), reference)
+				eventID.String(), kind, scope.Actor().String(), reference)
 			if err != nil {
 				return fmt.Errorf("projection: closing %s: %w", eventID, err)
 			}
@@ -203,8 +301,8 @@ func (r *Resolver) Resolve(ctx context.Context, eventID id.UUID) (Resolution, er
 			if err := db.RecordAccessInTx(ctx, tx, db.ProviderAccess{
 				Actor:       scope.Actor(),
 				Correlation: scope.Correlation(),
-				Reason: fmt.Sprintf("closed dead-lettered event %s as %s on %s",
-					eventID, ResolutionTypeReplayed, reference),
+				Reason: fmt.Sprintf("closed dead-lettered event %s as %s on %s%s",
+					eventID, kind, reference, why),
 			}); err != nil {
 				return fmt.Errorf("projection: recording the resolution of %s: %w", eventID, err)
 			}
@@ -212,7 +310,7 @@ func (r *Resolver) Resolve(ctx context.Context, eventID id.UUID) (Resolution, er
 			out = Resolution{
 				EventID:   eventID,
 				Consumer:  consumer,
-				Type:      ResolutionTypeReplayed,
+				Type:      kind,
 				Reference: reference,
 			}
 			return nil

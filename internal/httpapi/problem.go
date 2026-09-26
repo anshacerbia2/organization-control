@@ -174,6 +174,7 @@ var mapping = []struct {
 	// count -- not to correct a field, which is what ValidationFailed would tell them.
 	{projection.ErrNoActiveConsumer, platform.PreconditionUnmet},
 	{projection.ErrNoAppliedEvidence, platform.PreconditionUnmet},
+	{projection.ErrNotSuperseded, platform.PreconditionUnmet},
 
 	// Context.
 	{context.ErrInvalid, platform.ValidationFailed},
