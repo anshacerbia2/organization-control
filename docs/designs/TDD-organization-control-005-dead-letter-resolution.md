@@ -579,7 +579,9 @@ test red, not assumed to.
   through a proxy answering `422`, replays and resolves it through this API, and asserts that
   the revoked principal's refusal reason changes from debt to withdrawal. That change is the
   evidence the revocation landed. A test asserting only that both stay refused would pass even
-  if it never did.
+  if it never did. It then suspends the Tenant through this API and asserts that the consumer
+  refuses its active member because the Tenant is not active, and restores it and asserts that
+  the member is allowed again.
 
 The system proof closed this scope on 2026-09-24, in foundation-reference CI run 36026176642,
 at these revisions:
