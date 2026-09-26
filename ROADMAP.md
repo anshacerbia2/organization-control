@@ -431,7 +431,16 @@ Ordered. None of the open items blocks this service's production gate, but each 
 failure it prevents. The Source column gives the review record that decided the item.
 
 ✅ is built. ☑ is closed by a recorded decision not to build, with the condition that reopens it.
-Item 10 lives in the identity repositories, not here.
+Item 10 lives in the identity repositories, item 11 in foundation-platform, and items 15, 16 and 18
+mostly in foundation-reference. They are listed here so the whole P1 backlog reads from one table.
+
+Items 11 to 18 were recorded as P1 in the review record but were missing from this table until
+2026-09-27, when every `RESPONSE-*` was swept for P1:
+
+- items 14 to 18 are the P1 list of the Proof A rounds, RESPONSE-7 to RESPONSE-10;
+- items 11 to 13 are findings recorded during P0, RESPONSE-15 to RESPONSE-19;
+- `first_failed_at` taking `now()`, P1 in RESPONSE-16 and RESPONSE-17, is tracked in
+  foundation-platform's ROADMAP.
 
 | # | Item | Why | Source |
 | :-- | :-- | :-- | :-- |
@@ -445,7 +454,15 @@ Item 10 lives in the identity repositories, not here.
 | 7 | ✅ `platform.delivery_receipt` retention | Done. foundation-platform v0.2.8 prunes a receipt past 90 days only while no incident is open and never one a closure cites; `organization-migrate -stage=maintenance` runs it daily with the outbox partitions and dead-letter disposal, none of which any deployable ran before (README §Building the database). It exits 3 on an incident open past 24 hours | RESPONSE-17, RESPONSE-20, RESPONSE-22 |
 | 8 | ✅ Coverage floor for this repository | Done. CI fails below 65% over shipped packages, measured with the integration suites as the real roles (68.3% at introduction), mirroring foundation-platform's mechanism. It bounds what a green falsification run covers (README §Coverage floor) | RESPONSE-22 |
 | 9 | ✅ Scheduled cross-repository compatibility runs | Done. Proof A now runs on both sides and against both mains: this repository's `system-proof` job proves every pull request against foundation-reference at a pin, and daily against its main; foundation-reference's `system-proof-main` proves this repository's main daily. Unpinned runs are logged as such and are never closure records; the pins stay (TDD-005 §Testing Strategy) | RESPONSE-24, RESPONSE-25 |
-| 10 | Proof B: Keycloak drift | The identity-side counterpart of Proof A. Drift detection is a claim about the future, not about the closure | RESPONSE-23, RESPONSE-25 |
+| 10 | Proof B: Keycloak drift | The identity-side counterpart of Proof A: drift between reviewed desired state and live Keycloak is detected, classified, reconciled, and shown to converge. Owned by `identity-control`, whose ROADMAP §Proof B records what exists, what is missing, and the decisions it needs. Labelled P2 in RESPONSE-7 to RESPONSE-10; listed with this backlog in RESPONSE-23 | RESPONSE-4, RESPONSE-23 |
+| 11 | The dispatcher holds a database transaction across each delivery | A batch is published over HTTP inside the transaction that claimed it, so a slow consumer holds row locks and a pooled connection for the whole batch, and a crash re-delivers rows already delivered. Correct, because consumers deduplicate, and not changed during P0. The fix is a lease -- claim briefly, publish outside a transaction, record each outcome on its own -- and it is owned by foundation-platform (its ROADMAP, "Open, owned here") | RESPONSE-15, RESPONSE-16, RESPONSE-17 |
+| 12 | Legacy dead-letter recovery | A dead letter from before foundation-platform v0.2.3 may carry no `aggregate_id` or `priority`, so it cannot replay itself (`ErrUnreplayable`). One from before v0.2.8 names no consumer, so it cannot be waived. One from before `membership.membership_event` has no recorded version, so it cannot be superseded. An authority-bearing row with all three gaps has no closure at all and blocks every consumer. Nothing is in production and the CI and dev databases are rebuilt, so the count is expected to be zero. Decide before the first production deploy: have `-stage=post` refuse a database holding such rows, or define a sanctioned closure for them | RESPONSE-18, RESPONSE-19 |
+| 13 | Nothing checks that the three consumer names agree | `DISPATCH_CONSUMER_NAME`, `REFERENCE_CONSUMER_NAME` and the registered `consumer_id` are set in three places, and a one-character mismatch produces receipts no resolution reads. The system proof now turns that into a red build on every pull request (item 9), but nothing refuses it at runtime. RESPONSE-18 offered an option and it was never decided: grant `organization_dispatch_rt` SELECT on `projection.consumer`, and have the dispatcher refuse to start when its name is not registered. That is a grant change and needs a decision | RESPONSE-18, TDD-005 §Configuration |
+| 14 | Metrics and alerts for enforcement | There is no metric or alert for dispatcher lag, projection age, refusal counts, or security-debt depth. An operator learns that a dead letter is refusing every projection-backed check by reading refusal reasons. The maintenance stage's exit 3 is the only signal today. Spans organization-control and foundation-reference | RESPONSE-7 to RESPONSE-10 |
+| 15 | Failure injection as repeatable tests | A dead consumer, a timeout before commit, and backlog recovery were each observed once, by hand, during Proof A. The system proof now dead-letters a poison event on every run, but these three have no repeatable test. Belongs to foundation-reference's system proof | RESPONSE-7 to RESPONSE-10 |
+| 16 | `tenant_security_version` enforcement at the consumer | foundation-reference stores the Tenant security version with every projected Membership and reports it, but never compares it. A Tenant suspension therefore does not refuse that Tenant's members at the consumer; only each Membership's own events do. Belongs to foundation-reference, and needs Tenant security events delivered to it | RESPONSE-7 to RESPONSE-10 |
+| 17 | A narrow database role for consumer callers | A registered consumer calling the fresh check or the frontier is given the provider scope, because it reads across Tenants. It needs three privileges -- two tables read, one counter written -- so a dedicated `organization_consumer_rt` would fit. `TestAConsumerCallerResolvesToAProviderScope` states the current behaviour and fails the day this lands | RESPONSE-7 to RESPONSE-10 |
+| 18 | Latency distribution | The revocation path's latency is one localhost sample. p50, p95, p99 and maximum, on the smooth path and the failing one, have not been measured. Belongs to foundation-reference's system proof | RESPONSE-7 to RESPONSE-10 |
 
 ## Waiting on nothing
 
