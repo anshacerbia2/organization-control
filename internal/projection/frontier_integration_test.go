@@ -267,3 +267,78 @@ func TestTheFrontierReportsNoVerdict(t *testing.T) {
 	// about clock agreement rather than about the frontier.
 
 }
+
+// Debt belongs to the consumer that refused the event.
+//
+// Until the dispatcher recorded the consumer, every dead letter was nobody's and counted against
+// everyone: one consumer's poison event refused every projection-backed consumer in the estate. The
+// three readers below are the three answers that must now differ.
+func TestDebtIsCountedForTheConsumerThatRefusedIt(t *testing.T) {
+	reader, pool, ctx := frontierReader(t)
+	clearDeadLetters(t, ctx, pool)
+
+	insert := func(consumer any) {
+		t.Helper()
+		if err := pool.InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO platform.dead_letter
+				    (event_id, event_type, envelope, payload, consumer, failure_class, failure_detail,
+				     attempts, first_failed_at)
+				VALUES (gen_random_uuid(), $1, '{}'::jsonb, '{}'::jsonb, $2, 'poison', 'refused', 3, clock_timestamp())`,
+				AuthorityEventTypes[3], consumer)
+			return err
+		}); err != nil {
+			t.Fatalf("inserting a dead letter: %v", err)
+		}
+	}
+	insert("consumer-a")
+	insert(nil) // dead-lettered before the dispatcher recorded consumers
+	t.Cleanup(func() { clearDeadLetters(t, context.Background(), pool) })
+
+	for _, c := range []struct {
+		who      string
+		consumer string
+		want     int64
+	}{
+		{"the consumer that refused it", "consumer-a", 2},
+		{"another consumer, which carries only the unattributed row", "consumer-b", 1},
+		{"a provider, reading the estate", "", 2},
+	} {
+		frontier, err := reader.FrontierFor(ctx, c.consumer)
+		if err != nil {
+			t.Fatalf("FrontierFor(%q): %v", c.consumer, err)
+		}
+		if frontier.SecurityDeadLettered != c.want || !frontier.SecurityDebt {
+			t.Errorf("%s: %d dead letters counted (debt %v), want %d", c.who,
+				frontier.SecurityDeadLettered, frontier.SecurityDebt, c.want)
+		}
+	}
+}
+
+// And without the unattributed row, the other consumer carries no debt at all: the property the
+// single-consumer restriction existed to protect.
+func TestAnotherConsumersDebtDoesNotRefuseThisOne(t *testing.T) {
+	reader, pool, ctx := frontierReader(t)
+	clearDeadLetters(t, ctx, pool)
+	if err := pool.InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO platform.dead_letter
+			    (event_id, event_type, envelope, payload, consumer, failure_class, failure_detail,
+			     attempts, first_failed_at)
+			VALUES (gen_random_uuid(), $1, '{}'::jsonb, '{}'::jsonb, 'consumer-a', 'poison', 'refused', 3, clock_timestamp())`,
+			AuthorityEventTypes[3])
+		return err
+	}); err != nil {
+		t.Fatalf("inserting a dead letter: %v", err)
+	}
+	t.Cleanup(func() { clearDeadLetters(t, context.Background(), pool) })
+
+	frontier, err := reader.FrontierFor(ctx, "consumer-b")
+	if err != nil {
+		t.Fatalf("FrontierFor: %v", err)
+	}
+	if frontier.SecurityDebt {
+		t.Errorf("consumer-b is refused for a delivery only consumer-a refused: %d dead letters counted",
+			frontier.SecurityDeadLettered)
+	}
+}

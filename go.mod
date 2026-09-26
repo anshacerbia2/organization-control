@@ -6,7 +6,7 @@ module github.com/anshacerbia2/organization-control
 go 1.25.0
 
 require (
-	github.com/anshacerbia2/foundation-platform v0.2.7
+	github.com/anshacerbia2/foundation-platform v0.2.8
 	golang.org/x/tools v0.48.0
 )
 

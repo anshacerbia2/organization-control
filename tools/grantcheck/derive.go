@@ -75,7 +75,7 @@ var boundaries = map[string]string{
 	// db.NewClaimStore(tenantConns)
 	"(*" + dbPkg + ".ClaimStore).Complete": tenantRole,
 	// projection.NewFrontierReader(providerConns)
-	"(*" + module + "/internal/projection.FrontierReader).Frontier": providerRole,
+	"(*" + module + "/internal/projection.FrontierReader).FrontierFor": providerRole,
 }
 
 // Statement is one SQL constant and where it was reached.

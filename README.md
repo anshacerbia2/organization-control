@@ -157,6 +157,31 @@ GRANT organization_provider_rt TO organization_provider_app;
 Without them the integration suites skip when `TEST_DATABASE_URL` is unset and fail to authenticate
 when it is set — see `.github/workflows/ci.yml` for the exact block CI runs.
 
+**Maintenance is a fourth stage, run on a schedule rather than at deploy.** Run it daily as the
+same migration role:
+
+```powershell
+go run ./cmd/organization-migrate -stage=maintenance
+```
+
+It does five things, each in its own transaction and each timed from the database clock:
+
+- creates the outbox partitions for today and the next seven days;
+- drops published partitions older than 30 days;
+- removes the payload of dead letters resolved more than 90 days ago, keeping the incident and
+  its resolution;
+- deletes delivery receipts older than 90 days that no closure cites, and only while no incident
+  is open;
+- counts unresolved dead letters older than 24 hours.
+
+It exits 3 when that count is not zero, after the rest of its work is done, so the scheduler
+raises an alert. An unresolved incident is never disposed. Each boundary has a flag. The defaults
+are foundation-platform TDD-001's values.
+
+Until this stage existed, no deployable called any of foundation-platform's retention helpers.
+Every outbox row landed in `platform.outbox_default` and stayed there, and resolved payloads and
+receipts were kept forever.
+
 **The order differs from identity-control's, and the reason is Atlas rather than preference.**
 
 Atlas refuses to apply against a database it considers unclean, and in database scope any
