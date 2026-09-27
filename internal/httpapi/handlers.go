@@ -202,12 +202,27 @@ func requireTenant(w http.ResponseWriter, r *http.Request) (db.Scope, bool) {
 		platform.Problem(w, r, platform.Internal, "The request could not be completed")
 		return db.Scope{}, false
 	}
-	if scope.IsProvider() {
+	if scope.IsProvider() || scope.IsConsumer() {
 		platform.Problem(w, r, platform.Forbidden,
-			"This route acts within one Tenant, and a provider caller carries none")
+			"This route acts within one Tenant, and a provider or consumer caller carries none")
 		return db.Scope{}, false
 	}
 	return scope, true
+}
+
+// consumerServices returns the consumer's own services for a consumer scope, and nil for a provider
+// acting on a consumer's behalf, which the provider services serve.
+func (h *handlers) consumerServices(w http.ResponseWriter, r *http.Request, scope db.Scope) (*ConsumerServices, bool) {
+	if !scope.IsConsumer() {
+		return nil, true
+	}
+	if h.services.Consumer == nil {
+		// Unreachable while authentication admits consumer callers only when consumer authority is
+		// configured, and the composition root builds these services exactly then.
+		platform.Problem(w, r, platform.Internal, "The request could not be completed")
+		return nil, false
+	}
+	return h.services.Consumer, true
 }
 
 // seconds is a duration expressed in whole seconds on the wire.

@@ -34,6 +34,7 @@ const (
 	migratorRole   = "organization_migrator"
 	tenantRole     = "organization_rt"
 	providerRole   = "organization_provider_rt"
+	consumerRole   = "organization_consumer_rt"
 	tenantA        = "11111111-1111-4111-8111-11111111111a"
 	tenantB        = "11111111-1111-4111-8111-11111111111b"
 	principalInB   = "33333333-3333-4333-8333-33333333333b"
@@ -238,7 +239,7 @@ func TestEveryProtectedTableCarriesTenantID(t *testing.T) {
 func TestRuntimeRolesHoldNothingDangerous(t *testing.T) {
 	pool, ctx := openAdmin(t)
 
-	for _, role := range []string{tenantRole, providerRole} {
+	for _, role := range []string{tenantRole, providerRole, consumerRole} {
 		if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 			var super, bypass, createRole, login bool
 			if err := tx.QueryRow(ctx,
@@ -275,12 +276,12 @@ func TestRuntimeRolesOwnNothing(t *testing.T) {
 
 	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		tables := scanInt(t, ctx, tx,
-			`SELECT count(*) FROM pg_tables WHERE tableowner = ANY($1)`, []string{tenantRole, providerRole})
+			`SELECT count(*) FROM pg_tables WHERE tableowner = ANY($1)`, []string{tenantRole, providerRole, consumerRole})
 		if tables != 0 {
 			t.Errorf("the runtime roles own %d table(s); they must own none", tables)
 		}
 		schemas := scanInt(t, ctx, tx,
-			`SELECT count(*) FROM information_schema.schemata WHERE schema_owner = ANY($1)`, []string{tenantRole, providerRole})
+			`SELECT count(*) FROM information_schema.schemata WHERE schema_owner = ANY($1)`, []string{tenantRole, providerRole, consumerRole})
 		if schemas != 0 {
 			t.Errorf("the runtime roles own %d schema(s); they must own none", schemas)
 		}

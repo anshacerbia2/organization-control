@@ -75,6 +75,7 @@ var (
 type Scope struct {
 	tenantID    id.UUID
 	provider    bool
+	consumer    bool
 	actor       id.UUID
 	correlation id.UUID
 }
@@ -104,8 +105,27 @@ func ProviderScope(actor, correlation id.UUID) (Scope, error) {
 	return Scope{provider: true, actor: actor, correlation: correlation}, nil
 }
 
-// IsProvider reports whether this scope is the cross-Tenant one.
+// ConsumerScope resolves a registered projection consumer acting on its own records.
+//
+// Cross-Tenant like the provider scope, because a consumer asks about whichever Tenant its caller is
+// acting in, and not the provider scope. It opens only on a ConsumerPool, which connects as
+// organization_consumer_rt and holds what the consumer's routes need and nothing else, and the
+// provider and tenant pools refuse it. Before it existed a consumer ran as the provider role.
+func ConsumerScope(actor, correlation id.UUID) (Scope, error) {
+	if actor.IsNil() {
+		return Scope{}, errors.New("db: a consumer scope requires an acting subject")
+	}
+	if correlation.IsNil() {
+		return Scope{}, errors.New("db: a consumer scope requires a correlation identifier")
+	}
+	return Scope{consumer: true, actor: actor, correlation: correlation}, nil
+}
+
+// IsProvider reports whether this scope is the cross-Tenant provider one.
 func (s Scope) IsProvider() bool { return s.provider }
+
+// IsConsumer reports whether this scope is a registered consumer's.
+func (s Scope) IsConsumer() bool { return s.consumer }
 
 // TenantID returns the bound Tenant, or the nil identifier for a provider scope.
 func (s Scope) TenantID() id.UUID { return s.tenantID }
@@ -240,6 +260,9 @@ func WithTenantScope(ctx context.Context, pool *TenantPool, fn Body) error {
 	if scope.IsProvider() {
 		return fmt.Errorf("%w: a provider scope reached a tenant-scoped pool", ErrWrongScope)
 	}
+	if scope.IsConsumer() || scope.tenantID.IsNil() {
+		return fmt.Errorf("%w: a consumer scope reached a tenant-scoped pool", ErrWrongScope)
+	}
 
 	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
 		// SET LOCAL, not SET. It reverts at commit or rollback, so a pooled connection cannot
@@ -336,14 +359,58 @@ func WithResolutionScope(ctx context.Context, pool *ResolutionPool, reason strin
 	if pool == nil {
 		return errors.New("db: a resolution pool is required")
 	}
-	return withRecordedScope(ctx, pool.tx, pool.recorder, reason, false, fn)
+	return withRecordedScope(ctx, pool.tx, pool.recorder, reason, false, false, fn)
+}
+
+// ConsumerPool carries a registered projection consumer acting on its own records. It
+// authenticates as a login role inheriting `organization_consumer_rt`.
+//
+// A distinct pool for the reason ResolutionPool is one: a distinct database role. A consumer reads
+// Memberships and Tenants, its own registry row and the frontier, and writes three columns of that
+// row. On the provider pool it could read and write every table the control plane can, so a leaked
+// consumer credential was a leaked control plane.
+//
+// The recorder is the same mandatory one. A consumer's access is attributed like a provider's, with
+// the same evidence written first on the recorder's own connection.
+type ConsumerPool struct {
+	tx       Transactor
+	recorder PrivilegedRecorder
+}
+
+// NewConsumerPool wraps the consumer pool.
+func NewConsumerPool(tx Transactor, recorder PrivilegedRecorder) (*ConsumerPool, error) {
+	if tx == nil {
+		return nil, errors.New("db: a transaction source is required")
+	}
+	if recorder == nil {
+		return nil, errors.New("db: a consumer pool requires a privileged-access recorder")
+	}
+	return &ConsumerPool{tx: tx, recorder: recorder}, nil
+}
+
+// WithConsumerScope runs fn as the consumer role, with the access recorded first. It requires a
+// consumer scope.
+func WithConsumerScope(ctx context.Context, pool *ConsumerPool, reason string, fn Body) error {
+	if pool == nil {
+		return errors.New("db: a consumer pool is required")
+	}
+	return withRecordedScope(ctx, pool.tx, pool.recorder, reason, false, true, fn)
+}
+
+// WithConsumerSnapshot is WithConsumerScope in a read-only REPEATABLE READ transaction, for the
+// same reason WithProviderSnapshot exists.
+func WithConsumerSnapshot(ctx context.Context, pool *ConsumerPool, reason string, fn Body) error {
+	if pool == nil {
+		return errors.New("db: a consumer pool is required")
+	}
+	return withRecordedScope(ctx, pool.tx, pool.recorder, reason, true, true, fn)
 }
 
 func withProviderScope(ctx context.Context, pool *ProviderPool, reason string, snapshot bool, fn Body) error {
 	if pool == nil {
 		return errors.New("db: a provider pool is required")
 	}
-	return withRecordedScope(ctx, pool.tx, pool.recorder, reason, snapshot, fn)
+	return withRecordedScope(ctx, pool.tx, pool.recorder, reason, snapshot, false, fn)
 }
 
 // withRecordedScope is the primitive both paths share: validate the scope, record the access, then
@@ -353,7 +420,7 @@ func withProviderScope(ctx context.Context, pool *ProviderPool, reason string, s
 // drift between them. It drifted once already in this estate, in a different file, and the failure
 // was invisible because the happy path looked identical.
 func withRecordedScope(ctx context.Context, tx Transactor, recorder PrivilegedRecorder,
-	reason string, snapshot bool, fn Body) error {
+	reason string, snapshot, consumer bool, fn Body) error {
 	if tx == nil {
 		return errors.New("db: a transaction source is required")
 	}
@@ -361,8 +428,13 @@ func withRecordedScope(ctx context.Context, tx Transactor, recorder PrivilegedRe
 	if !ok {
 		return ErrNoScope
 	}
-	if !scope.IsProvider() {
-		return fmt.Errorf("%w: a tenant scope reached the provider pool", ErrWrongScope)
+	switch {
+	case consumer && !scope.IsConsumer():
+		return fmt.Errorf("%w: only a consumer scope opens the consumer pool", ErrWrongScope)
+	case !consumer && !scope.IsProvider():
+		// A consumer scope lands here too. It reads across Tenants and is still refused: the
+		// provider pool is the control plane's role, and the consumer's is narrower.
+		return fmt.Errorf("%w: a tenant or consumer scope reached the provider pool", ErrWrongScope)
 	}
 	if reason == "" {
 		return ErrReasonRequired

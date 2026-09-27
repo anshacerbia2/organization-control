@@ -122,6 +122,50 @@ func TestAResolutionCredentialSharedWithAnotherPoolIsRefused(t *testing.T) {
 	}
 }
 
+// The consumer's credential goes with consumer authority, and is never another pool's. Falling back to
+// the provider credential is the over-privilege the consumer role exists to remove.
+func TestTheConsumerCredentialGoesWithConsumerAuthority(t *testing.T) {
+	consumer := func(t *testing.T) {
+		required(t)
+		t.Setenv("ORGANIZATION_CONSUMER_ROLE", "projection-consumer")
+		t.Setenv("ORGANIZATION_CONSUMER_CLAIM", "https://scnehaux.com/consumer_id")
+		t.Setenv("ORGANIZATION_CONSUMER_DATABASE_URL", "postgres://organization_consumer_app@localhost/control")
+	}
+
+	t.Run("accepted with its own credential", func(t *testing.T) {
+		consumer(t)
+		if _, err := Load(); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+	})
+	t.Run("refused without a credential", func(t *testing.T) {
+		consumer(t)
+		t.Setenv("ORGANIZATION_CONSUMER_DATABASE_URL", "")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ORGANIZATION_CONSUMER_DATABASE_URL") {
+			t.Fatalf("Load accepted consumer authority with no consumer credential: %v", err)
+		}
+	})
+	t.Run("refused without consumer authority", func(t *testing.T) {
+		consumer(t)
+		t.Setenv("ORGANIZATION_CONSUMER_ROLE", "")
+		t.Setenv("ORGANIZATION_CONSUMER_CLAIM", "")
+		if _, err := Load(); err == nil {
+			t.Fatal("Load accepted a consumer credential nothing can use")
+		}
+	})
+	for _, shared := range []string{
+		"ORGANIZATION_PROVIDER_DATABASE_URL", "ORGANIZATION_TENANT_DATABASE_URL", "ORGANIZATION_RESOLUTION_DATABASE_URL",
+	} {
+		t.Run("refused when shared with "+shared, func(t *testing.T) {
+			consumer(t)
+			t.Setenv("ORGANIZATION_CONSUMER_DATABASE_URL", os.Getenv(shared))
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ORGANIZATION_CONSUMER_DATABASE_URL") {
+				t.Fatalf("Load accepted a consumer DSN identical to %s: %v", shared, err)
+			}
+		})
+	}
+}
+
 // TestEveryProblemIsReportedAtOnce is why `Load` collects rather than returning the first error.
 //
 // An operator fixing a deployment wants the whole list; returning them one per restart turns a

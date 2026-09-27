@@ -65,6 +65,20 @@ ALTER ROLE organization_resolution_app
   WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD :'resolution_password';
 GRANT organization_resolution_rt TO organization_resolution_app;
 
+-- A registered consumer's login role. Its own credential because the consumer is another
+-- deployable: its secret leaking must yield its seven routes' reads and its own registry row, not the
+-- control plane.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_consumer_app') THEN
+    CREATE ROLE organization_consumer_app LOGIN;
+  END IF;
+END
+$$;
+ALTER ROLE organization_consumer_app
+  WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD :'consumer_password';
+GRANT organization_consumer_rt TO organization_consumer_app;
+
 -- Two Tenants, because cross-tenant denial cannot be proven with one. Seeded on the
 -- administrative connection deliberately: the fixture is not the thing under test, and seeding
 -- through a bound runtime role would make the suite assert its own setup.

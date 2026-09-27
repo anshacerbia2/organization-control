@@ -70,6 +70,13 @@ var expectedPlatformPrivileges = map[string]map[string][]string{
 		// UPDATE.
 		"idempotency_key": {"INSERT", "SELECT"},
 	},
+	// A registered consumer: the snapshot's high-water mark and the frontier read the outbox and the
+	// unresolved dead letters, and claimWithin runs inside its recorded scope. Nothing written.
+	"organization_consumer_rt": {
+		"outbox":          {"SELECT"},
+		"dead_letter":     {"SELECT"},
+		"idempotency_key": {"INSERT", "SELECT"},
+	},
 	"organization_dispatch_rt": {
 		"outbox": {"SELECT", "UPDATE"},
 		// SELECT is not for reading incidents. `ON CONFLICT (event_id) DO NOTHING` makes
@@ -98,7 +105,7 @@ func TestThePlatformSchemaGrantsExactlyWhatWasDeclared(t *testing.T) {
 			  FROM information_schema.table_privileges
 			 WHERE table_schema = 'platform'
 			   AND grantee IN ('organization_rt', 'organization_provider_rt', 'organization_dispatch_rt',
-				                   'organization_resolution_rt')`)
+				                   'organization_resolution_rt', 'organization_consumer_rt')`)
 		if err != nil {
 			return err
 		}
@@ -187,7 +194,8 @@ func TestNewPlatformTablesArriveClosed(t *testing.T) {
 			grantee = entry[:index]
 		}
 		switch grantee {
-		case "organization_rt", "organization_provider_rt", "organization_dispatch_rt", "organization_resolution_rt":
+		case "organization_rt", "organization_provider_rt", "organization_dispatch_rt", "organization_resolution_rt",
+			"organization_consumer_rt":
 			t.Errorf("platform's default privileges hand %q to a runtime role.\n"+
 				"The next table foundation-platform adds would arrive carrying it, with nothing "+
 				"failing and nothing logging. Grant platform tables explicitly instead.", entry)
@@ -202,7 +210,7 @@ func TestRuntimeRolesCanEnterThePlatformSchema(t *testing.T) {
 	pool, ctx := openAdmin(t)
 
 	for _, role := range []string{"organization_rt", "organization_provider_rt", "organization_dispatch_rt",
-		"organization_resolution_rt"} {
+		"organization_resolution_rt", "organization_consumer_rt"} {
 		var permitted bool
 		if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 			return tx.QueryRow(ctx,

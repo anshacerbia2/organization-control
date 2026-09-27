@@ -194,3 +194,21 @@ CREATE POLICY tenant_event_resolution_read ON tenant.tenant_event
     TO organization_resolution_rt
     USING (current_setting('app.provider_scope', false)::boolean);
 
+-- membership.membership and tenant.tenant, read by the consumer role.
+--
+-- The snapshot and the fresh check read across Tenants, so the consumer scope sets the same
+-- cross-Tenant binding the provider scope does, and these policies key on it. SELECT only: the
+-- consumer writes no business row. An unbound consumer connection sees nothing, the same way an
+-- unbound provider one does.
+DROP POLICY IF EXISTS membership_consumer_read ON membership.membership;
+CREATE POLICY membership_consumer_read ON membership.membership
+    FOR SELECT
+    TO organization_consumer_rt
+    USING (current_setting('app.provider_scope', false)::boolean);
+
+DROP POLICY IF EXISTS tenant_consumer_read ON tenant.tenant;
+CREATE POLICY tenant_consumer_read ON tenant.tenant
+    FOR SELECT
+    TO organization_consumer_rt
+    USING (current_setting('app.provider_scope', false)::boolean);
+

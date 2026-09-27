@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.4.0
+  version: 1.5.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -124,23 +124,42 @@ CREATE ROLE organization_rt          NOLOGIN;
 -- Provider-scoped runtime. Carries cross-tenant provider operations only.
 CREATE ROLE organization_provider_rt NOLOGIN;
 
--- Neither runtime role owns a table, holds SUPERUSER, holds BYPASSRLS,
+-- A registered projection consumer acting on its own records.
+CREATE ROLE organization_consumer_rt NOLOGIN;
+
+-- No runtime role owns a table, holds SUPERUSER, holds BYPASSRLS,
 -- or holds any DDL privilege.
 ```
 
-Privileges are deny by default in every schema. `grants.sql` revokes everything from both
+Privileges are deny by default in every schema. `grants.sql` revokes everything from the
 runtime roles, removes the default privileges that would hand a later table to them, and
-then grants each table and privilege a statement in this repository needs. Neither role holds
-`DELETE` on any business table, because nothing deletes a business row. The tenant-scoped
+then grants each table and privilege a statement in this repository needs. No runtime role
+holds `DELETE` on any business table, because nothing deletes a business row. The tenant-scoped
 role cannot create or change a Tenant, reach `organization`, `operation`, `projection` or
 `audit`, or read Membership history. The provider role reads Membership and cannot write
 it. `tools/grantcheck` keeps the grant list honest in both directions (§Grant Derivation):
 a statement needing an ungranted privilege fails CI, and so does a grant nothing needs.
 
-The process opens two pools, one per runtime role. Provider traffic is routed to the
-provider pool by the authorization layer, never by a request parameter. A defect in a
-tenant-scoped handler cannot reach the provider pool, because the handler holds no
-reference to it.
+The consumer role holds what a consumer's seven routes need and nothing else:
+
+- `SELECT` on `membership.membership` and `tenant.tenant`, through a `SELECT` policy of its own
+  on each, keyed on the cross-Tenant binding;
+- `SELECT` on `projection.consumer`, and `UPDATE` on four of its columns: `snapshot_mark`,
+  `last_reported_mark`, `last_reported_at`, `verify_calls_since_report`;
+- `SELECT` on `platform.outbox` and `platform.dead_letter`, for the snapshot mark and the
+  frontier;
+- `SELECT` and `INSERT` on `platform.idempotency_key`, for the claim every recorded scope makes.
+
+It cannot write a business row, change its own declared terms or un-retire itself, register
+a consumer, read an invitation, an Organization, a Workspace or delivery evidence, or write
+the audit trail. A consumer ran as the provider role before this role existed, so its
+credential could do all of that.
+
+The process opens a pool per runtime role, and the consumer's only when consumer authority
+is configured. Provider traffic is routed to the provider pool by the authorization layer,
+never by a request parameter. A defect in a tenant-scoped handler cannot reach the provider
+pool, because the handler holds no reference to it. Each pool refuses a scope that is not
+its own, so a consumer scope cannot open the provider pool and the reverse.
 
 ## Data Model
 
@@ -265,7 +284,7 @@ resolve(request):
 
     if actor is a registered projection consumer:
         refuse if it also carries provider authority or a Tenant
-        return ProviderScope                  -- it reads across Tenants; see below
+        return ConsumerScope                  -- cross-Tenant, opens only the consumer pool
 
     if actor holds provider administrative scope for this operation:
         require reason and correlation identifier
@@ -283,22 +302,28 @@ Refusing before the transaction opens matters: it keeps a cross-tenant attempt o
 the database entirely, so the RLS layer stays a compensating control rather than the
 first line of defence.
 
-**The scope is not the authority.** A registered consumer receives the provider scope because
-the routes it calls read across Tenants. It does not receive provider authority.
+**A consumer has a scope of its own, and no provider authority.** A registered consumer reads
+across Tenants, so its scope binds the cross-Tenant setting. That scope opens only the consumer
+pool, which connects as `organization_consumer_rt` (§Roles).
 
 - A consumer may call only its own seven routes:
   - its consumer record, progress, and bootstrap;
   - the snapshot;
   - the frontier;
   - the two context checks.
-- Each of those routes also checks that the consumer names itself.
-- Every other provider route checks the caller's provider authority, not the scope.
+- Each of those routes also checks that the consumer names itself. A provider calling the same
+  routes with a reason is served on the provider pool.
+- Every other provider route checks the caller's provider authority, and every tenant route
+  refuses a consumer scope.
 
-An earlier version checked the scope alone. A consumer token that added
-`X-Administrative-Reason` was then admitted to every provider route: it could suspend a Tenant,
-retire an Organization, or close or waive a dead letter. Found on 2026-09-27, before any
-production deployment. The database role behind the consumer's scope is still the provider's
-(ROADMAP item 17).
+Two versions of this were wrong, and both were found on 2026-09-27, before any production
+deployment:
+
+- The consumer was given the provider scope and ran as `organization_provider_rt`, so its
+  credential could read and write everything the control plane can.
+- The provider routes checked the scope alone. A consumer token that added
+  `X-Administrative-Reason` was admitted to every provider route: it could suspend a Tenant,
+  retire an Organization, or close or waive a dead letter.
 
 ### Grant and Policy Assertion
 
@@ -312,15 +337,18 @@ JOIN   pg_namespace n ON n.oid = c.relnamespace
 WHERE  n.nspname IN ('tenant','workspace','membership','invitation','operation')
   AND  c.relkind = 'r';
 
--- Neither runtime role owns a table or holds a dangerous attribute.
+-- No runtime role owns a table or holds a dangerous attribute.
 SELECT rolname, rolsuper, rolbypassrls
 FROM   pg_roles
-WHERE  rolname IN ('organization_rt','organization_provider_rt');
+WHERE  rolname IN ('organization_rt','organization_provider_rt','organization_consumer_rt');
 ```
 
 The assertion fails when any table in those schemas has `relrowsecurity = false` or
-`relforcerowsecurity = false`, when either runtime role owns a table, when either
-holds `SUPERUSER` or `BYPASSRLS`, or when either holds a DDL privilege.
+`relforcerowsecurity = false`, when a runtime role owns a table, when one holds
+`SUPERUSER` or `BYPASSRLS`, or when one holds a DDL privilege. A policy beyond the tenant
+and provider pair must be declared by name in `controldb.AdditionalPolicies`: the
+resolver's reads of the two history tables, and the consumer's reads of
+`membership.membership` and `tenant.tenant`.
 
 Grants and policies drift through migrations. Asserting them on every build is what
 keeps the boundary real after the engineer who wrote it has moved on.
@@ -344,18 +372,23 @@ of place:
 
 - A scope wrapper in `internal/db`. `WithTenantScope` is `organization_rt`.
   `WithProviderScope` and `WithProviderSnapshot` are `organization_provider_rt`.
-  `WithResolutionScope` is `organization_resolution_rt`.
+  `WithResolutionScope` is `organization_resolution_rt`. `WithConsumerScope` and
+  `WithConsumerSnapshot` are `organization_consumer_rt`.
 - A declared boundary: a struct that holds a `Transactor` and opens its own transaction on
   it. Its role is whatever the composition root hands it, so it is declared in the tool with
-  the `main.go` line it mirrors:
+  the `main.go` line it mirrors. A boundary built on two roles' connections lists both:
 
-  | Boundary | Role | Wired in `cmd/organization-control/main.go` |
+  | Boundary | Roles | Wired in `cmd/organization-control/main.go` |
   | :-- | :-- | :-- |
   | `access.Recorder.RecordProviderAccess` | `organization_provider_rt` | `access.New(providerConns)` |
   | `db.ClaimStore.Complete` | `organization_rt` | `db.NewClaimStore(tenantConns)` |
-  | `projection.FrontierReader.FrontierFor` | `organization_provider_rt` | `projection.NewFrontierReader(providerConns)` |
+  | `projection.FrontierReader.FrontierFor` | `organization_provider_rt`, `organization_consumer_rt` | `projection.NewFrontierReader(providerConns)`, and `(consumerConns)` |
 
   Changing that wiring means changing the tool's table in the same change.
+
+The consumer's routes reuse the provider routes' transaction bodies (`load`,
+`recordProgressIn`, `bootstrapIn`, `snapshotIn`, `verifyIn`), each passed in a closure of its
+own to the consumer wrapper. A body reachable from both wrappers is granted to both roles.
 
 The tool builds SSA for the service and a VTA call graph. From each wrapper call site it
 walks everything the body can reach, including through interface calls and captured
@@ -365,8 +398,13 @@ function values, and collects every SQL constant. Two rules keep the attribution
   is shared by the provider and resolution wrappers, so following its body parameter would
   attribute every provider statement to the resolution role and every resolution statement
   to the provider role.
-- A declared boundary is entered only as its own root. A tenant body that reads the
-  frontier does not give `organization_rt` the frontier's statements.
+- A declared boundary or a wrapper is entered only as its own root, whether it is reached by
+  a direct call, an interface call or a function value. A tenant body that reads the
+  frontier does not give `organization_rt` the frontier's statements. The wrappers call the
+  recorder through an interface. Until the consumer role existed the tool stopped only at
+  direct calls, so every recorded scope's role was attributed the recorder's `INSERT`. The
+  provider and resolution roles hold that grant for other reasons, which hid the error. The
+  consumer role does not, and the tool reported it missing.
 
 When the tool cannot read something, the run fails. That covers:
 
@@ -414,14 +452,15 @@ because its statements live in foundation-platform and run in foundation-referen
 
 | Variable | Default | Purpose |
 | :-- | :-- | :-- |
-| `ORGANIZATION_DB_DSN` | none, required | Connection string using `organization_rt` |
-| `ORGANIZATION_DB_PROVIDER_DSN` | none, required | Connection string using `organization_provider_rt` |
-| `ORGANIZATION_DB_MAX_CONNS` | `20` | Tenant-scoped pool ceiling |
-| `ORGANIZATION_DB_PROVIDER_MAX_CONNS` | `4` | Provider pool ceiling, held low deliberately |
+| `ORGANIZATION_TENANT_DATABASE_URL` | none, required | A login role inheriting `organization_rt` |
+| `ORGANIZATION_PROVIDER_DATABASE_URL` | none, required | A login role inheriting `organization_provider_rt` |
+| `ORGANIZATION_RESOLUTION_DATABASE_URL` | none, required | A login role inheriting `organization_resolution_rt` (TDD-005) |
+| `ORGANIZATION_CONSUMER_DATABASE_URL` | none; required when `ORGANIZATION_CONSUMER_ROLE` is set, refused otherwise | A login role inheriting `organization_consumer_rt` |
+| `DB_MAX_CONNS` | `20` | Each pool's ceiling |
 
-The provider pool is small on purpose. Provider operations are administrative and
-infrequent, and a low ceiling bounds the damage a runaway cross-tenant job can do
-before it exhausts its own capacity rather than the Tenant-facing capacity.
+Startup refuses any of these DSNs equal to another, because two pools on one credential run
+as one role and the separation exists only in the Go types. The consumer DSN has no fallback
+to the provider one, since that fallback is the over-privilege the consumer role removes.
 
 Migrations run as `organization_migrator` in a job separate from the application. The
 runtime roles hold no DDL privilege, so a defect in application code cannot alter a
@@ -474,6 +513,19 @@ administrative connection is explicitly not accepted as evidence.
 
 - A request carrying a Tenant identifier that differs from the resolved administrative
   scope is refused with `403` before a transaction opens.
+- Logged in as the consumer role (`consumer_role_integration_test.go`):
+  - it reads Memberships and Tenants only under the binding;
+  - it writes only its four position columns;
+  - it cannot change its declared terms, un-retire itself, register a consumer, write a
+    Membership or a Tenant, read an invitation, an Organization, a Workspace, delivery
+    evidence or Membership history, close a dead letter, append to the outbox, or write the
+    audit trail.
+- A consumer scope opens only the consumer pool, and the consumer pool opens only a consumer
+  scope (`TestTheConsumerScopeOpensOnlyTheConsumerPool`).
+- `grantcheck`'s fixture has a consumer path and a provider path sharing a helper. The helper's
+  statement is attributed to both roles, the provider path's own statements to the provider
+  only, and the recorder's `INSERT` to neither wrapper's role. That last case was red before the
+  walk stopped at boundaries reached through an interface.
 - A registered consumer carrying `X-Administrative-Reason` is refused with `403` on every API
   route except its own seven, before a transaction opens. The routes are read from `routes.go`,
   so a new route is covered without being listed. With the authority check removed, the test

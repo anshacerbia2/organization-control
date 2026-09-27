@@ -384,20 +384,7 @@ func (r *Registry) RecordProgress(ctx context.Context, report Progress) (Consume
 	if err := db.WithProviderScope(ctx, r.pool,
 		"record projection progress for "+report.ConsumerID,
 		func(ctx context.Context, tx db.Tx) error {
-			if err := load(ctx, tx, report.ConsumerID, &consumer); err != nil {
-				return err
-			}
-			if consumer.SnapshotMark == nil {
-				return fmt.Errorf("%w: %s", ErrNoSnapshotMark, report.ConsumerID)
-			}
-			if consumer.LastReportedMark != nil && report.AppliedMark < *consumer.LastReportedMark {
-				return fmt.Errorf("%w: reported %d, accepted %d",
-					ErrMarkWentBackwards, report.AppliedMark, *consumer.LastReportedMark)
-			}
-			if _, err := tx.Exec(ctx, recordProgress, report.ConsumerID, report.AppliedMark, at); err != nil {
-				return fmt.Errorf("projection: record progress: %w", err)
-			}
-			return nil
+			return recordProgressIn(ctx, tx, report, at, &consumer)
 		}); err != nil {
 		return Consumer{}, err
 	}
@@ -405,6 +392,24 @@ func (r *Registry) RecordProgress(ctx context.Context, report Progress) (Consume
 	mark, reported := report.AppliedMark, at
 	consumer.LastReportedMark, consumer.LastReportedAt = &mark, &reported
 	return consumer, nil
+}
+
+// recordProgressIn is RecordProgress's transaction body, shared by the provider and consumer paths.
+func recordProgressIn(ctx context.Context, tx db.Tx, report Progress, at time.Time, consumer *Consumer) error {
+	if err := load(ctx, tx, report.ConsumerID, consumer); err != nil {
+		return err
+	}
+	if consumer.SnapshotMark == nil {
+		return fmt.Errorf("%w: %s", ErrNoSnapshotMark, report.ConsumerID)
+	}
+	if consumer.LastReportedMark != nil && report.AppliedMark < *consumer.LastReportedMark {
+		return fmt.Errorf("%w: reported %d, accepted %d",
+			ErrMarkWentBackwards, report.AppliedMark, *consumer.LastReportedMark)
+	}
+	if _, err := tx.Exec(ctx, recordProgress, report.ConsumerID, report.AppliedMark, at); err != nil {
+		return fmt.Errorf("projection: record progress: %w", err)
+	}
+	return nil
 }
 
 // Age reports how long ago the consumer last reported, and whether that exceeds its declared

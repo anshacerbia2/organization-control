@@ -32,7 +32,7 @@ Keycloak only as
 organization-control → canonical event → identity-control → Keycloak Admin API
 ```
 
-## Two runtime roles, deliberately
+## One runtime role per kind of caller, deliberately
 
 The Organization Database is pooled, so isolation is enforced by PostgreSQL as well as
 by the application:
@@ -40,13 +40,17 @@ by the application:
 | Role | Scope | Pool |
 | :-- | :-- | :-- |
 | `organization_rt` | Exactly one Tenant, bound per transaction | Tenant-scoped |
-| `organization_provider_rt` | Deliberately cross-Tenant | Provider, held small |
+| `organization_provider_rt` | Deliberately cross-Tenant | Provider |
+| `organization_consumer_rt` | A registered consumer's own seven routes: reads Memberships and Tenants, writes its own position | Consumer, when consumer authority is configured |
+| `organization_resolution_rt` | Closing and waiving dead letters (TDD-005) | Resolution |
 
-A single role serving both cannot be constrained: any policy permissive enough for
-provider work is permissive enough for a defect in a tenant-scoped path. Separating
-them at the role level makes a cross-tenant read attributable at the connection.
+A single role serving both tenant and provider work cannot be constrained: any policy
+permissive enough for provider work is permissive enough for a defect in a tenant-scoped
+path. Separating them at the role level makes a cross-tenant read attributable at the
+connection. The consumer is the same argument for the other deployable: it ran as the
+provider role, and its credential could do everything the control plane can.
 
-Neither role owns a table, holds `SUPERUSER`, holds `BYPASSRLS`, or holds any DDL
+No runtime role owns a table, holds `SUPERUSER`, holds `BYPASSRLS`, or holds any DDL
 privilege. Row-Level Security is enabled and forced on every tenant-scoped table, and
 `TDD-organization-control-001` specifies the rest.
 

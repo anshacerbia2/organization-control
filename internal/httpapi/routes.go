@@ -54,6 +54,19 @@ type Services struct {
 	Replayer      *projection.Replayer
 	Resolver      *projection.Resolver
 	Contexts      *occontext.Service
+
+	// Consumer serves a registered consumer acting as itself, as organization_consumer_rt. Nil only
+	// when consumer authority is not configured, in which case authentication admits no consumer
+	// caller for it to serve.
+	Consumer *ConsumerServices
+}
+
+// ConsumerServices are the consumer's seven routes on the consumer pool. The provider services
+// above serve the same routes for a provider acting on a consumer's behalf.
+type ConsumerServices struct {
+	Access   *projection.ConsumerAccess
+	Checks   *occontext.ConsumerChecks
+	Frontier *projection.FrontierReader
 }
 
 // RoutesConfig supplies what the surface needs.
@@ -259,6 +272,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the dead-letter resolver is required")
 	case s.Contexts == nil:
 		return errors.New("httpapi: the context service is required")
+	case s.Consumer != nil && (s.Consumer.Access == nil || s.Consumer.Checks == nil || s.Consumer.Frontier == nil):
+		return errors.New("httpapi: the consumer services are incomplete")
 	}
 	return nil
 }

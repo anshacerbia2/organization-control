@@ -148,93 +148,111 @@ LIMIT $2`
 // and a Membership committing between them would be absent from the rows while the mark claimed
 // its event was already represented — the one outcome the bootstrap contract exists to prevent.
 func (p *Publisher) Snapshot(ctx context.Context, req SnapshotRequest) (Page, error) {
+	size, page, err := startPage(req, p.now())
+	if err != nil {
+		return Page{}, err
+	}
+	if err := db.WithProviderSnapshot(ctx, p.pool,
+		"projection snapshot for "+req.ConsumerID,
+		func(ctx context.Context, tx db.Tx) error {
+			return snapshotIn(ctx, tx, req, size, &page)
+		}); err != nil {
+		return Page{}, err
+	}
+	return endPage(page, size), nil
+}
+
+// startPage validates a snapshot request and returns the page size and the page to fill.
+func startPage(req SnapshotRequest, now time.Time) (int, Page, error) {
 	size := req.PageSize
 	if size == 0 {
 		size = DefaultPageSize
 	}
 	if size < 0 || size > MaxPageSize {
-		return Page{}, fmt.Errorf("%w: %d is not between 1 and %d", ErrPageSize, size, MaxPageSize)
+		return 0, Page{}, fmt.Errorf("%w: %d is not between 1 and %d", ErrPageSize, size, MaxPageSize)
 	}
 	if req.Cursor != "" {
 		if _, err := id.Parse(req.Cursor); err != nil {
-			return Page{}, fmt.Errorf("%w: %v", ErrCursor, err)
+			return 0, Page{}, fmt.Errorf("%w: %v", ErrCursor, err)
 		}
 		if req.Mark == nil {
-			return Page{}, fmt.Errorf("%w: continuing a snapshot requires its high-water mark", ErrCursor)
+			return 0, Page{}, fmt.Errorf("%w: continuing a snapshot requires its high-water mark", ErrCursor)
 		}
 		if *req.Mark < 0 {
-			return Page{}, fmt.Errorf("%w: a high-water mark cannot be negative", ErrCursor)
+			return 0, Page{}, fmt.Errorf("%w: a high-water mark cannot be negative", ErrCursor)
 		}
 	}
 
-	page := Page{TakenAt: p.now().UTC()}
+	page := Page{TakenAt: now.UTC()}
 	if req.Mark != nil {
 		page.HighWaterMark = *req.Mark
 	}
+	return size, page, nil
+}
 
-	if err := db.WithProviderSnapshot(ctx, p.pool,
-		"projection snapshot for "+req.ConsumerID,
-		func(ctx context.Context, tx db.Tx) error {
-			// The registration check runs inside the snapshot transaction. Checked before it, a
-			// consumer deregistered in between would still be served a page.
-			var consumer Consumer
-			if err := load(ctx, tx, req.ConsumerID, &consumer); err != nil {
-				return err
-			}
-
-			if req.Cursor == "" {
-				if err := tx.QueryRow(ctx, markStatement).Scan(&page.HighWaterMark); err != nil {
-					return fmt.Errorf("projection: read high-water mark: %w", err)
-				}
-			}
-
-			rows, err := tx.Query(ctx, selectRows, req.Cursor, size)
-			if err != nil {
-				return fmt.Errorf("projection: read rows: %w", err)
-			}
-			defer rows.Close()
-
-			for rows.Next() {
-				var (
-					row                                    Row
-					rawMembership, rawPrincipal, rawTenant string
-					rawWorkspace                           string
-				)
-				if err := rows.Scan(&rawMembership, &rawPrincipal, &rawTenant, &rawWorkspace,
-					&row.SubjectType, &row.MembershipStatus, &row.MembershipVersion,
-					&row.TenantStatus, &row.TenantSecurityVersion); err != nil {
-					return fmt.Errorf("projection: scan row: %w", err)
-				}
-				if row.MembershipID, err = id.Parse(rawMembership); err != nil {
-					return fmt.Errorf("projection: stored membership id %q: %w", rawMembership, err)
-				}
-				if row.PrincipalID, err = id.Parse(rawPrincipal); err != nil {
-					return fmt.Errorf("projection: stored principal id %q: %w", rawPrincipal, err)
-				}
-				if row.TenantID, err = id.Parse(rawTenant); err != nil {
-					return fmt.Errorf("projection: stored tenant id %q: %w", rawTenant, err)
-				}
-				if rawWorkspace != "" {
-					workspace, err := id.Parse(rawWorkspace)
-					if err != nil {
-						return fmt.Errorf("projection: stored workspace id %q: %w", rawWorkspace, err)
-					}
-					row.WorkspaceID = &workspace
-				}
-				page.Rows = append(page.Rows, row)
-			}
-			return rows.Err()
-		}); err != nil {
-		return Page{}, err
+// snapshotIn is Snapshot's transaction body, shared by the provider and consumer paths.
+func snapshotIn(ctx context.Context, tx db.Tx, req SnapshotRequest, size int, page *Page) error {
+	// The registration check runs inside the snapshot transaction. Checked before it, a
+	// consumer deregistered in between would still be served a page.
+	var consumer Consumer
+	if err := load(ctx, tx, req.ConsumerID, &consumer); err != nil {
+		return err
 	}
 
-	// A full page means there may be more. A short page ends the snapshot, and so does a full page
-	// whose successor turns out to be empty — which costs one extra request and avoids reporting
-	// "no more rows" from a count that a concurrent snapshot could make wrong.
+	if req.Cursor == "" {
+		if err := tx.QueryRow(ctx, markStatement).Scan(&page.HighWaterMark); err != nil {
+			return fmt.Errorf("projection: read high-water mark: %w", err)
+		}
+	}
+
+	rows, err := tx.Query(ctx, selectRows, req.Cursor, size)
+	if err != nil {
+		return fmt.Errorf("projection: read rows: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			row                                    Row
+			rawMembership, rawPrincipal, rawTenant string
+			rawWorkspace                           string
+		)
+		if err := rows.Scan(&rawMembership, &rawPrincipal, &rawTenant, &rawWorkspace,
+			&row.SubjectType, &row.MembershipStatus, &row.MembershipVersion,
+			&row.TenantStatus, &row.TenantSecurityVersion); err != nil {
+			return fmt.Errorf("projection: scan row: %w", err)
+		}
+		if row.MembershipID, err = id.Parse(rawMembership); err != nil {
+			return fmt.Errorf("projection: stored membership id %q: %w", rawMembership, err)
+		}
+		if row.PrincipalID, err = id.Parse(rawPrincipal); err != nil {
+			return fmt.Errorf("projection: stored principal id %q: %w", rawPrincipal, err)
+		}
+		if row.TenantID, err = id.Parse(rawTenant); err != nil {
+			return fmt.Errorf("projection: stored tenant id %q: %w", rawTenant, err)
+		}
+		if rawWorkspace != "" {
+			workspace, err := id.Parse(rawWorkspace)
+			if err != nil {
+				return fmt.Errorf("projection: stored workspace id %q: %w", rawWorkspace, err)
+			}
+			row.WorkspaceID = &workspace
+		}
+		page.Rows = append(page.Rows, row)
+	}
+	return rows.Err()
+}
+
+// endPage sets the continuation cursor.
+//
+// A full page means there may be more. A short page ends the snapshot, and so does a full page
+// whose successor turns out to be empty — which costs one extra request and avoids reporting
+// "no more rows" from a count that a concurrent snapshot could make wrong.
+func endPage(page Page, size int) Page {
 	if len(page.Rows) == size {
 		page.Cursor = page.Rows[len(page.Rows)-1].MembershipID.String()
 	}
-	return page, nil
+	return page
 }
 
 // Bootstrap records the mark a consumer is bootstrapping from, which is what later permits its
@@ -252,20 +270,7 @@ func (p *Publisher) Bootstrap(ctx context.Context, consumerID string, mark int64
 	if err := db.WithProviderScope(ctx, p.pool,
 		"record projection bootstrap for "+consumerID,
 		func(ctx context.Context, tx db.Tx) error {
-			if err := load(ctx, tx, consumerID, &consumer); err != nil {
-				return err
-			}
-			// A re-bootstrap is permitted and must move the mark forward only. A lower mark would
-			// claim the consumer rebuilt from an older instant than one it already reported
-			// progress against, which no sequence of correct operations produces.
-			if consumer.SnapshotMark != nil && mark < *consumer.SnapshotMark {
-				return fmt.Errorf("%w: bootstrapping at %d below the recorded %d",
-					ErrMarkWentBackwards, mark, *consumer.SnapshotMark)
-			}
-			if _, err := tx.Exec(ctx, recordSnapshotMark, consumerID, mark); err != nil {
-				return fmt.Errorf("projection: record snapshot mark: %w", err)
-			}
-			return nil
+			return bootstrapIn(ctx, tx, consumerID, mark, &consumer)
 		}); err != nil {
 		return Consumer{}, err
 	}
@@ -273,4 +278,22 @@ func (p *Publisher) Bootstrap(ctx context.Context, consumerID string, mark int64
 	recorded := mark
 	consumer.SnapshotMark = &recorded
 	return consumer, nil
+}
+
+// bootstrapIn is Bootstrap's transaction body, shared by the provider and consumer paths.
+func bootstrapIn(ctx context.Context, tx db.Tx, consumerID string, mark int64, consumer *Consumer) error {
+	if err := load(ctx, tx, consumerID, consumer); err != nil {
+		return err
+	}
+	// A re-bootstrap is permitted and must move the mark forward only. A lower mark would
+	// claim the consumer rebuilt from an older instant than one it already reported
+	// progress against, which no sequence of correct operations produces.
+	if consumer.SnapshotMark != nil && mark < *consumer.SnapshotMark {
+		return fmt.Errorf("%w: bootstrapping at %d below the recorded %d",
+			ErrMarkWentBackwards, mark, *consumer.SnapshotMark)
+	}
+	if _, err := tx.Exec(ctx, recordSnapshotMark, consumerID, mark); err != nil {
+		return fmt.Errorf("projection: record snapshot mark: %w", err)
+	}
+	return nil
 }

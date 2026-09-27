@@ -211,8 +211,21 @@ func (v *verifier) plan(ctx context.Context, tx fdb.Tx, role, sql string) (map[R
 		if _, rollback := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT grantcheck_plan"); rollback != nil {
 			return nil, "", fmt.Errorf("rolling back after %v: %w", err, rollback)
 		}
-		// PREPARE is not transactional: a statement prepared before the refusal survives it.
-		_, _ = tx.Exec(ctx, "DEALLOCATE "+name)
+		// PREPARE is not transactional: a statement prepared before the refusal survives it. Only
+		// then is it deallocated. DEALLOCATE of a name that was never prepared is itself an error,
+		// which aborted the transaction: the refusal was reported as planned, and the commit that
+		// followed rolled back. No statement had been refused before organization_consumer_rt, so
+		// nothing had exercised this path.
+		var prepared bool
+		if readErr := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_prepared_statements WHERE name = $1)`,
+			name).Scan(&prepared); readErr != nil {
+			return nil, "", fmt.Errorf("reading prepared statements after %v: %w", err, readErr)
+		}
+		if prepared {
+			if _, err := tx.Exec(ctx, "DEALLOCATE "+name); err != nil {
+				return nil, "", err
+			}
+		}
 		if isPrivilegeRefusal(err) {
 			return nil, err.Error(), nil
 		}

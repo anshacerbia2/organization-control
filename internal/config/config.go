@@ -84,6 +84,11 @@ type Config struct {
 	ConsumerRole  string
 	ConsumerClaim string
 
+	// ConsumerDSN is the consumer's own credential, a login role inheriting organization_consumer_rt.
+	// Required exactly when consumer authority is configured, and never another pool's: a consumer
+	// on the provider credential could read and write every table the control plane can.
+	ConsumerDSN string
+
 	// The three provisioning bounds of TDD-organization-control-003 §Configuration.
 	//
 	// ProvisioningTimeout is the age at which a request with no realized status becomes
@@ -175,6 +180,22 @@ func Load() (Config, error) {
 	if (cfg.ConsumerRole == "") != (cfg.ConsumerClaim == "") {
 		problems = append(problems, errors.New(
 			"ORGANIZATION_CONSUMER_ROLE and ORGANIZATION_CONSUMER_CLAIM must be set together or not at all"))
+	}
+	cfg.ConsumerDSN = strings.TrimSpace(os.Getenv("ORGANIZATION_CONSUMER_DATABASE_URL"))
+	switch {
+	case cfg.ConsumerRole != "" && cfg.ConsumerDSN == "":
+		// Not defaulted to the provider credential: that fallback is the over-privilege this
+		// credential exists to remove, and nothing would report it.
+		problems = append(problems, errors.New(
+			"ORGANIZATION_CONSUMER_DATABASE_URL is required when ORGANIZATION_CONSUMER_ROLE is set"))
+	case cfg.ConsumerRole == "" && cfg.ConsumerDSN != "":
+		problems = append(problems, errors.New(
+			"ORGANIZATION_CONSUMER_DATABASE_URL is set but consumer authority is not; no caller could use it"))
+	case cfg.ConsumerDSN != "" && (cfg.ConsumerDSN == cfg.ProviderDSN ||
+		cfg.ConsumerDSN == cfg.TenantDSN || cfg.ConsumerDSN == cfg.ResolutionDSN):
+		problems = append(problems, errors.New(
+			"ORGANIZATION_CONSUMER_DATABASE_URL matches another pool's DSN, so a consumer would run "+
+				"with that pool's privileges rather than its own"))
 	}
 
 	cfg.ListenAddress = stringOr("ORGANIZATION_LISTEN_ADDRESS", ":8080")

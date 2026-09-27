@@ -169,6 +169,22 @@ WHERE consumer_id = $1`
 // to contend on its own counter row is exactly the consumer this signal exists to flag, and the
 // contention is confined to it rather than shared with the estate.
 func (s *Service) Verify(ctx stdcontext.Context, req VerifyRequest) (Decision, error) {
+	decision, err := startDecision(req, s.now())
+	if err != nil {
+		return Decision{}, err
+	}
+	if err := db.WithProviderScope(ctx, s.pool,
+		"authoritative context check for consumer "+req.ConsumerID,
+		func(ctx stdcontext.Context, tx db.Tx) error {
+			return verifyIn(ctx, tx, req, &decision)
+		}); err != nil {
+		return Decision{}, err
+	}
+	return decision, nil
+}
+
+// startDecision validates a check and returns the decision to fill.
+func startDecision(req VerifyRequest, now time.Time) (Decision, error) {
 	switch {
 	case req.ConsumerID == "":
 		return Decision{}, fmt.Errorf("%w: a consumer identifier is required", ErrInvalid)
@@ -177,81 +193,112 @@ func (s *Service) Verify(ctx stdcontext.Context, req VerifyRequest) (Decision, e
 	case req.PrincipalID.IsNil():
 		return Decision{}, fmt.Errorf("%w: a principal identifier is required", ErrInvalid)
 	}
-
-	decision := Decision{
+	return Decision{
 		TenantID:    req.TenantID,
 		PrincipalID: req.PrincipalID,
-		CheckedAt:   s.now().UTC(),
+		CheckedAt:   now.UTC(),
+	}, nil
+}
+
+// verifyIn is Verify's transaction body, shared by the provider and consumer paths.
+func verifyIn(ctx stdcontext.Context, tx db.Tx, req VerifyRequest, decision *Decision) error {
+	tag, err := tx.Exec(ctx, countVerify, req.ConsumerID)
+	if err != nil {
+		return fmt.Errorf("context: meter verify call: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", ErrNotRegistered, req.ConsumerID)
 	}
 
-	if err := db.WithProviderScope(ctx, s.pool,
-		"authoritative context check for consumer "+req.ConsumerID,
+	var (
+		tenantStatus                             string
+		rawMembership, rawWorkspace, subjectType *string
+		membershipStatus                         *string
+		membershipVersion                        *int64
+	)
+	if err := tx.QueryRow(ctx, verifyStatement,
+		req.TenantID.String(), req.PrincipalID.String()).Scan(
+		&tenantStatus, &decision.TenantSecurityVersion,
+		&rawMembership, &rawWorkspace, &subjectType,
+		&membershipStatus, &membershipVersion); err != nil {
+		// An absent Tenant and an absent Membership are one answer to the caller: this
+		// context cannot be asserted. Naming which would tell an unauthorised caller
+		// whether a Tenant identifier exists.
+		decision.Refusal = RefusalNoMembership
+		return nil
+	}
+
+	if rawMembership == nil {
+		// No active Membership. Whether a suspended or revoked one exists is deliberately
+		// not probed: the answer is the same and the extra query would disclose that this
+		// Principal once held access.
+		decision.Refusal = RefusalNoMembership
+		return nil
+	}
+	if tenantStatus != "active" {
+		// Checked after the Membership so a caller cannot use the refusal to discover
+		// which Tenants exist and what state they are in without holding a Membership.
+		decision.Refusal = RefusalTenantNotActive
+		return nil
+	}
+
+	membershipID, err := id.Parse(*rawMembership)
+	if err != nil {
+		return fmt.Errorf("context: stored membership id %q: %w", *rawMembership, err)
+	}
+	decision.MembershipID = membershipID
+	if rawWorkspace != nil && *rawWorkspace != "" {
+		workspace, err := id.Parse(*rawWorkspace)
+		if err != nil {
+			return fmt.Errorf("context: stored workspace id %q: %w", *rawWorkspace, err)
+		}
+		decision.WorkspaceID = &workspace
+	}
+	if subjectType != nil {
+		decision.SubjectType = *subjectType
+	}
+	if membershipVersion != nil {
+		decision.MembershipVersion = *membershipVersion
+	}
+	decision.Granted = true
+	return nil
+}
+
+// ConsumerChecks is a registered consumer's own fresh check, as organization_consumer_rt. The same
+// check as Service.Verify, on the consumer pool; see projection.ConsumerAccess for why it is a second
+// entry point rather than a pool chosen at run time.
+type ConsumerChecks struct {
+	pool *db.ConsumerPool
+	now  func() time.Time
+}
+
+// NewConsumerChecks constructs the consumer's fresh check.
+func NewConsumerChecks(pool *db.ConsumerPool) (*ConsumerChecks, error) {
+	if pool == nil {
+		return nil, errors.New("context: a consumer pool is required")
+	}
+	return &ConsumerChecks{pool: pool, now: time.Now}, nil
+}
+
+// Verify answers the consumer's own check and meters it. See Service.Verify.
+func (c *ConsumerChecks) Verify(ctx stdcontext.Context, req VerifyRequest) (Decision, error) {
+	decision, err := startDecision(req, c.now())
+	if err != nil {
+		return Decision{}, err
+	}
+	if err := db.WithConsumerScope(ctx, c.pool,
+		"authoritative context check by consumer "+req.ConsumerID,
 		func(ctx stdcontext.Context, tx db.Tx) error {
-			tag, err := tx.Exec(ctx, countVerify, req.ConsumerID)
-			if err != nil {
-				return fmt.Errorf("context: meter verify call: %w", err)
-			}
-			if tag.RowsAffected() == 0 {
-				return fmt.Errorf("%w: %s", ErrNotRegistered, req.ConsumerID)
-			}
-
-			var (
-				tenantStatus                             string
-				rawMembership, rawWorkspace, subjectType *string
-				membershipStatus                         *string
-				membershipVersion                        *int64
-			)
-			if err := tx.QueryRow(ctx, verifyStatement,
-				req.TenantID.String(), req.PrincipalID.String()).Scan(
-				&tenantStatus, &decision.TenantSecurityVersion,
-				&rawMembership, &rawWorkspace, &subjectType,
-				&membershipStatus, &membershipVersion); err != nil {
-				// An absent Tenant and an absent Membership are one answer to the caller: this
-				// context cannot be asserted. Naming which would tell an unauthorised caller
-				// whether a Tenant identifier exists.
-				decision.Refusal = RefusalNoMembership
-				return nil
-			}
-
-			if rawMembership == nil {
-				// No active Membership. Whether a suspended or revoked one exists is deliberately
-				// not probed: the answer is the same and the extra query would disclose that this
-				// Principal once held access.
-				decision.Refusal = RefusalNoMembership
-				return nil
-			}
-			if tenantStatus != "active" {
-				// Checked after the Membership so a caller cannot use the refusal to discover
-				// which Tenants exist and what state they are in without holding a Membership.
-				decision.Refusal = RefusalTenantNotActive
-				return nil
-			}
-
-			membershipID, err := id.Parse(*rawMembership)
-			if err != nil {
-				return fmt.Errorf("context: stored membership id %q: %w", *rawMembership, err)
-			}
-			decision.MembershipID = membershipID
-			if rawWorkspace != nil && *rawWorkspace != "" {
-				workspace, err := id.Parse(*rawWorkspace)
-				if err != nil {
-					return fmt.Errorf("context: stored workspace id %q: %w", *rawWorkspace, err)
-				}
-				decision.WorkspaceID = &workspace
-			}
-			if subjectType != nil {
-				decision.SubjectType = *subjectType
-			}
-			if membershipVersion != nil {
-				decision.MembershipVersion = *membershipVersion
-			}
-			decision.Granted = true
-			return nil
+			return verifyIn(ctx, tx, req, &decision)
 		}); err != nil {
 		return Decision{}, err
 	}
-
 	return decision, nil
+}
+
+// SwitchEligible is Verify, for the reason Service.SwitchEligible gives.
+func (c *ConsumerChecks) SwitchEligible(ctx stdcontext.Context, req VerifyRequest) (Decision, error) {
+	return c.Verify(ctx, req)
 }
 
 // SwitchEligible reports whether a Principal may switch into a Tenant context.

@@ -84,6 +84,7 @@ jobs:
       # in another, and nothing linking the two.
       TEST_DISPATCH_PASSWORD: dispatch
       TEST_RESOLUTION_PASSWORD: resolution
+      TEST_CONSUMER_PASSWORD: consumer
       # Turns a skipped isolation suite into a failure. Without it, a service container that
       # never came up would leave every cross-tenant assertion unrun and the build green, which
       # is indistinguishable from having proven isolation.
@@ -195,6 +196,7 @@ jobs:
             -v provider_password=provider \
             -v dispatch_password=dispatch \
             -v resolution_password=resolution \
+            -v consumer_password=consumer \
             -f scripts/ci-fixture.sql \
             -d "$TEST_DATABASE_URL"
         env:
@@ -433,6 +435,7 @@ jobs:
       TEST_PROVIDER_PASSWORD: provider
       TEST_DISPATCH_PASSWORD: dispatch
       TEST_RESOLUTION_PASSWORD: resolution
+      TEST_CONSUMER_PASSWORD: consumer
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

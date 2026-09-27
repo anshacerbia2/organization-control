@@ -44,12 +44,13 @@ const (
 	tenantRole     = "organization_rt"
 	providerRole   = "organization_provider_rt"
 	resolutionRole = "organization_resolution_rt"
+	consumerRole   = "organization_consumer_rt"
 )
 
 // Roles are the runtime roles whose privileges this tool derives. organization_dispatch_rt is
 // absent on purpose: the dispatcher's statements live in foundation-platform and run in
 // foundation-reference, so no code path in this repository exercises that role.
-var Roles = []string{tenantRole, providerRole, resolutionRole}
+var Roles = []string{tenantRole, providerRole, resolutionRole, consumerRole}
 
 // wrappers are the scope entry points, by SSA function name, and the role their pool connects as.
 var wrappers = map[string]string{
@@ -57,6 +58,8 @@ var wrappers = map[string]string{
 	dbPkg + ".WithProviderScope":    providerRole,
 	dbPkg + ".WithProviderSnapshot": providerRole,
 	dbPkg + ".WithResolutionScope":  resolutionRole,
+	dbPkg + ".WithConsumerScope":    consumerRole,
+	dbPkg + ".WithConsumerSnapshot": consumerRole,
 }
 
 // wrapperInternals are the unexported helpers the wrappers share. They forward the body as a
@@ -66,16 +69,18 @@ var wrapperInternals = map[string]bool{
 	dbPkg + ".withRecordedScope": true,
 }
 
-// boundaries own a raw transaction on a Transactor the composition root chose. The role is what
+// boundaries own a raw transaction on a Transactor the composition root chose. The roles are what
 // cmd/organization-control/main.go hands each one; a change there must change this table, and
-// TDD-organization-control-001 §Grant derivation says so.
-var boundaries = map[string]string{
+// TDD-organization-control-001 §Grant derivation says so. A boundary built on two roles'
+// connections lists both, and each is granted what it needs.
+var boundaries = map[string][]string{
 	// access.New(providerConns)
-	"(*" + module + "/internal/access.Recorder).RecordProviderAccess": providerRole,
+	"(*" + module + "/internal/access.Recorder).RecordProviderAccess": {providerRole},
 	// db.NewClaimStore(tenantConns)
-	"(*" + dbPkg + ".ClaimStore).Complete": tenantRole,
-	// projection.NewFrontierReader(providerConns)
-	"(*" + module + "/internal/projection.FrontierReader).FrontierFor": providerRole,
+	"(*" + dbPkg + ".ClaimStore).Complete": {tenantRole},
+	// projection.NewFrontierReader(providerConns), and NewFrontierReader(consumerConns) for a
+	// registered consumer reading its own frontier.
+	"(*" + module + "/internal/projection.FrontierReader).FrontierFor": {providerRole, consumerRole},
 }
 
 // Statement is one SQL constant and where it was reached.
@@ -168,9 +173,11 @@ func derive(dir string, patterns ...string) (*Derivation, error) {
 			roots = append(roots, root{role, fn})
 		}
 	}
-	for name, role := range boundaries {
+	for name, roles := range boundaries {
 		if fn := byName[name]; fn != nil {
-			roots = append(roots, root{role, fn})
+			for _, role := range roles {
+				roots = append(roots, root{role, fn})
+			}
 		}
 	}
 
@@ -268,7 +275,18 @@ func walk(fset *token.FileSet, graph *callgraph.Graph, role string, start *ssa.F
 				if edge.Site != call || edge.Callee.Func == nil {
 					continue
 				}
-				if callee := edge.Callee.Func; !bodies[callee] {
+				callee := edge.Callee.Func
+				// A boundary or wrapper reached through an interface or a function value is still
+				// its own root on its own connection. The static check above only sees direct calls,
+				// and the wrappers call the recorder through an interface: without this, every
+				// recorded scope's role was attributed the recorder's INSERT.
+				if _, ok := boundaries[callee.String()]; ok {
+					continue
+				}
+				if _, ok := wrappers[callee.String()]; ok {
+					continue
+				}
+				if !bodies[callee] {
 					queue = append(queue, callee)
 				}
 			}
