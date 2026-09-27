@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 1.5.0
+  version: 1.6.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -517,6 +517,21 @@ Two states remain that neither reason closes except by `REPLAYED`:
 consumer. It no longer blocks the active consumer (§Scope), and it is waived rather than closed
 (§WAIVED).
 
+**A dead letter with no closure path at all is refused at deploy.** Rows written by older
+platform versions can lack everything a closure needs:
+
+- no `aggregate_id` or `priority`, from before foundation-platform v0.2.3, so it cannot replay
+  itself;
+- no history row, so it cannot be superseded;
+- no `consumer`, from before v0.2.8, or the active consumer's name, so it cannot be waived.
+
+An authority-bearing row with all three would refuse every projection-backed check forever.
+`organization-migrate -stage=post` lists such rows after the isolation check
+(`controldb.UnclosableDeadLetters`, with `projection.AuthorityEventTypes`), logs each
+`event_id`, and fails. Nothing is in production, so the expected count is zero; the stage asserts
+that rather than assuming it. No sanctioned closure was defined for these rows: one would be a way
+to declare authority delivered without evidence, the one thing this design refuses.
+
 ## Configuration
 
 | Setting | Effect |
@@ -551,6 +566,7 @@ test red, not assumed to.
 | The resolution role cannot insert, renumber, or erase Membership history | same file: `TestTheResolutionRoleCannotRewriteMembershipHistory` |
 | A Tenant event closes as `SUPERSEDED` on a newer applied one for the same Tenant, and an older one never supersedes it. A mutation replacing the version comparison was observed turning it red | `internal/projection/superseded_tenant_integration_test.go` `TestATenantEventClosesAsSupersededOnANewerAppliedOne`, `TestAnOlderTenantEventDoesNotSupersedeANewerOne` |
 | The resolution role reads Tenant history and cannot insert, renumber, or erase it | same file: `TestTheResolutionRoleCannotRewriteTenantHistory` |
+| The post stage names exactly the dead letters no resolution can close: unreplayable, unversioned, and unattributed or the active consumer's. It does not name a waivable, replayable, versioned or non-authority row. A mutation dropping the replayability condition was observed turning it red | `internal/controldb/unclosable_integration_test.go` `TestThePostStageNamesOnlyDeadLettersNoResolutionCanClose` |
 | Every published Tenant event has a history row that agrees with it, and a rolled-back transition leaves none | `internal/tenant/service_integration_test.go` `TestEveryPublishedTenantEventRecordsItsSecurityVersion` |
 | The frontier counts every type the Membership and Tenant state machines publish, and nothing else | `internal/httpapi/frontier_debt_test.go` `TestTheFrontierDebtCoversEveryAuthorityEvent` |
 | A retired consumer's incident is waived and stays open: `resolved_at` stays null, the estate frontier still reports the debt, the active consumer is not charged with it, and no closure record is filed | `internal/projection/waive_integration_test.go` `TestARetiredConsumersIncidentIsWaivedAndStaysOpen` |
