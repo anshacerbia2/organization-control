@@ -125,6 +125,15 @@ func requireProvider(w http.ResponseWriter, r *http.Request) (db.Scope, bool) {
 			"This route requires provider authority, and the caller is scoped to a single Tenant")
 		return db.Scope{}, false
 	}
+	// A registered consumer resolves to the provider scope, because it reads across Tenants, and
+	// that scope is not provider authority. Checking the scope alone admitted a consumer token that
+	// added a reason header to every provider route: suspending a Tenant, retiring an Organization,
+	// closing or waiving a dead letter. The authority is the caller's, so it is read from the caller.
+	if caller, ok := CallerFrom(r.Context()); !ok || !caller.Provider {
+		platform.Problem(w, r, platform.Forbidden,
+			"This route requires provider authority, and a registered consumer does not hold it")
+		return db.Scope{}, false
+	}
 	if strings.TrimSpace(r.Header.Get(ReasonHeader)) == "" {
 		// Checked here as well as in db, so the caller is told which header is missing rather than
 		// receiving the domain's phrasing for a transport-level omission.
@@ -169,7 +178,7 @@ func requireConsumerSelfOrProvider(w http.ResponseWriter, r *http.Request, reque
 		return scope, caller.Consumer, true
 	}
 
-	if !scope.IsProvider() {
+	if !scope.IsProvider() || !caller.Provider {
 		platform.Problem(w, r, platform.Forbidden,
 			"This route requires provider authority or a registered consumer, and the caller is scoped to a single Tenant")
 		return db.Scope{}, "", false

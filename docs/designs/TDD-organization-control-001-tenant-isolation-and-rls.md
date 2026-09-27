@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.3.0
+  version: 1.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -263,6 +263,10 @@ resolve(request):
     actor    := authenticated principal and administrative context
     requested := tenant identifier carried by the request, if any
 
+    if actor is a registered projection consumer:
+        refuse if it also carries provider authority or a Tenant
+        return ProviderScope                  -- it reads across Tenants; see below
+
     if actor holds provider administrative scope for this operation:
         require reason and correlation identifier
         emit privileged-administration event
@@ -278,6 +282,23 @@ resolve(request):
 Refusing before the transaction opens matters: it keeps a cross-tenant attempt out of
 the database entirely, so the RLS layer stays a compensating control rather than the
 first line of defence.
+
+**The scope is not the authority.** A registered consumer receives the provider scope because
+the routes it calls read across Tenants. It does not receive provider authority.
+
+- A consumer may call only its own seven routes:
+  - its consumer record, progress, and bootstrap;
+  - the snapshot;
+  - the frontier;
+  - the two context checks.
+- Each of those routes also checks that the consumer names itself.
+- Every other provider route checks the caller's provider authority, not the scope.
+
+An earlier version checked the scope alone. A consumer token that added
+`X-Administrative-Reason` was then admitted to every provider route: it could suspend a Tenant,
+retire an Organization, or close or waive a dead letter. Found on 2026-09-27, before any
+production deployment. The database role behind the consumer's scope is still the provider's
+(ROADMAP item 17).
 
 ### Grant and Policy Assertion
 
@@ -453,6 +474,10 @@ administrative connection is explicitly not accepted as evidence.
 
 - A request carrying a Tenant identifier that differs from the resolved administrative
   scope is refused with `403` before a transaction opens.
+- A registered consumer carrying `X-Administrative-Reason` is refused with `403` on every API
+  route except its own seven, before a transaction opens. The routes are read from `routes.go`,
+  so a new route is covered without being listed. With the authority check removed, the test
+  reports provider routes answering `400` or `500` instead: the consumer got past authority.
 - Disabling RLS on any protected table fails the build.
 
 ## Security Notes
