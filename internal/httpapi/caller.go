@@ -130,10 +130,10 @@ func resolve(caller Caller, correlation id.UUID) (db.Scope, error) {
 		}
 		// A consumer reads across Tenants -- it asks about whichever Tenant its caller is acting
 		// in -- so the isolation scope it needs is the provider one. That is broader than it
-		// should be, and the narrowing is a database change rather than a transport one: the
-		// fresh check reads two tables and writes one counter, so a role granted exactly those
-		// three privileges would fit. Recorded in ROADMAP.md; what is fixed here is the HTTP
-		// authority, so a consumer token reaches the context routes and nothing else.
+		// should be, and the narrowing is a database change rather than a transport one: a role
+		// holding exactly what the consumer's seven routes need. Recorded in ROADMAP.md item 17. The scope is not the authority:
+		// requireProvider reads Caller.Provider, so a consumer token reaches its own routes and
+		// nothing else.
 		return db.ProviderScope(caller.Subject, correlation)
 	}
 
