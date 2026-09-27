@@ -447,3 +447,47 @@ ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA membership
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA tenant
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_resolution_rt;
 
+-- ---------------------------------------------------------------------------------------------
+-- The consumer role
+-- ---------------------------------------------------------------------------------------------
+--
+-- A registered projection consumer acting on its own records, through seven routes: its registry
+-- row, progress, bootstrap, the snapshot, the frontier, and the two context checks. It ran as the
+-- provider role before this, and so could read and write every table the control plane can.
+-- Every grant below is one tools/grantcheck derives from those routes.
+
+GRANT USAGE ON SCHEMA membership, tenant, projection, platform TO organization_consumer_rt;
+
+-- The snapshot's rows and the fresh check's answer. Read-only; rls.sql gives both the matching
+-- policy. No other business table: not an invitation, an offboarding, an Organization or a
+-- Workspace.
+GRANT SELECT ON membership.membership TO organization_consumer_rt;
+GRANT SELECT ON tenant.tenant TO organization_consumer_rt;
+
+-- Its own registry row: read, and four columns written. The snapshot mark (bootstrap), the
+-- reported position (progress), and the fresh-check meter. Column-level so it cannot change its
+-- declared terms -- max_accepted_age, stale_behavior -- or un-retire itself. Which row is its own is
+-- decided by the transport layer, which admits a consumer only for itself.
+GRANT SELECT ON projection.consumer TO organization_consumer_rt;
+GRANT UPDATE (snapshot_mark, last_reported_mark, last_reported_at, verify_calls_since_report)
+    ON projection.consumer TO organization_consumer_rt;
+
+-- The snapshot's high-water mark and the frontier: outbox positions and unresolved dead letters.
+-- Read-only. A consumer that could write either could forge the facts its own freshness is judged by.
+GRANT SELECT ON platform.outbox TO organization_consumer_rt;
+GRANT SELECT ON platform.dead_letter TO organization_consumer_rt;
+
+-- The idempotency claim, for the reason the resolution role holds it: claimWithin runs inside
+-- every recorded scope, so a keyed request claims its key under this role.
+GRANT SELECT, INSERT ON platform.idempotency_key TO organization_consumer_rt;
+
+-- Nothing inherited: a table added later must be granted deliberately.
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_consumer_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA projection
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_consumer_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA membership
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_consumer_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA tenant
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_consumer_rt;
+

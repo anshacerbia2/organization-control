@@ -50,9 +50,9 @@ import (
 // TestTenantRoleHoldsNothingOnOrganization asserts the grant half.
 var RLSSchemas = []string{"tenant", "workspace", "membership", "invitation", "operation"}
 
-// RuntimeRoles are the two roles that carry traffic. Neither may own a table or hold an attribute
-// that would make a policy inert.
-var RuntimeRoles = []string{"organization_rt", "organization_provider_rt"}
+// RuntimeRoles are the roles that carry request traffic under Row-Level Security. None may own a
+// table or hold an attribute that would make a policy inert.
+var RuntimeRoles = []string{"organization_rt", "organization_provider_rt", "organization_consumer_rt"}
 
 // AdditionalPolicies are the policies a table may carry beyond its tenant-scope and provider-scope
 // pair, by name. Anything else found on a protected table is a problem.
@@ -61,9 +61,15 @@ var RuntimeRoles = []string{"organization_rt", "organization_provider_rt"}
 // (organization_resolution_rt) so that closing an incident cannot be done with the credential that
 // replays one. That role needs a SELECT policy of its own here; the two runtime roles' policies do not
 // name it.
+//
+// membership.membership and tenant.tenant are read by a registered consumer, which runs as its own role
+// (organization_consumer_rt) so that a consumer credential is not the control plane's. Its snapshot
+// and fresh check read both across Tenants, through a SELECT policy of its own on each.
 var AdditionalPolicies = map[string][]string{
 	"membership.membership_event": {"membership_event_resolution_read"},
 	"tenant.tenant_event":         {"tenant_event_resolution_read"},
+	"membership.membership":       {"membership_consumer_read"},
+	"tenant.tenant":               {"tenant_consumer_read"},
 }
 
 // TableProtection is the posture of one table.

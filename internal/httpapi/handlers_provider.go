@@ -664,10 +664,23 @@ func (h *handlers) getConsumer(w http.ResponseWriter, r *http.Request) {
 	// A consumer reading its own record is how it learns its snapshot and reported marks, which is
 	// the input to its own freshness. Provider authority to read that would make every consumer as
 	// privileged as the control plane for a question about itself.
-	if _, _, ok := requireConsumerSelfOrProvider(w, r, r.PathValue("consumer_id")); !ok {
+	scope, _, ok := requireConsumerSelfOrProvider(w, r, r.PathValue("consumer_id"))
+	if !ok {
 		return
 	}
-	record, err := h.services.Registry.Get(r.Context(), r.PathValue("consumer_id"))
+	own, ok := h.consumerServices(w, r, scope)
+	if !ok {
+		return
+	}
+	var (
+		record projection.Consumer
+		err    error
+	)
+	if own != nil {
+		record, err = own.Access.Get(r.Context(), r.PathValue("consumer_id"))
+	} else {
+		record, err = h.services.Registry.Get(r.Context(), r.PathValue("consumer_id"))
+	}
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -680,17 +693,31 @@ type progressRequest struct {
 }
 
 func (h *handlers) recordProgress(w http.ResponseWriter, r *http.Request) {
-	if _, _, ok := requireConsumerSelfOrProvider(w, r, r.PathValue("consumer_id")); !ok {
+	scope, _, ok := requireConsumerSelfOrProvider(w, r, r.PathValue("consumer_id"))
+	if !ok {
+		return
+	}
+	own, ok := h.consumerServices(w, r, scope)
+	if !ok {
 		return
 	}
 	body, ok := decode[progressRequest](w, r)
 	if !ok {
 		return
 	}
-	record, err := h.services.Registry.RecordProgress(r.Context(), projection.Progress{
+	report := projection.Progress{
 		ConsumerID:  r.PathValue("consumer_id"),
 		AppliedMark: body.AppliedMark,
-	})
+	}
+	var (
+		record projection.Consumer
+		err    error
+	)
+	if own != nil {
+		record, err = own.Access.RecordProgress(r.Context(), report)
+	} else {
+		record, err = h.services.Registry.RecordProgress(r.Context(), report)
+	}
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -703,14 +730,27 @@ type bootstrapRequest struct {
 }
 
 func (h *handlers) bootstrapConsumer(w http.ResponseWriter, r *http.Request) {
-	if _, _, ok := requireConsumerSelfOrProvider(w, r, r.PathValue("consumer_id")); !ok {
+	scope, _, ok := requireConsumerSelfOrProvider(w, r, r.PathValue("consumer_id"))
+	if !ok {
+		return
+	}
+	own, ok := h.consumerServices(w, r, scope)
+	if !ok {
 		return
 	}
 	body, ok := decode[bootstrapRequest](w, r)
 	if !ok {
 		return
 	}
-	record, err := h.services.Publisher.Bootstrap(r.Context(), r.PathValue("consumer_id"), body.Mark)
+	var (
+		record projection.Consumer
+		err    error
+	)
+	if own != nil {
+		record, err = own.Access.Bootstrap(r.Context(), r.PathValue("consumer_id"), body.Mark)
+	} else {
+		record, err = h.services.Publisher.Bootstrap(r.Context(), r.PathValue("consumer_id"), body.Mark)
+	}
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -737,15 +777,29 @@ func (h *handlers) snapshot(w http.ResponseWriter, r *http.Request) {
 	// Decoded first because the consumer it names is in the body, and the check is that a consumer
 	// caller named itself. econcile deliberately keeps requireProvider: it reports across every
 	// consumer, so it is an operator action rather than a consumer's own.
-	if _, _, ok := requireConsumerSelfOrProvider(w, r, body.ConsumerID); !ok {
+	scope, _, ok := requireConsumerSelfOrProvider(w, r, body.ConsumerID)
+	if !ok {
 		return
 	}
-	page, err := h.services.Publisher.Snapshot(r.Context(), projection.SnapshotRequest{
+	own, ok := h.consumerServices(w, r, scope)
+	if !ok {
+		return
+	}
+	req := projection.SnapshotRequest{
 		ConsumerID: body.ConsumerID,
 		PageSize:   body.PageSize,
 		Cursor:     body.Cursor,
 		Mark:       body.Mark,
-	})
+	}
+	var (
+		page projection.Page
+		err  error
+	)
+	if own != nil {
+		page, err = own.Access.Snapshot(r.Context(), req)
+	} else {
+		page, err = h.services.Publisher.Snapshot(r.Context(), req)
+	}
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -794,12 +848,20 @@ type frontierResponse struct {
 // operator action.
 func (h *handlers) frontier(w http.ResponseWriter, r *http.Request) {
 	// A consumer reads its own debt; a provider, naming no consumer, reads the estate's.
-	_, consumer, ok := requireConsumerSelfOrProvider(w, r, "")
+	scope, consumer, ok := requireConsumerSelfOrProvider(w, r, "")
+	if !ok {
+		return
+	}
+	own, ok := h.consumerServices(w, r, scope)
 	if !ok {
 		return
 	}
 
-	report, err := h.services.Frontier.FrontierFor(r.Context(), consumer)
+	reader := h.services.Frontier
+	if own != nil {
+		reader = own.Frontier
+	}
+	report, err := reader.FrontierFor(r.Context(), consumer)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -855,13 +917,19 @@ type verifyContextRequest struct {
 }
 
 func (h *handlers) verifyContext(w http.ResponseWriter, r *http.Request) {
-	h.contextCheck(w, r, func(r *http.Request, req occontext.VerifyRequest) (occontext.Decision, error) {
+	h.contextCheck(w, r, func(r *http.Request, own *ConsumerServices, req occontext.VerifyRequest) (occontext.Decision, error) {
+		if own != nil {
+			return own.Checks.Verify(r.Context(), req)
+		}
 		return h.services.Contexts.Verify(r.Context(), req)
 	})
 }
 
 func (h *handlers) switchEligible(w http.ResponseWriter, r *http.Request) {
-	h.contextCheck(w, r, func(r *http.Request, req occontext.VerifyRequest) (occontext.Decision, error) {
+	h.contextCheck(w, r, func(r *http.Request, own *ConsumerServices, req occontext.VerifyRequest) (occontext.Decision, error) {
+		if own != nil {
+			return own.Checks.SwitchEligible(r.Context(), req)
+		}
 		return h.services.Contexts.SwitchEligible(r.Context(), req)
 	})
 }
@@ -873,12 +941,16 @@ func (h *handlers) switchEligible(w http.ResponseWriter, r *http.Request) {
 // indistinguishable, to a client's error handling, from a check that could not be performed — and
 // the two require opposite responses.
 func (h *handlers) contextCheck(w http.ResponseWriter, r *http.Request,
-	apply func(*http.Request, occontext.VerifyRequest) (occontext.Decision, error)) {
+	apply func(*http.Request, *ConsumerServices, occontext.VerifyRequest) (occontext.Decision, error)) {
 	body, ok := decode[verifyContextRequest](w, r)
 	if !ok {
 		return
 	}
-	_, consumer, ok := requireConsumerSelfOrProvider(w, r, body.ConsumerID)
+	scope, consumer, ok := requireConsumerSelfOrProvider(w, r, body.ConsumerID)
+	if !ok {
+		return
+	}
+	own, ok := h.consumerServices(w, r, scope)
 	if !ok {
 		return
 	}
@@ -900,7 +972,7 @@ func (h *handlers) contextCheck(w http.ResponseWriter, r *http.Request,
 		consumerID = consumer
 	}
 
-	decision, err := apply(r, occontext.VerifyRequest{
+	decision, err := apply(r, own, occontext.VerifyRequest{
 		ConsumerID:  consumerID,
 		TenantID:    body.TenantID,
 		PrincipalID: body.PrincipalID,

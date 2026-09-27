@@ -79,7 +79,9 @@ func TestAssertIsolationDetectsEachWeakening(t *testing.T) {
 			name:    "tenant policy dropped",
 			break_:  "DROP POLICY membership_tenant_scope ON membership.membership",
 			restore: tenantPolicyFor("membership", "membership"),
-			expect:  "carries 1 policies",
+			// By name rather than by count: the table also carries the consumer's declared read
+			// policy, so a count would change with every declared addition.
+			expect: "missing [membership_tenant_scope]",
 		},
 		{
 			// Counted, a table with a required policy dropped and an undeclared one added would

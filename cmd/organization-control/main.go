@@ -222,6 +222,42 @@ func run() error {
 		return fmt.Errorf("context service: %w", err)
 	}
 
+	// A registered consumer's own routes, on its own connections and its own role. Built only when
+	// consumer authority is configured, because without it no caller could reach them. The frontier
+	// takes the raw consumer connections for the reason the provider's frontier takes the raw
+	// provider ones.
+	var consumerServices *httpapi.ConsumerServices
+	if cfg.ConsumerRole != "" {
+		consumerConns, err := fdb.Open(ctx, fdb.Config{
+			Name:            "organization-control-consumer",
+			DSN:             cfg.ConsumerDSN,
+			MaxConns:        cfg.DBMaxConns,
+			MaxConnLifetime: cfg.DBMaxConnLifetime,
+			AcquireTimeout:  cfg.DBAcquireTimeout,
+		})
+		if err != nil {
+			return fmt.Errorf("consumer pool: %w", err)
+		}
+		defer consumerConns.Close()
+		consumerPool, err := db.NewConsumerPool(consumerConns, recorder)
+		if err != nil {
+			return fmt.Errorf("consumer scope pool: %w", err)
+		}
+		access, err := projection.NewConsumerAccess(consumerPool)
+		if err != nil {
+			return fmt.Errorf("consumer access: %w", err)
+		}
+		checks, err := occontext.NewConsumerChecks(consumerPool)
+		if err != nil {
+			return fmt.Errorf("consumer checks: %w", err)
+		}
+		consumerFrontier, err := projection.NewFrontierReader(consumerConns)
+		if err != nil {
+			return fmt.Errorf("consumer frontier reader: %w", err)
+		}
+		consumerServices = &httpapi.ConsumerServices{Access: access, Checks: checks, Frontier: consumerFrontier}
+	}
+
 	// Readiness probes the tenant pool. One of the two is enough to answer whether this replica can
 	// serve, and it is the tenant one because that is the pool ordinary traffic uses: a replica
 	// whose tenant pool is unreachable can serve almost nothing, while one whose provider pool is
@@ -234,6 +270,7 @@ func run() error {
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 			Replayer: replayer, Resolver: resolver,
 			Frontier: frontier,
+			Consumer: consumerServices,
 		},
 		Database:         tenantConns,
 		Telemetry:        telemetry,

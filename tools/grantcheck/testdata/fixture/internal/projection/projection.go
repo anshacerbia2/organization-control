@@ -106,6 +106,36 @@ func (r *Rogue) Do(ctx context.Context) error {
 	})
 }
 
+const (
+	selectConsumer    = `SELECT consumer_id FROM projection.consumer WHERE consumer_id = $1`
+	registerStatement = `INSERT INTO projection.consumer (consumer_id) VALUES ($1)`
+)
+
+// loadConsumer is a body helper both a provider and a consumer path call, as the real registry's
+// load is. Its statement belongs to both roles.
+func loadConsumer(ctx context.Context, tx db.Tx) error {
+	return tx.QueryRow(ctx, selectConsumer, "").Scan()
+}
+
+// Register is provider-only. Its INSERT must not be attributed to the consumer role, although the
+// consumer path calls the same helper.
+func Register(ctx context.Context, pool *db.ProviderPool) error {
+	return db.WithProviderScope(ctx, pool, "register", func(ctx context.Context, tx db.Tx) error {
+		if err := loadConsumer(ctx, tx); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, registerStatement, "")
+		return err
+	})
+}
+
+// OwnRecord is a consumer reading its own row.
+func OwnRecord(ctx context.Context, pool *db.ConsumerPool) error {
+	return db.WithConsumerScope(ctx, pool, "own", func(ctx context.Context, tx db.Tx) error {
+		return loadConsumer(ctx, tx)
+	})
+}
+
 // Freshness reads the frontier from inside a tenant body. The frontier reader owns its own
 // connection, so its statement belongs to its declared role, not to the tenant role around it.
 func Freshness(ctx context.Context, tenant *db.TenantPool, reader *FrontierReader) error {

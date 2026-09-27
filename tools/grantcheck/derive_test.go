@@ -46,6 +46,9 @@ func TestEachStatementIsAttributedToTheRoleThatRunsIt(t *testing.T) {
 		{"a declared boundary", "FROM platform.outbox", providerRole},
 		{"the recorder boundary", "INSERT INTO audit.privileged_access", providerRole},
 		{"the claim store boundary", "UPDATE platform.idempotency_key", tenantRole},
+		{"a helper a consumer body calls", "FROM projection.consumer", consumerRole},
+		{"the same helper from a provider body", "FROM projection.consumer", providerRole},
+		{"a boundary declared for two roles, under the second", "FROM platform.outbox", consumerRole},
 	}
 	for _, c := range cases {
 		if !holds(d, c.role, c.fragment) {
@@ -74,6 +77,15 @@ func TestNoStatementIsAttributedToARoleThatDoesNotRunIt(t *testing.T) {
 		// must not carry one wrapper's bodies into the other's role.
 		{"a resolution body leaking into the provider role", "UPDATE platform.dead_letter", providerRole},
 		{"a provider body leaking into the resolution role", "INSERT INTO tenant.tenant", resolutionRole},
+		// withRecordedScope is shared by the consumer wrapper too. A provider body that calls the
+		// same helper as a consumer body must not carry its own statements into the consumer role.
+		{"a provider body leaking into the consumer role", "INSERT INTO projection.consumer", consumerRole},
+		{"a provider body leaking into the consumer role", "INSERT INTO tenant.tenant", consumerRole},
+		// The wrappers call the recorder through an interface. The recorder is a declared boundary on
+		// its own connection, so reaching it through a dynamic call must stop there as a static call
+		// does. It did not: every recorded scope's role was attributed the recorder's INSERT, which
+		// the provider and resolution roles happen to hold and the consumer role does not.
+		{"the recorder's connection leaking into the consumer role", "INSERT INTO audit.privileged_access", consumerRole},
 	}
 	for _, c := range cases {
 		if holds(d, c.role, c.fragment) {

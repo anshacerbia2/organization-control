@@ -342,6 +342,59 @@ func TestScopeAndPoolMustAgree(t *testing.T) {
 	}
 }
 
+// TestTheConsumerScopeOpensOnlyTheConsumerPool is the same rule for the third scope. A consumer
+// reads across Tenants, and it used to run on the provider pool for that; the provider pool must now
+// refuse it, and the consumer pool must refuse everything else.
+func TestTheConsumerScopeOpensOnlyTheConsumerPool(t *testing.T) {
+	consumerScope, err := db.ConsumerScope(mustUUID(t), mustUUID(t))
+	if err != nil {
+		t.Fatalf("ConsumerScope: %v", err)
+	}
+	providerScope, err := db.ProviderScope(mustUUID(t), mustUUID(t))
+	if err != nil {
+		t.Fatalf("ProviderScope: %v", err)
+	}
+	tenantScope, err := db.TenantScope(mustUUID(t), mustUUID(t), mustUUID(t))
+	if err != nil {
+		t.Fatalf("TenantScope: %v", err)
+	}
+	if consumerScope.IsProvider() || !consumerScope.IsConsumer() {
+		t.Fatal("a consumer scope reports itself as a provider scope")
+	}
+
+	tenantPool, _ := db.NewTenantPool(&fakeTx{})
+	providerPool, _ := db.NewProviderPool(&fakeTx{}, &recorder{})
+	resolutionPool, _ := db.NewResolutionPool(&fakeTx{}, &recorder{})
+	consumerPool, err := db.NewConsumerPool(&fakeTx{}, &recorder{})
+	if err != nil {
+		t.Fatalf("NewConsumerPool: %v", err)
+	}
+	if _, err := db.NewConsumerPool(&fakeTx{}, nil); err == nil {
+		t.Error("a consumer pool was built without a recorder")
+	}
+
+	consumerCtx := db.WithScope(context.Background(), consumerScope)
+	for what, err := range map[string]error{
+		"the provider pool":   db.WithProviderScope(consumerCtx, providerPool, "reason", nil),
+		"a provider snapshot": db.WithProviderSnapshot(consumerCtx, providerPool, "reason", nil),
+		"the resolution pool": db.WithResolutionScope(consumerCtx, resolutionPool, "reason", nil),
+		"the tenant pool":     db.WithTenantScope(consumerCtx, tenantPool, nil),
+	} {
+		if !errors.Is(err, db.ErrWrongScope) {
+			t.Errorf("a consumer scope reached %s: %v", what, err)
+		}
+	}
+	for what, scope := range map[string]db.Scope{"provider": providerScope, "tenant": tenantScope} {
+		ctx := db.WithScope(context.Background(), scope)
+		if err := db.WithConsumerScope(ctx, consumerPool, "reason", nil); !errors.Is(err, db.ErrWrongScope) {
+			t.Errorf("a %s scope reached the consumer pool: %v", what, err)
+		}
+		if err := db.WithConsumerSnapshot(ctx, consumerPool, "reason", nil); !errors.Is(err, db.ErrWrongScope) {
+			t.Errorf("a %s scope reached a consumer snapshot: %v", what, err)
+		}
+	}
+}
+
 // TestEachPoolBindsOnlyItsOwnSetting is the property the two policies depend on.
 //
 // The tenant policy reads app.tenant_id and the provider policy reads app.provider_scope. Binding

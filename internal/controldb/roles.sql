@@ -66,6 +66,14 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_resolution_rt') THEN
         CREATE ROLE organization_resolution_rt NOLOGIN NOSUPERUSER NOCREATEDB NOBYPASSRLS;
     END IF;
+
+    -- The registered projection consumer, acting on its own records: its registry row, its
+    -- snapshot, its progress, the frontier and the fresh check. It ran as the provider role before,
+    -- so a leaked consumer credential was a leaked control plane. It reads Memberships and Tenants
+    -- and writes four columns of its own registry row, and nothing else.
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_consumer_rt') THEN
+        CREATE ROLE organization_consumer_rt NOLOGIN NOSUPERUSER NOCREATEDB NOBYPASSRLS;
+    END IF;
 END
 $$;
 
@@ -83,6 +91,7 @@ ALTER ROLE organization_rt            NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROL
 ALTER ROLE organization_provider_rt   NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 ALTER ROLE organization_dispatch_rt   NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 ALTER ROLE organization_resolution_rt NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+ALTER ROLE organization_consumer_rt   NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 
 -- The schemas are NOT created here. Atlas creates them, and that differs from
 -- identity-control on purpose.

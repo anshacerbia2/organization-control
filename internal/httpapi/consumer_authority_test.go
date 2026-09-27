@@ -132,21 +132,18 @@ func TestConsumerAuthorityIsExclusive(t *testing.T) {
 	}
 }
 
-// TestAConsumerCallerResolvesToAProviderScope records what is not yet fixed, so the debt lives in a
-// test rather than only in a comment.
-//
-// A consumer reads across Tenants, so the isolation scope it receives today is the provider one.
-// The narrowing is a database change: the fresh check reads two tables and writes one counter, so a
-// role granted exactly those three privileges would fit. This assertion states the current truth,
-// and it fails the day the narrowing lands — which is the point.
-func TestAConsumerCallerResolvesToAProviderScope(t *testing.T) {
+// TestAConsumerCallerResolvesToAConsumerScope is the transport half of the narrowing. A consumer
+// reads across Tenants, and it used to receive the provider scope for that, which ran it as the
+// provider role. It now receives a scope of its own, which only the consumer pool opens.
+func TestAConsumerCallerResolvesToAConsumerScope(t *testing.T) {
 	scope, err := resolve(Caller{Subject: mustParse(t, testSubject), Consumer: testConsumerName},
 		mustParse(t, "01a05800-0000-7000-8000-0000000000c1"))
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if !scope.IsProvider() {
-		t.Error("a consumer caller no longer resolves to a provider scope; update this test and ROADMAP.md")
+	if !scope.IsConsumer() || scope.IsProvider() {
+		t.Errorf("a consumer caller resolved to consumer=%v provider=%v, want a consumer scope only",
+			scope.IsConsumer(), scope.IsProvider())
 	}
 }
 

@@ -29,6 +29,24 @@ type ResolutionPool struct {
 	tx       Transactor
 	recorder PrivilegedRecorder
 }
+type ConsumerPool struct {
+	tx       Transactor
+	recorder PrivilegedRecorder
+}
+
+// NewConsumerPool lets the fixture's composition root hand the pool a concrete recorder, as the real
+// one does, so the recorder's type flows into the interface the wrappers call.
+func NewConsumerPool(tx Transactor, recorder PrivilegedRecorder) *ConsumerPool {
+	return &ConsumerPool{tx: tx, recorder: recorder}
+}
+
+func WithConsumerScope(ctx context.Context, pool *ConsumerPool, reason string, fn Body) error {
+	return withRecordedScope(ctx, pool.tx, pool.recorder, fn)
+}
+
+func WithConsumerSnapshot(ctx context.Context, pool *ConsumerPool, reason string, fn Body) error {
+	return withRecordedScope(ctx, pool.tx, pool.recorder, fn)
+}
 
 func WithTenantScope(ctx context.Context, pool *TenantPool, fn Body) error {
 	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
