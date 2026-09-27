@@ -53,6 +53,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/migrations"
 
 	"github.com/anshacerbia2/organization-control/internal/controldb"
+	"github.com/anshacerbia2/organization-control/internal/projection"
 )
 
 const (
@@ -136,8 +137,28 @@ func run(stage string, timeout time.Duration, maintenance controldb.MaintenanceC
 				return err
 			}
 		}
-		return verifyIsolation(ctx, pool, logger)
+		if err := verifyIsolation(ctx, pool, logger); err != nil {
+			return err
+		}
+		return verifyClosable(ctx, pool, logger)
 	}
+}
+
+// verifyClosable refuses a database holding a dead letter no resolution can close. See
+// controldb.UnclosableDeadLetters.
+func verifyClosable(ctx context.Context, pool *db.Pool, logger *slog.Logger) error {
+	ids, err := controldb.UnclosableDeadLetters(ctx, pool, projection.AuthorityEventTypes)
+	if err != nil {
+		return err
+	}
+	if len(ids) > 0 {
+		for _, id := range ids {
+			logger.Error("unclosable dead letter", slog.String("event_id", id))
+		}
+		return controldb.UnclosableError(ids)
+	}
+	logger.Info("every unresolved authority-bearing dead letter has a closure path")
+	return nil
 }
 
 // verifyIsolation is the post-condition of the post stage.

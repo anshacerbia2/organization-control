@@ -142,8 +142,14 @@ $env:ATLAS_DEV_URL  = 'postgres://…/org_atlas_dev?sslmode=disable'
 
 go run ./cmd/organization-migrate -stage=pre    # cluster roles
 atlas migrate apply --env local                 # the owned schemas and their tables
-go run ./cmd/organization-migrate -stage=post   # platform schema, RLS, privileges
+go run ./cmd/organization-migrate -stage=post   # platform schema, RLS, privileges, then two checks
 ```
+
+The post stage ends with two checks and fails a deploy if either does:
+
+- the isolation posture (`controldb.AssertIsolation`, below);
+- that no unresolved authority-bearing dead letter lacks every way to close it
+  (`controldb.UnclosableDeadLetters`, TDD-005 §The superseded case).
 
 **`roles.sql` creates the three group roles and no login role.** `organization_migrator`,
 `organization_rt`, and `organization_provider_rt` are all `NOLOGIN`: they carry privileges and
