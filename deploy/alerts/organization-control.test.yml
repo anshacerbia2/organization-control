@@ -1,0 +1,147 @@
+# promtool test rules deploy/alerts/organization-control.test.yml
+#
+# Each alert is shown firing on a value past its threshold and silent on one below it, so a rule
+# that can never fire, or always fires, fails here.
+
+rule_files:
+  - organization-control.rules.yml
+
+evaluation_interval: 30s
+
+tests:
+  - name: outbox lag, both lanes, both severities
+    interval: 30s
+    input_series:
+      - series: 'organization_outbox_oldest_unpublished_age_seconds{lane="priority"}'
+        values: '10 45 150'
+      - series: 'organization_outbox_oldest_unpublished_age_seconds{lane="standard"}'
+        values: '100 400 1000'
+      - series: 'organization_outbox_unpublished{lane="priority"}'
+        values: '1 1 1'
+    alert_rule_test:
+      - eval_time: 0s
+        alertname: PriorityOutboxLagWarning
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: PriorityOutboxLagWarning
+        exp_alerts:
+          - exp_labels: { severity: warning, lane: priority }
+            exp_annotations:
+              summary: A security event has waited over 30s to be published.
+              description: The dispatcher is behind on the priority lane. A revocation accepted now is not yet on its way to the consumer.
+      - eval_time: 30s
+        alertname: PriorityOutboxLagCritical
+        exp_alerts: []
+      - eval_time: 60s
+        alertname: PriorityOutboxLagCritical
+        exp_alerts:
+          - exp_labels: { severity: critical, lane: priority }
+            exp_annotations:
+              summary: A security event has waited over 2 minutes to be published.
+              description: Revocation enforcement is past its budget. Check the dispatcher and the consumer endpoint.
+      - eval_time: 0s
+        alertname: StandardOutboxLagWarning
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: StandardOutboxLagWarning
+        exp_alerts:
+          - exp_labels: { severity: warning, lane: standard }
+            exp_annotations:
+              summary: A lifecycle event has waited over 5 minutes to be published.
+      - eval_time: 60s
+        alertname: StandardOutboxLagCritical
+        exp_alerts:
+          - exp_labels: { severity: critical, lane: standard }
+            exp_annotations:
+              summary: A lifecycle event has waited over 15 minutes to be published.
+      - eval_time: 60s
+        alertname: EnforcementTelemetryAbsent
+        exp_alerts: []
+
+  - name: security debt and a stale dead letter
+    interval: 30s
+    input_series:
+      - series: 'organization_security_debt_dead_letters'
+        values: '0 1'
+      - series: 'organization_dead_letters_oldest_unresolved_unwaived_age_seconds'
+        values: '3600 90000'
+    alert_rule_test:
+      - eval_time: 0s
+        alertname: SecurityDebt
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: SecurityDebt
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: An authority-bearing event was dead-lettered, and every projection-backed check is refusing.
+              description: Replay it, then resolve it (TDD-organization-control-005 §Operational Notes).
+      - eval_time: 0s
+        alertname: UnresolvedDeadLetterStale
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: UnresolvedDeadLetterStale
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: A dead letter has been open for over 24 hours with no waiver.
+
+  - name: a consumer past its own budget, and one within it
+    interval: 30s
+    input_series:
+      - series: 'organization_projection_consumer_report_age_seconds{consumer="late",deployable="organization-control",system="SAD-004"}'
+        values: '120'
+      - series: 'organization_projection_consumer_max_accepted_age_seconds{consumer="late",deployable="organization-control",system="SAD-004"}'
+        values: '60'
+      - series: 'organization_projection_consumer_report_age_seconds{consumer="fresh",deployable="organization-control",system="SAD-004"}'
+        values: '30'
+      - series: 'organization_projection_consumer_max_accepted_age_seconds{consumer="fresh",deployable="organization-control",system="SAD-004"}'
+        values: '60'
+    alert_rule_test:
+      - eval_time: 0s
+        alertname: ConsumerProjectionStale
+        exp_alerts:
+          - exp_labels: { severity: critical, consumer: late, deployable: organization-control, system: SAD-004 }
+            exp_annotations:
+              summary: A registered consumer has not reported progress within its declared budget.
+              description: Under fail_closed it is refusing; under fail_open it is serving authority older than it declared acceptable.
+
+  - name: fresh-check ratio
+    interval: 30s
+    input_series:
+      - series: 'organization_projection_consumer_verify_ratio{consumer="c"}'
+        values: '0.01 0.1 0.6'
+    alert_rule_test:
+      - eval_time: 0s
+        alertname: ConsumerFreshCheckRateWarning
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: ConsumerFreshCheckRateWarning
+        exp_alerts:
+          - exp_labels: { severity: warning, consumer: c }
+            exp_annotations:
+              summary: A consumer is using the fresh check on more than 5 in 100 requests.
+      - eval_time: 30s
+        alertname: ConsumerFreshCheckRateCritical
+        exp_alerts: []
+      - eval_time: 60s
+        alertname: ConsumerFreshCheckRateCritical
+        exp_alerts:
+          - exp_labels: { severity: critical, consumer: c }
+            exp_annotations:
+              summary: A consumer is using the fresh check on more than half its requests.
+
+  - name: no telemetry at all
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: EnforcementTelemetryAbsent
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: EnforcementTelemetryAbsent
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: organization-control has exported no enforcement metrics for 10 minutes.
+              description: Either the process is down, OTEL_EXPORTER_OTLP_ENDPOINT is unset, or the Collector is not receiving. Every alert above is blind until this clears.

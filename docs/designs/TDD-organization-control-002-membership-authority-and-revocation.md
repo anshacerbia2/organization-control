@@ -658,6 +658,12 @@ that makes the model workable for cross-client operators.
 | Consumers with an unregistered cursor | any occurrence | — |
 | `:verify` rate per consumer | above threshold | ten times threshold |
 
+This side exports these signals from `internal/telemetry` over OTLP, together with the outbox lag
+and security debt of TDD-foundation-platform-001 and TDD-005. `deploy/alerts` evaluates them at
+these thresholds. "Consumer reconciliation age" is alerted critical when a consumer's report age
+exceeds its own `max_accepted_age`. The one-interval warning is not alerted, because no reporting
+interval is declared per consumer.
+
 Runbooks required before production: revocation not enforced within budget, projection
 drift repair, consumer read model rebuild, reconciliation reporting an `extra`
 finding, and consumer misuse of the fresh-check path.

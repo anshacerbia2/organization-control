@@ -136,6 +136,13 @@
     ],
     "internal/config": [],
 
+    "_comment_telemetry": [
+      "internal/telemetry turns the enforcement signals projection reads into OpenTelemetry gauges.",
+      "It reaches internal/projection for the signals and nothing else: a metrics package that could",
+      "reach a service could act on what it only reports."
+    ],
+    "internal/telemetry": ["internal/projection"],
+
     "_comment_cmd_control": [
       "cmd/organization-control is the composition root: the only place the pools, the recorder,",
       "and the ten services are constructed, and the only place net/http is used to serve. It",
@@ -153,6 +160,7 @@
       "internal/offboarding",
       "internal/organization",
       "internal/projection",
+      "internal/telemetry",
       "internal/tenant",
       "internal/workspace"
     ]

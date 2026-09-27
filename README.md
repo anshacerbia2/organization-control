@@ -418,6 +418,36 @@ entirely is the thirty-method refactor above.
 `platform.idempotency_key.response_body` is `jsonb`, so PostgreSQL sorts object keys and drops
 insignificant whitespace. Anything hashing or signing a response body has to canonicalise first.
 
+## Metrics and alerts
+
+With `OTEL_EXPORTER_OTLP_ENDPOINT` set, the service exports over OTLP/HTTP to the OpenTelemetry
+Collector, as STD-GLB-003 requires. Unset, it exports nothing and says so at startup.
+
+The enforcement gauges (`internal/telemetry`) are read from the database on each collection, on
+the provider connections, by `projection.SignalsReader`:
+
+| Series (Prometheus name) | What it is |
+| :-- | :-- |
+| `organization_outbox_unpublished{lane}` | rows waiting to be published, per lane (`priority`, `standard`) |
+| `organization_outbox_oldest_unpublished_age_seconds{lane}` | the dispatcher's lag |
+| `organization_security_debt_dead_letters` | unresolved authority-bearing dead letters; above zero, every projection-backed check refuses |
+| `organization_security_debt_oldest_age_seconds` | how long the oldest has been open |
+| `organization_dead_letters_unresolved_unwaived` | unresolved dead letters with no live waiver |
+| `organization_dead_letters_oldest_unresolved_unwaived_age_seconds` | the oldest of them |
+| `organization_projection_consumer_report_age_seconds{consumer}` | seconds since the consumer last reported progress, or since it registered |
+| `organization_projection_consumer_max_accepted_age_seconds{consumer}` | its declared budget |
+| `organization_projection_consumer_verify_ratio{consumer}` | its last measured fresh-check ratio |
+
+`deploy/alerts/organization-control.rules.yml` holds the alert rules, with each threshold's source
+noted beside it (SAD-004 §9.3.2 and the TDDs). CI checks the rules and runs their unit tests with a
+pinned `promtool`, and a mutation that moves one threshold must fail those tests.
+`internal/telemetry`'s test fails if a rule reads a series no instrument exports. Locally:
+
+```text
+promtool check rules deploy/alerts/organization-control.rules.yml
+promtool test rules deploy/alerts/organization-control.test.yml
+```
+
 ## Row-Level Security is not in `schema.hcl`, and that is a vendor limitation rather than a design choice
 
 Atlas OSS models neither `ENABLE`/`FORCE ROW LEVEL SECURITY` nor `CREATE POLICY`. Verified

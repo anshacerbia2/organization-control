@@ -31,6 +31,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	fdb "github.com/anshacerbia2/foundation-platform/db"
 	fhttp "github.com/anshacerbia2/foundation-platform/httpapi"
@@ -47,6 +48,7 @@ import (
 	"github.com/anshacerbia2/organization-control/internal/offboarding"
 	"github.com/anshacerbia2/organization-control/internal/organization"
 	"github.com/anshacerbia2/organization-control/internal/projection"
+	enforcement "github.com/anshacerbia2/organization-control/internal/telemetry"
 	"github.com/anshacerbia2/organization-control/internal/tenant"
 	"github.com/anshacerbia2/organization-control/internal/workspace"
 )
@@ -73,11 +75,31 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	telemetry, err := observability.New(observability.Config{
-		Deployable: cfg.Deployable,
-		System:     cfg.System,
-		Logger:     logger,
-	})
+	// The Collector, when one is configured. Without it every metric and span goes to the no-op
+	// providers, which is said once here rather than discovered as an empty dashboard.
+	var exported *observability.Exported
+	if cfg.OTLPEndpoint != "" {
+		exported, err = observability.Export(ctx, observability.ExportConfig{
+			Endpoint: cfg.OTLPEndpoint, Deployable: cfg.Deployable, System: cfg.System,
+		})
+		if err != nil {
+			return fmt.Errorf("telemetry export: %w", err)
+		}
+		defer func() {
+			flush, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := exported.Shutdown(flush); err != nil {
+				logger.Warn("telemetry flush on shutdown", slog.String("error", err.Error()))
+			}
+		}()
+	} else {
+		logger.Warn("OTEL_EXPORTER_OTLP_ENDPOINT is unset: no metric or trace leaves this process")
+	}
+	telemetryConfig := observability.Config{Deployable: cfg.Deployable, System: cfg.System, Logger: logger}
+	if exported != nil {
+		telemetryConfig.MeterProvider, telemetryConfig.TracerProvider = exported.MeterProvider, exported.TracerProvider
+	}
+	telemetry, err := observability.New(telemetryConfig)
 	if err != nil {
 		return fmt.Errorf("telemetry: %w", err)
 	}
@@ -215,6 +237,18 @@ func run() error {
 	frontier, err := projection.NewFrontierReader(providerConns)
 	if err != nil {
 		return fmt.Errorf("frontier reader: %w", err)
+	}
+
+	// The enforcement gauges, read on the raw provider connections on each collection, for the
+	// reason the frontier reads them there. Registered only when something will collect them.
+	if exported != nil {
+		signals, err := projection.NewSignalsReader(providerConns)
+		if err != nil {
+			return fmt.Errorf("signals reader: %w", err)
+		}
+		if err := enforcement.Register(exported.MeterProvider, signals, cfg.Deployable, cfg.System); err != nil {
+			return fmt.Errorf("enforcement metrics: %w", err)
+		}
 	}
 
 	contexts, err := occontext.New(providerPool)
