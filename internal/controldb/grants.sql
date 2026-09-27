@@ -367,9 +367,25 @@ GRANT USAGE, SELECT             ON SEQUENCE platform.outbox_sequence TO organiza
 -- because the evidence goes with it.
 REVOKE DELETE ON platform.outbox FROM organization_dispatch_rt;
 
--- And no default privileges: a table added to platform later must be granted deliberately rather
--- than inherited by a role whose scope is three objects.
+-- Whether its own consumer name is registered and active, read once at startup.
+--
+-- DISPATCH_CONSUMER_NAME keys every receipt this worker writes, and the resolver reads receipts by
+-- the registered consumer_id. A one-character mismatch produces receipts no resolution will ever
+-- find, and nothing failed until an incident could not be closed. The dispatcher now refuses to
+-- start when its name is not an active consumer (ROADMAP.md item 13).
+--
+-- Two columns, not the row. The registration's terms and the fresh-check meter are nothing a
+-- delivery worker needs to read, and it writes nothing here.
+--
+--   SELECT EXISTS (SELECT 1 FROM projection.consumer WHERE consumer_id = $1 AND retired_at IS NULL)
+GRANT USAGE ON SCHEMA projection TO organization_dispatch_rt;
+GRANT SELECT (consumer_id, retired_at) ON projection.consumer TO organization_dispatch_rt;
+
+-- And no default privileges: a table added to platform or projection later must be granted
+-- deliberately rather than inherited by a role whose scope is a handful of objects.
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_dispatch_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA projection
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_dispatch_rt;
 
 -- ---------------------------------------------------------------------------------------------

@@ -201,6 +201,8 @@ membership.membership_event organization_rt              INSERT   (written when 
                             no runtime role              UPDATE, DELETE, TRUNCATE
 
 projection.consumer         organization_resolution_rt   SELECT   (the active consumer, derived server-side)
+                            organization_dispatch_rt     SELECT (consumer_id, retired_at) only
+                                                         (the dispatcher's startup check on its own name)
 audit.privileged_access     organization_resolution_rt   INSERT   (the outcome record)
 platform.idempotency_key    organization_resolution_rt   INSERT, SELECT   (the claim of a keyed /resolve)
 ```
@@ -535,7 +537,7 @@ to declare authority delivered without evidence, the one thing this design refus
 | Setting | Effect |
 | :-- | :-- |
 | `ORGANIZATION_RESOLUTION_DATABASE_URL` | Required, with no fallback. The credential of a login role that inherits `organization_resolution_rt`, opened as its own pool of two connections. Refused at startup when it equals the provider or tenant DSN: a resolution credential shared with another pool would give that pool the power to close incidents. |
-| `DISPATCH_CONSUMER_NAME` (foundation-reference) | The consumer's name, not its endpoint. Delivery receipts are keyed by it, and the resolution predicate asks whether a specific consumer holds a specific event. An endpoint cannot answer that, because an endpoint moves and the identity does not. |
+| `DISPATCH_CONSUMER_NAME` (foundation-reference) | The consumer's name, not its endpoint. Delivery receipts are keyed by it, and the resolution predicate asks whether a specific consumer holds a specific event. An endpoint cannot answer that, because an endpoint moves and the identity does not. The dispatch role may read `consumer_id` and `retired_at` of `projection.consumer`, so the dispatcher can refuse to start when this name is not an active registered consumer. Without that check, a mismatch produced receipts no resolution reads, found only when an incident could not be closed. |
 | `REFERENCE_CONSUMER_NAME` (foundation-reference) | The consumer's own identity for its inbox guard. It must equal the above and the name registered with this service. |
 
 Nothing validates that the three names agree. They are configured separately, and the

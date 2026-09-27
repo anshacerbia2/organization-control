@@ -124,6 +124,46 @@ func TestTheDispatchRoleCannotDeleteFromTheOutbox(t *testing.T) {
 	}
 }
 
+// TestTheDispatchRoleCanCheckItsOwnRegistration runs the startup check foundation-reference's
+// dispatcher makes, as the dispatch login role, and the reads and writes that must stay denied.
+//
+// The statement is written out here because it lives in the other repository. It is the shape the
+// grant answers for: two columns of projection.consumer, read-only.
+func TestTheDispatchRoleCanCheckItsOwnRegistration(t *testing.T) {
+	password := os.Getenv("TEST_DISPATCH_PASSWORD")
+	if password == "" {
+		t.Fatal("TEST_DISPATCH_PASSWORD is empty: the dispatch login role exists but its password " +
+			"was never exported to the test environment, so this capability cannot be checked")
+	}
+	dispatch, ctx := openAs(t, "organization_dispatch_app", password)
+
+	const registered = `SELECT EXISTS (SELECT 1 FROM projection.consumer
+	    WHERE consumer_id = $1 AND retired_at IS NULL)`
+	var active bool
+	if err := dispatch.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx, registered, "no-such-consumer").Scan(&active)
+	}); err != nil {
+		t.Fatalf("the dispatch role cannot check its own registration: %v", err)
+	}
+	if active {
+		t.Error("an unregistered consumer name read as active")
+	}
+
+	for what, statement := range map[string]string{
+		"read the registration's terms": `SELECT max_accepted_age FROM projection.consumer`,
+		"read the fresh-check meter":    `SELECT verify_calls_since_report FROM projection.consumer`,
+		"retire a consumer":             `UPDATE projection.consumer SET retired_at = now()`,
+		"register a consumer":           `INSERT INTO projection.consumer (consumer_id) VALUES ('x')`,
+	} {
+		if err := dispatch.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+			_, err := tx.Exec(ctx, statement)
+			return err
+		}); err == nil {
+			t.Errorf("the dispatch role can %s", what)
+		}
+	}
+}
+
 func TestTheDispatchRoleHoldsNothingDangerous(t *testing.T) {
 	pool, ctx := openAdmin(t)
 
