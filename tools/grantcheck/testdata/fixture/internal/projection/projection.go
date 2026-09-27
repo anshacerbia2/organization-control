@@ -19,6 +19,16 @@ func (f *FrontierReader) FrontierFor(ctx context.Context) error {
 
 const frontierStatement = `SELECT max(sequence) FROM platform.outbox`
 
+// SignalsReader mirrors the enforcement gauges' reader: a declared boundary on the provider role.
+type SignalsReader struct{ tx db.Transactor }
+
+func (s *SignalsReader) Read(ctx context.Context) error {
+	return s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT count(*) FROM platform.dead_letter`)
+		return err
+	})
+}
+
 const (
 	closeStatement    = `UPDATE platform.dead_letter SET resolved_at = now() WHERE event_id = $1`
 	evidenceStatement = `SELECT 1 FROM platform.delivery_receipt WHERE event_id = $1`

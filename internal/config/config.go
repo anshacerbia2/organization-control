@@ -103,6 +103,11 @@ type Config struct {
 	TenantNameMax                 int
 
 	LogLevel string
+
+	// OTLPEndpoint is the OpenTelemetry Collector's OTLP/HTTP base URL. A deployment sets it; unset,
+	// the process exports nothing and says so at startup, and the absent-telemetry alert fires
+	// (TDD-foundation-platform-002 §Configuration).
+	OTLPEndpoint string
 }
 
 // Load reads the environment and reports every problem at once.
@@ -200,6 +205,7 @@ func Load() (Config, error) {
 
 	cfg.ListenAddress = stringOr("ORGANIZATION_LISTEN_ADDRESS", ":8080")
 	cfg.LogLevel = stringOr("LOG_LEVEL", "info")
+	cfg.OTLPEndpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 
 	cfg.TokenMaxSkew = durationOr("ORGANIZATION_TOKEN_MAX_SKEW", 30*time.Second, &problems)
 	if cfg.TokenMaxSkew > 60*time.Second {

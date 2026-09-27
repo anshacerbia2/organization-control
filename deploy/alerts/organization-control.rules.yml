@@ -1,0 +1,96 @@
+# Enforcement alerts for organization-control (ROADMAP item 14).
+#
+# The series come from internal/telemetry, exported over OTLP to the Collector and converted to
+# Prometheus names there: dots to underscores, a seconds unit to _seconds, a ratio to _ratio.
+# internal/telemetry's test fails if a name here is not one it exports.
+#
+# Thresholds, and where each is set:
+#   outbox lag, priority     warning 30s, critical 2m      SAD-004 §9.3.2, TDD-foundation-platform-001
+#   outbox lag, standard     warning 5m, critical 15m      TDD-foundation-platform-001 §Operational Notes
+#   security debt            critical at any occurrence    TDD-foundation-platform-001, TDD-005
+#   unresolved dead letter   warning past 24h, unwaived    TDD-foundation-platform-001, TDD-005 §WAIVED
+#   consumer report age      critical past its budget      TDD-002 §Operational Notes
+#   verify ratio             warning 0.05, critical 0.5    TDD-002 §Configuration, ORGANIZATION_VERIFY_RATE_ALERT
+#
+# Evaluated by whichever Prometheus-compatible backend the Collector feeds; promtool tests them in CI.
+
+groups:
+  - name: organization-control-enforcement
+    rules:
+      - alert: PriorityOutboxLagWarning
+        expr: organization_outbox_oldest_unpublished_age_seconds{lane="priority"} > 30
+        labels:
+          severity: warning
+        annotations:
+          summary: A security event has waited over 30s to be published.
+          description: The dispatcher is behind on the priority lane. A revocation accepted now is not yet on its way to the consumer.
+
+      - alert: PriorityOutboxLagCritical
+        expr: organization_outbox_oldest_unpublished_age_seconds{lane="priority"} > 120
+        labels:
+          severity: critical
+        annotations:
+          summary: A security event has waited over 2 minutes to be published.
+          description: Revocation enforcement is past its budget. Check the dispatcher and the consumer endpoint.
+
+      - alert: StandardOutboxLagWarning
+        expr: organization_outbox_oldest_unpublished_age_seconds{lane="standard"} > 300
+        labels:
+          severity: warning
+        annotations:
+          summary: A lifecycle event has waited over 5 minutes to be published.
+
+      - alert: StandardOutboxLagCritical
+        expr: organization_outbox_oldest_unpublished_age_seconds{lane="standard"} > 900
+        labels:
+          severity: critical
+        annotations:
+          summary: A lifecycle event has waited over 15 minutes to be published.
+
+      - alert: SecurityDebt
+        expr: organization_security_debt_dead_letters > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: An authority-bearing event was dead-lettered, and every projection-backed check is refusing.
+          description: Replay it, then resolve it (TDD-organization-control-005 §Operational Notes).
+
+      - alert: UnresolvedDeadLetterStale
+        expr: organization_dead_letters_oldest_unresolved_unwaived_age_seconds > 86400
+        labels:
+          severity: warning
+        annotations:
+          summary: A dead letter has been open for over 24 hours with no waiver.
+
+      - alert: ConsumerProjectionStale
+        expr: >
+          organization_projection_consumer_report_age_seconds
+            > on (consumer, deployable, system) organization_projection_consumer_max_accepted_age_seconds
+        labels:
+          severity: critical
+        annotations:
+          summary: A registered consumer has not reported progress within its declared budget.
+          description: Under fail_closed it is refusing; under fail_open it is serving authority older than it declared acceptable.
+
+      - alert: ConsumerFreshCheckRateWarning
+        expr: organization_projection_consumer_verify_ratio > 0.05
+        labels:
+          severity: warning
+        annotations:
+          summary: A consumer is using the fresh check on more than 5 in 100 requests.
+
+      - alert: ConsumerFreshCheckRateCritical
+        expr: organization_projection_consumer_verify_ratio > 0.5
+        labels:
+          severity: critical
+        annotations:
+          summary: A consumer is using the fresh check on more than half its requests.
+
+      - alert: EnforcementTelemetryAbsent
+        expr: absent(organization_outbox_unpublished)
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: organization-control has exported no enforcement metrics for 10 minutes.
+          description: Either the process is down, OTEL_EXPORTER_OTLP_ENDPOINT is unset, or the Collector is not receiving. Every alert above is blind until this clears.

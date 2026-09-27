@@ -81,6 +81,8 @@ var boundaries = map[string][]string{
 	// projection.NewFrontierReader(providerConns), and NewFrontierReader(consumerConns) for a
 	// registered consumer reading its own frontier.
 	"(*" + module + "/internal/projection.FrontierReader).FrontierFor": {providerRole, consumerRole},
+	// projection.NewSignalsReader(providerConns), read by the enforcement gauges on each collection.
+	"(*" + module + "/internal/projection.SignalsReader).Read": {providerRole},
 }
 
 // Statement is one SQL constant and where it was reached.

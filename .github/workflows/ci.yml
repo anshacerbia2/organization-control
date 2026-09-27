@@ -387,6 +387,37 @@ jobs:
       - name: architecture boundaries
         run: go run github.com/anshacerbia2/foundation-platform/tools/archcheck
 
+      # The enforcement alerts (ROADMAP item 14), checked and unit-tested with promtool at a pinned,
+      # checksummed release. internal/telemetry's test holds the series names to the instruments;
+      # this holds the thresholds and the expressions to the behaviour the test file states.
+      - name: alert rules
+        run: |
+          version=3.15.0
+          sum=2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0
+          archive=prometheus-$version.linux-amd64.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/prometheus/prometheus/releases/download/v$version/$archive"
+          echo "$sum  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          promtool="$RUNNER_TEMP/prometheus-$version.linux-amd64/promtool"
+          cd deploy/alerts
+          "$promtool" check rules organization-control.rules.yml
+          "$promtool" test rules organization-control.test.yml
+          # A threshold that can drift without a test noticing is not a threshold. Move the
+          # priority-lane warning from 30s to 300s: the test that expects it at 45s must fail.
+          cp organization-control.rules.yml rules.orig
+          sed -i 's/{lane="priority"} > 30$/{lane="priority"} > 300/' organization-control.rules.yml
+          if cmp -s rules.orig organization-control.rules.yml; then
+            echo "::error::the priority-lane threshold was not found; this check is silently passing and must be updated"
+            exit 1
+          fi
+          if "$promtool" test rules organization-control.test.yml; then
+            echo "::error::the rule tests passed with the priority-lane warning moved to 300s, so they do not test the threshold"
+            exit 1
+          fi
+          mv rules.orig organization-control.rules.yml
+          echo "the alert tests are load-bearing: moving a threshold fails them"
+
       # Kept for a week so a drop can be read per function without rerunning the suite.
       - name: upload coverage
         if: always()
