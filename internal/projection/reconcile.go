@@ -74,9 +74,12 @@ type RepairedState struct {
 }
 
 // ReportedRow is one context a consumer says it is projecting.
+//
+// Tagged like every other field on this surface. Untagged, the reconcile route accepted only the Go
+// field names, so a report written as membership_id matched nothing and was refused as an unknown field.
 type ReportedRow struct {
-	MembershipID      id.UUID
-	MembershipVersion int64
+	MembershipID      id.UUID `json:"membership_id"`
+	MembershipVersion int64   `json:"membership_version"`
 }
 
 // Report is a consumer's account of its own projection at a stated position.
