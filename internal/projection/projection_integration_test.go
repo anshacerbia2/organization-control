@@ -10,8 +10,8 @@ package projection
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -517,6 +517,23 @@ func TestReconciliationClassifiesEachDifferenceAndIsIdempotent(t *testing.T) {
 		t.Error("an agreeing Membership produced a finding")
 	}
 
+	// Each finding carries what the consumer applies: the authoritative Membership, or null when
+	// authority never granted it. Versions alone were unappliable, and every sweep dead-lettered.
+	states := map[id.UUID]*RepairedState{}
+	for _, finding := range result.Findings {
+		states[finding.MembershipID] = finding.State
+	}
+	for membershipID, want := range map[id.UUID]int64{absent: 3, diverged: 9} {
+		state := states[membershipID]
+		if state == nil || state.MembershipVersion != want || state.MembershipStatus != "active" ||
+			state.TenantID != tenantID || state.MembershipID != membershipID {
+			t.Errorf("finding for %s carries state %+v, want the active Membership at version %d", membershipID, state, want)
+		}
+	}
+	if state := states[invented]; state != nil {
+		t.Errorf("a Membership authority never granted carries state %+v, want null so the consumer removes it", state)
+	}
+
 	// `extra` leads, because whoever reads the first line of a sweep should read the privilege
 	// escalation rather than whichever row a hash bucket happened to hold first.
 	if len(result.Findings) == 0 || result.Findings[0].Classification != ClassExtra {
@@ -533,9 +550,44 @@ func TestReconciliationClassifiesEachDifferenceAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Reconcile: %v", err)
 	}
-	if fmt.Sprint(again.Findings) != fmt.Sprint(result.Findings) {
+	// Compared as the wire form: a finding's state is a pointer, and printing it prints an address.
+	first, _ := json.Marshal(result.Findings)
+	second, _ := json.Marshal(again.Findings)
+	if string(first) != string(second) {
 		t.Error("two sweeps over one state returned different output")
 	}
+}
+
+// A consumer still projecting a Membership authority has revoked is an `extra` whose repair is the
+// revocation itself: the finding carries the revoked state, at authority's version, so the consumer
+// applies the withdrawal rather than merely deleting a row it would re-learn from the next event.
+func TestAnExtraThatAuthorityRevokedCarriesTheRevocation(t *testing.T) {
+	f := newFixture(t)
+	consumerID := f.register(t)
+	tenantID := f.seedTenant(t)
+	revoked := f.seedMembership(t, tenantID, 4)
+	f.exec(t, `UPDATE membership.membership SET status = 'revoked' WHERE membership_id = $1`, revoked.String())
+
+	result, err := f.reconciler.Reconcile(f.ctx, Report{
+		ConsumerID: consumerID, Mark: 100,
+		Rows: []ReportedRow{{MembershipID: revoked, MembershipVersion: 3}},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	for _, finding := range result.Findings {
+		if finding.MembershipID != revoked {
+			continue
+		}
+		switch {
+		case finding.Classification != ClassExtra:
+			t.Errorf("classification %q, want extra", finding.Classification)
+		case finding.State == nil || finding.State.MembershipStatus != "revoked" || finding.State.MembershipVersion != 4:
+			t.Errorf("state %+v, want the revoked Membership at version 4", finding.State)
+		}
+		return
+	}
+	t.Fatal("no finding for a projected Membership authority has revoked")
 }
 
 // TestAReportWithoutAPositionIsRefused. Compared against authority read now, every change made

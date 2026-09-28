@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.3.0
+  version: 1.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -534,6 +534,23 @@ a write outside it.
 
 Reconciliation repairs toward authority in one direction. A projection is never
 promoted into authority.
+
+**The repair event carries what it repairs.** `projection.repair.reconciled` has one finding per
+difference. Each finding carries `state`, the authoritative Membership in the shape of a Membership
+event's payload:
+
+- the active Membership, for `missing` and `mismatch`;
+- the suspended or revoked Membership, for an `extra` that authority has withdrawn;
+- `null`, for an `extra` that authority never granted, which tells the consumer to remove the row.
+
+The state is read in the same snapshot transaction as the authoritative set. A consumer applies it
+by the rule it applies Membership events with: a higher version replaces a lower one, and an older
+repair changes nothing. A consumer ahead of authority, a `mismatch` or `extra` with the projected
+version above the authoritative one, is therefore not repaired automatically. That case is a
+corruption of the consumer, and it stays a finding and an alert.
+
+Until this, findings carried versions alone. A consumer could not apply them, so every sweep that
+found something dead-lettered at the consumer as poison.
 
 ## Configuration
 
