@@ -50,6 +50,27 @@ type Finding struct {
 
 	// ProjectedVersion is the version the consumer reported, or 0 when it reported nothing.
 	ProjectedVersion int64 `json:"projected_version"`
+
+	// State is the authoritative Membership the consumer repairs toward, in the shape of a
+	// Membership event's payload, so a consumer applies it by the rule it applies that event with: a
+	// higher version replaces a lower one. Null when authority holds no Membership by this identifier,
+	// which tells the consumer to remove the row.
+	//
+	// It is what TDD-organization-control-002 §Reconciliation calls republishing. The findings
+	// carried versions alone until this, which a consumer cannot apply, so every sweep that found
+	// something dead-lettered at the consumer as poison.
+	State *RepairedState `json:"state"`
+}
+
+// RepairedState is one Membership as authority holds it.
+type RepairedState struct {
+	MembershipID          id.UUID  `json:"membership_id"`
+	PrincipalID           id.UUID  `json:"principal_id"`
+	TenantID              id.UUID  `json:"tenant_id"`
+	WorkspaceID           *id.UUID `json:"workspace_id"`
+	MembershipStatus      string   `json:"membership_status"`
+	MembershipVersion     int64    `json:"membership_version"`
+	TenantSecurityVersion int64    `json:"tenant_security_version"`
 }
 
 // ReportedRow is one context a consumer says it is projecting.
@@ -115,10 +136,27 @@ func NewReconciler(pool *db.ProviderPool) (*Reconciler, error) {
 const authoritativeStatement = `SELECT m.membership_id::text,
        m.principal_id::text,
        m.tenant_id::text,
-       m.membership_version
+       coalesce(m.workspace_id::text, ''),
+       m.status,
+       m.membership_version,
+       t.tenant_security_version
 FROM membership.membership m
 JOIN tenant.tenant t ON t.tenant_id = m.tenant_id
 WHERE m.status = 'active'`
+
+// withdrawnStatement reads, for identifiers a consumer projects and authority does not hold as
+// active, whatever authority does hold: a suspended or revoked Membership, whose state the consumer
+// then applies. An identifier absent here is one authority never granted, and the consumer removes it.
+const withdrawnStatement = `SELECT m.membership_id::text,
+       m.principal_id::text,
+       m.tenant_id::text,
+       coalesce(m.workspace_id::text, ''),
+       m.status,
+       m.membership_version,
+       t.tenant_security_version
+FROM membership.membership m
+JOIN tenant.tenant t ON t.tenant_id = m.tenant_id
+WHERE m.membership_id::text = ANY ($1::text[])`
 
 // Reconcile compares authority against a report and returns the differences, most severe first.
 //
@@ -134,12 +172,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, report Report) (Result, erro
 
 	result := Result{ConsumerID: report.ConsumerID, Mark: report.Mark, RunAt: r.now().UTC()}
 
-	type authoritative struct {
-		principal id.UUID
-		tenant    id.UUID
-		version   int64
+	projected := make(map[id.UUID]int64, len(report.Rows))
+	for _, row := range report.Rows {
+		projected[row.MembershipID] = row.MembershipVersion
 	}
-	authority := map[id.UUID]authoritative{}
+
+	// authority is the active set; withdrawn is what authority holds for a projected identifier it
+	// does not hold as active. Both are read in the one snapshot, so a repair describes one instant.
+	authority := map[id.UUID]RepairedState{}
+	withdrawn := map[id.UUID]RepairedState{}
 
 	if err := db.WithProviderSnapshot(ctx, r.pool,
 		"reconcile projection for "+report.ConsumerID,
@@ -148,68 +189,59 @@ func (r *Reconciler) Reconcile(ctx context.Context, report Report) (Result, erro
 			if err := load(ctx, tx, report.ConsumerID, &consumer); err != nil {
 				return err
 			}
-
-			rows, err := tx.Query(ctx, authoritativeStatement)
-			if err != nil {
+			if err := readStates(ctx, tx, authoritativeStatement, authority); err != nil {
 				return fmt.Errorf("projection: read authoritative set: %w", err)
 			}
-			defer rows.Close()
 
-			for rows.Next() {
-				var rawMembership, rawPrincipal, rawTenant string
-				var version int64
-				if err := rows.Scan(&rawMembership, &rawPrincipal, &rawTenant, &version); err != nil {
-					return fmt.Errorf("projection: scan authoritative row: %w", err)
+			var unheld []string
+			for membershipID := range projected {
+				if _, held := authority[membershipID]; !held {
+					unheld = append(unheld, membershipID.String())
 				}
-				membershipID, err := id.Parse(rawMembership)
-				if err != nil {
-					return fmt.Errorf("projection: stored membership id %q: %w", rawMembership, err)
-				}
-				principalID, err := id.Parse(rawPrincipal)
-				if err != nil {
-					return fmt.Errorf("projection: stored principal id %q: %w", rawPrincipal, err)
-				}
-				tenantID, err := id.Parse(rawTenant)
-				if err != nil {
-					return fmt.Errorf("projection: stored tenant id %q: %w", rawTenant, err)
-				}
-				authority[membershipID] = authoritative{principal: principalID, tenant: tenantID, version: version}
 			}
-			return rows.Err()
+			if len(unheld) == 0 {
+				return nil
+			}
+			if err := readStates(ctx, tx, withdrawnStatement, withdrawn, unheld); err != nil {
+				return fmt.Errorf("projection: read withdrawn Memberships: %w", err)
+			}
+			return nil
 		}); err != nil {
 		return Result{}, err
 	}
 
-	projected := make(map[id.UUID]int64, len(report.Rows))
-	for _, row := range report.Rows {
-		projected[row.MembershipID] = row.MembershipVersion
-	}
-
 	for membershipID, auth := range authority {
+		state := auth
 		reportedVersion, present := projected[membershipID]
 		switch {
 		case !present:
 			result.Findings = append(result.Findings, Finding{
 				Classification: ClassMissing, MembershipID: membershipID,
-				TenantID: auth.tenant, PrincipalID: auth.principal,
-				AuthoritativeVersion: auth.version,
+				TenantID: auth.TenantID, PrincipalID: auth.PrincipalID,
+				AuthoritativeVersion: auth.MembershipVersion, State: &state,
 			})
-		case reportedVersion != auth.version:
+		case reportedVersion != auth.MembershipVersion:
 			result.Findings = append(result.Findings, Finding{
 				Classification: ClassMismatch, MembershipID: membershipID,
-				TenantID: auth.tenant, PrincipalID: auth.principal,
-				AuthoritativeVersion: auth.version, ProjectedVersion: reportedVersion,
+				TenantID: auth.TenantID, PrincipalID: auth.PrincipalID,
+				AuthoritativeVersion: auth.MembershipVersion, ProjectedVersion: reportedVersion, State: &state,
 			})
 		}
 	}
 
 	for membershipID, reportedVersion := range projected {
-		if _, granted := authority[membershipID]; !granted {
-			result.Findings = append(result.Findings, Finding{
-				Classification: ClassExtra, MembershipID: membershipID,
-				ProjectedVersion: reportedVersion,
-			})
+		if _, granted := authority[membershipID]; granted {
+			continue
 		}
+		finding := Finding{Classification: ClassExtra, MembershipID: membershipID, ProjectedVersion: reportedVersion}
+		// Suspended or revoked in authority: the consumer applies the withdrawal. Unknown to
+		// authority: State stays nil, and the consumer removes the row.
+		if held, ok := withdrawn[membershipID]; ok {
+			state := held
+			finding.TenantID, finding.PrincipalID = held.TenantID, held.PrincipalID
+			finding.AuthoritativeVersion, finding.State = held.MembershipVersion, &state
+		}
+		result.Findings = append(result.Findings, finding)
 	}
 
 	// Sorted, and security findings first. Map iteration order is deliberately random in Go, so an
@@ -229,6 +261,42 @@ func (r *Reconciler) Reconcile(ctx context.Context, report Report) (Result, erro
 	})
 
 	return result, nil
+}
+
+// readStates reads Membership rows in authoritativeStatement's column order into into.
+func readStates(ctx context.Context, tx db.Tx, statement string, into map[id.UUID]RepairedState, args ...any) error {
+	rows, err := tx.Query(ctx, statement, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var rawMembership, rawPrincipal, rawTenant, rawWorkspace string
+		var state RepairedState
+		if err := rows.Scan(&rawMembership, &rawPrincipal, &rawTenant, &rawWorkspace,
+			&state.MembershipStatus, &state.MembershipVersion, &state.TenantSecurityVersion); err != nil {
+			return fmt.Errorf("scan: %w", err)
+		}
+		if state.MembershipID, err = id.Parse(rawMembership); err != nil {
+			return fmt.Errorf("stored membership id %q: %w", rawMembership, err)
+		}
+		if state.PrincipalID, err = id.Parse(rawPrincipal); err != nil {
+			return fmt.Errorf("stored principal id %q: %w", rawPrincipal, err)
+		}
+		if state.TenantID, err = id.Parse(rawTenant); err != nil {
+			return fmt.Errorf("stored tenant id %q: %w", rawTenant, err)
+		}
+		if rawWorkspace != "" {
+			workspace, err := id.Parse(rawWorkspace)
+			if err != nil {
+				return fmt.Errorf("stored workspace id %q: %w", rawWorkspace, err)
+			}
+			state.WorkspaceID = &workspace
+		}
+		into[state.MembershipID] = state
+	}
+	return rows.Err()
 }
 
 // ReconciledEventType is published once per sweep that found something.
