@@ -1,4 +1,4 @@
-h1:xJR7YCyIBkA1kkkWk+WjrllkUrKp0ZjZtv1IQOL9yeM=
+h1:wQlpEt4PNuKKGZeiAAnFHuZsB693R+PEUH4qMP0QxNo=
 20260821202322_baseline_organization_schema.sql h1:iLX771m6Nv6GkIXeIDTQcEmWAMlMd3Rod+l1e3GiydA=
 20260826071822_add_projection_snapshot_mark.sql h1:NEpR7ckeg3Cr3hLh0H8f6hUBkBanqkPuwiIIEoezmMQ=
 20260827143343_add_verify_rate_signal.sql h1:IoZCJOcErFuME9vNN+FzIr9elyLD+viqIkIu5V56ayA=
@@ -8,4 +8,4 @@ h1:xJR7YCyIBkA1kkkWk+WjrllkUrKp0ZjZtv1IQOL9yeM=
 20260925231128_add_membership_event_history.sql h1:r/5ZDtY7ciz2txg1LwXBQMFYKBEBUSWa/DJAallRAcg=
 20260926211918_add_tenant_event_history.sql h1:BATKoHpmoV/Mr9CJrZVPGUi8RC7dHc7fczd4hYEbvuU=
 20261001120000_add_caller_authority.sql h1:D4ANHkuHj/hexcDU3m0+JpHnDOhDP3hmdTxV6nSfsgY=
-20261001150000_add_provider_grant_revocation.sql h1:pyYBGPz6ekpUFT+Dc7sYmUcYO/WpcLPXvOKOQyxW8ec=
+20261001150000_add_provider_grant_revocation.sql h1:vq2mEedup4B/2tLxd8ROByp2RrCPaZrSS9fNCmzw/II=
