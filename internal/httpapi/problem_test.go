@@ -16,6 +16,7 @@ import (
 
 	platform "github.com/anshacerbia2/foundation-platform/httpapi"
 
+	"github.com/anshacerbia2/organization-control/internal/authority"
 	"github.com/anshacerbia2/organization-control/internal/context"
 	"github.com/anshacerbia2/organization-control/internal/db"
 	"github.com/anshacerbia2/organization-control/internal/invitation"
@@ -117,9 +118,15 @@ var registry = map[string]error{
 	"projection.ErrNotWaivable":        projection.ErrNotWaivable,
 	"projection.ErrAlreadyWaived":      projection.ErrAlreadyWaived,
 
-	"context.ErrInvalid":         context.ErrInvalid,
-	"context.ErrNotRegistered":   context.ErrNotRegistered,
-	"context.ErrRequestRequired": context.ErrRequestRequired,
+	"context.ErrInvalid": context.ErrInvalid,
+
+	"authority.ErrInvalid":        authority.ErrInvalid,
+	"authority.ErrGrantNotFound":  authority.ErrGrantNotFound,
+	"authority.ErrAlreadyGranted": authority.ErrAlreadyGranted,
+	"authority.ErrAlreadyRevoked": authority.ErrAlreadyRevoked,
+	"authority.ErrLastGrant":      authority.ErrLastGrant,
+	"context.ErrNotRegistered":    context.ErrNotRegistered,
+	"context.ErrRequestRequired":  context.ErrRequestRequired,
 }
 
 // sentinelsInSource reads every exported `Err*` declared under internal/, by package.

@@ -10,6 +10,7 @@ import (
 	platform "github.com/anshacerbia2/foundation-platform/httpapi"
 	"github.com/anshacerbia2/foundation-platform/observability"
 
+	"github.com/anshacerbia2/organization-control/internal/authority"
 	occontext "github.com/anshacerbia2/organization-control/internal/context"
 	"github.com/anshacerbia2/organization-control/internal/invitation"
 	"github.com/anshacerbia2/organization-control/internal/membership"
@@ -54,6 +55,9 @@ type Services struct {
 	Replayer      *projection.Replayer
 	Resolver      *projection.Resolver
 	Contexts      *occontext.Service
+
+	// ProviderGrants grants and revokes provider authority (ADR-ORG-001 §5.11).
+	ProviderGrants *authority.Administration
 
 	// Consumer serves a registered consumer acting as itself, as organization_consumer_rt. Nil only
 	// when consumer authority is not configured, in which case authentication admits no consumer
@@ -215,6 +219,10 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/deprovisioning", h.recordDeprovisioning)
 	api.HandleFunc("POST /v1/obligations/{obligation_id}/resolve", h.resolveObligation)
 
+	api.HandleFunc("GET /v1/provider-grants", h.listProviderGrants)
+	api.HandleFunc("POST /v1/provider-grants", h.grantProvider)
+	api.HandleFunc("POST /v1/provider-grants/{grant_id}/revoke", h.revokeProvider)
+
 	api.HandleFunc("POST /v1/projections/consumers", h.registerConsumer)
 	api.HandleFunc("GET /v1/projections/consumers/{consumer_id}", h.getConsumer)
 	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/retire", h.retireConsumer)
@@ -272,6 +280,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the dead-letter resolver is required")
 	case s.Contexts == nil:
 		return errors.New("httpapi: the context service is required")
+	case s.ProviderGrants == nil:
+		return errors.New("httpapi: the provider grant administration is required")
 	case s.Consumer != nil && (s.Consumer.Access == nil || s.Consumer.Checks == nil || s.Consumer.Frontier == nil):
 		return errors.New("httpapi: the consumer services are incomplete")
 	}

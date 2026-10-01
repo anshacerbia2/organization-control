@@ -213,15 +213,32 @@ table "provider_grant" {
     type    = timestamptz
     default = sql("now()")
   }
+  // The revocation: when, by which provider, and why. NULL while the grant is active. The provider
+  // role holds UPDATE on these three columns and no other, so a revocation is recorded on the grant
+  // and the grant itself is never rewritten.
+  column "revoked_at" {
+    null = true
+    type = timestamptz
+  }
+  column "revoked_by" {
+    null = true
+    type = uuid
+  }
+  column "revoke_reason" {
+    null = true
+    type = text
+  }
 
   primary_key {
     columns = [column.grant_id]
   }
 
-  // The per-request lookup, and one grant per Principal and scope.
+  // The per-request lookup, and one active grant per Principal and scope. Partial, so a Principal
+  // revoked and granted again holds a second row beside the revoked one.
   index "provider_grant_principal_scope" {
     unique  = true
     columns = [column.principal_id, column.scope]
+    where   = "revoked_at IS NULL"
   }
 
   // At most one bootstrap grant, against two concurrent runs and against psql. The same shape as
@@ -242,6 +259,9 @@ table "provider_grant" {
   }
   check "provider_grant_origin_check" {
     expr = "(granted_by IS NULL) = (bootstrap_operator IS NOT NULL)"
+  }
+  check "provider_grant_revocation_check" {
+    expr = "((revoked_at IS NULL) = (revoked_by IS NULL)) AND ((revoked_at IS NULL) = (revoke_reason IS NULL)) AND ((revoke_reason IS NULL) OR (btrim(revoke_reason) <> ''))"
   }
 }
 

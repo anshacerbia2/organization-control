@@ -14,6 +14,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/observability"
 
+	"github.com/anshacerbia2/organization-control/internal/authority"
 	occontext "github.com/anshacerbia2/organization-control/internal/context"
 	"github.com/anshacerbia2/organization-control/internal/db"
 	"github.com/anshacerbia2/organization-control/internal/invitation"
@@ -99,6 +100,8 @@ func testSurface(t *testing.T) Surface {
 	must(err, "dead-letter resolver")
 	contexts, err := occontext.New(providerPool)
 	must(err, "context service")
+	providerGrants, err := authority.NewAdministration(providerPool)
+	must(err, "provider grant administration")
 	// The raw transactor, as production wires it: the frontier reads outbox aggregates carrying no
 	// tenant column, so it takes no scope and writes no privileged-access record per poll.
 	frontier, err := projection.NewFrontierReader(transactor)
@@ -111,7 +114,7 @@ func testSurface(t *testing.T) Surface {
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 			Replayer: replayer, Resolver: resolver,
-			Frontier: frontier,
+			Frontier: frontier, ProviderGrants: providerGrants,
 		},
 		Database: okProber{},
 	})
@@ -521,6 +524,7 @@ func testSurfaceServices(t *testing.T) Services {
 	resolutionPool, _ := db.NewResolutionPool(transactor, stubRecorder{})
 	resolver, _ := projection.NewResolver(resolutionPool)
 	contexts, _ := occontext.New(providerPool)
+	providerGrants, _ := authority.NewAdministration(providerPool)
 	// The raw transactor, as production wires it: the frontier reads outbox aggregates that carry no
 	// tenant column, so it takes no scope and writes no privileged-access record per poll.
 	frontier, _ := projection.NewFrontierReader(transactor)
@@ -531,7 +535,7 @@ func testSurfaceServices(t *testing.T) Services {
 		Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 		Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 		Replayer: replayer, Resolver: resolver,
-		Frontier: frontier,
+		Frontier: frontier, ProviderGrants: providerGrants,
 	}
 }
 
