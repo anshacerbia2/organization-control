@@ -299,6 +299,7 @@ func viewObligation(o offboarding.Obligation) obligationView {
 
 type consumerView struct {
 	ConsumerID        string `json:"consumer_id"`
+	PrincipalID       string `json:"principal_id"`
 	ProjectionVersion string `json:"projection_version"`
 
 	// Seconds rather than a Go duration. `time.Duration` marshals as a nanosecond integer, which
@@ -313,7 +314,7 @@ type consumerView struct {
 
 func viewConsumer(c projection.Consumer) consumerView {
 	return consumerView{
-		ConsumerID: c.ConsumerID, ProjectionVersion: c.ProjectionVersion,
+		ConsumerID: c.ConsumerID, PrincipalID: c.PrincipalID.String(), ProjectionVersion: c.ProjectionVersion,
 		MaxAcceptedAgeSeconds: int64(c.MaxAcceptedAge / time.Second),
 		StaleBehavior:         string(c.StaleBehavior), RegisteredAt: c.RegisteredAt,
 		SnapshotMark: c.SnapshotMark, LastReportedMark: c.LastReportedMark,

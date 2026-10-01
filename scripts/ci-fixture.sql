@@ -96,3 +96,14 @@ INSERT INTO membership.membership (membership_id, principal_id, tenant_id, subje
 VALUES ('22222222-2222-4222-8222-22222222222a', '33333333-3333-4333-8333-33333333333a', '11111111-1111-4111-8111-11111111111a', 'human', 'active', now(), 'migration'),
        ('22222222-2222-4222-8222-22222222222b', '33333333-3333-4333-8333-33333333333b', '11111111-1111-4111-8111-11111111111b', 'human', 'active', now(), 'migration')
 ON CONFLICT DO NOTHING;
+
+-- The dev issuer's provider (cmd/organization-devissuer, role=provider). A provider is a Principal
+-- holding a provider grant this service records (ADR-ORG-001 §5.11), so the fixture records one for
+-- the Principal that issuer names, the way `organization-control bootstrap-provider` would. Seeded
+-- here rather than by running the command for the reason the Tenants above are: the grant is setup,
+-- and the bootstrap has its own integration test in internal/authority.
+INSERT INTO organization.provider_grant (grant_id, principal_id, scope, bootstrap_operator, reason)
+VALUES ('44444444-4444-4444-8444-44444444444a', '55555555-5555-4555-8555-55555555555a',
+        'provider:organization-control', 'scripts/ci-fixture.sql',
+        'development and CI: the dev issuer''s provider')
+ON CONFLICT DO NOTHING;

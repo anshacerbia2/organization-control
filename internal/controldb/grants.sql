@@ -25,6 +25,7 @@ BEGIN
       FROM (VALUES
               ('organization.organization'),
               ('organization.external_reference'),
+              ('organization.provider_grant'),
               ('tenant.tenant'),
               ('tenant.provisioning_request'),
               ('tenant.tenant_event'),
@@ -184,6 +185,11 @@ GRANT SELECT, INSERT, UPDATE ON operation.offboarding_obligation TO organization
 -- organization.external_reference is granted to nobody: no statement in this repository uses it.
 GRANT USAGE ON SCHEMA organization TO organization_provider_rt;
 GRANT SELECT, INSERT, UPDATE ON organization.organization TO organization_provider_rt;
+
+-- organization.provider_grant -- provider only: SELECT for the authority read every request makes,
+-- INSERT for the bootstrap. No UPDATE and no DELETE, so a grant row is never rewritten: it is the
+-- record of who was given cross-Tenant authority, by whom, and why (ADR-ORG-001 §5.11).
+GRANT SELECT, INSERT ON organization.provider_grant TO organization_provider_rt;
 
 -- projection.consumer -- provider only: the consumer registry, progress reports, the snapshot
 -- mark, and the fresh check's metering. The resolver reads it through its own role, below.

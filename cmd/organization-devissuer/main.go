@@ -72,18 +72,21 @@ const (
 	deliveryScope = "foundation-reference.deliver"
 	operateScope  = "foundation-reference.operate"
 
-	// consumerRole and consumerClaim must match ORGANIZATION_CONSUMER_ROLE and
-	// ORGANIZATION_CONSUMER_CLAIM. They let a registered consumer perform the authoritative fresh
-	// check without holding provider authority over every Tenant.
-	consumerRole  = "projection-consumer"
-	consumerClaim = "https://scnehaux.com/consumer_id"
-	consumerName  = "foundation-reference"
+	// The service reads a caller from the standard's claims and its own records, never from a role
+	// (ADR-ORG-001 §5.11, TDD-organization-control-001 §Caller Authority). These are the Principals
+	// the records know in development and CI.
+	//
+	// devProvider holds the provider grant scripts/ci-fixture.sql seeds. Another provider is one a
+	// grant names: run `organization-control bootstrap-provider` on an empty database, and ask for
+	// role=provider&principal_id=<it>.
+	devProvider = "55555555-5555-4555-8555-55555555555a"
 
-	// tenantClaim and providerRole must match ORGANIZATION_TENANT_CLAIM and
-	// ORGANIZATION_PROVIDER_ROLE. They are properties of the realm a deployment points at, which is
-	// why the service takes them as configuration rather than as constants.
-	tenantClaim  = "https://scnehaux.com/tenant"
-	providerRole = "provider-admin"
+	// devConsumer is the workload Principal a consumer registers with ("principal_id" in
+	// POST /v1/projections/consumers). foundation-reference's system proof registers it.
+	devConsumer = "55555555-5555-4555-8555-55555555555c"
+
+	// devWorkloadOwner is the owner every workload token names (STD-IAM-002 §3.5 rule 7).
+	devWorkloadOwner = "55555555-5555-4555-8555-55555555550a"
 
 	// ttl is short on purpose. A token that outlives the session that minted it is a token somebody
 	// pastes into a note.
@@ -127,12 +130,15 @@ func main() {
 		})
 	})
 
-	// GET /token?role=provider
-	// GET /token?role=tenant&tenant_id=<uuid>
+	// GET /token?role=provider[&principal_id=<uuid>]
+	// GET /token?role=tenant&tenant_id=<uuid>[&principal_id=<uuid>]
+	// GET /token?role=consumer[&principal_id=<uuid>]
+	// GET /token?role=stranger
 	//
-	// The subject is minted per token unless supplied, because it becomes `db.Scope.Actor` and lands
-	// in every privileged-access record and every event. A fixed subject would make two sessions
-	// indistinguishable in the evidence.
+	// principal_id becomes `db.Scope.Actor` and lands in every privileged-access record and every
+	// event. A provider or consumer token names the Principal the records know unless another is
+	// asked for; a tenant token mints one per token, so two sessions stay distinguishable in the
+	// evidence. sub is the protocol subject and the service never reads it.
 	mux.HandleFunc("GET /token", func(w http.ResponseWriter, r *http.Request) {
 		role := r.URL.Query().Get("role")
 		if role == "" {
@@ -168,9 +174,36 @@ func main() {
 			"exp": now.Add(ttl).Unix(),
 		}
 
+		principal := strings.TrimSpace(r.URL.Query().Get("principal_id"))
+		if principal != "" {
+			if _, err := id.Parse(principal); err != nil {
+				http.Error(w, "principal_id is not a UUID", http.StatusBadRequest)
+				return
+			}
+		}
+		person := func(fallback string) {
+			if principal == "" {
+				principal = fallback
+			}
+			claims["principal_id"] = principal
+			claims["subject_type"] = "human"
+			// A provider token is privileged: STD-IAM-002 §3.2 makes acr and auth_time mandatory.
+			claims["acr"] = "1"
+			claims["auth_time"] = now.Unix()
+		}
+
 		switch role {
 		case "provider":
-			claims["realm_access"] = map[string]any{"roles": []string{providerRole}}
+			person(devProvider)
+		case "stranger":
+			// Authentic, and a person holding no provider grant and no Tenant: refused 403. The way
+			// to see that the service reads its own records rather than anything the token says.
+			minted, err := id.NewV7()
+			if err != nil {
+				http.Error(w, "mint principal: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			person(minted.String())
 		case "tenant":
 			tenantID := strings.TrimSpace(r.URL.Query().Get("tenant_id"))
 			if tenantID == "" {
@@ -181,19 +214,21 @@ func main() {
 				http.Error(w, "tenant_id is not a UUID", http.StatusBadRequest)
 				return
 			}
-			claims[tenantClaim] = tenantID
-		case "both":
-			// Deliberately offered. A token carrying provider authority *and* a Tenant must be
-			// refused rather than resolved to either, and the only way to see that refusal by hand
-			// is to be able to mint one.
-			claims["realm_access"] = map[string]any{"roles": []string{providerRole}}
-			claims[tenantClaim] = "11111111-1111-4111-8111-11111111111a"
+			minted, err := id.NewV7()
+			if err != nil {
+				http.Error(w, "mint principal: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			person(minted.String())
+			claims["tenant_id"] = tenantID
 		case "consumer":
-			// A registered projection consumer. Exclusive against the other two authorities, and
-			// the service refuses a token carrying more than one -- which is worth being able to
-			// mint, so the refusal can be seen rather than trusted.
-			claims["realm_access"] = map[string]any{"roles": []string{consumerRole}}
-			claims[consumerClaim] = consumerName
+			// A workload: the service finds the consumer registered with its principal_id.
+			if principal == "" {
+				principal = devConsumer
+			}
+			claims["principal_id"] = principal
+			claims["subject_type"] = "workload"
+			claims["workload_owner"] = devWorkloadOwner
 		case "delivery":
 			// For the dispatcher. Audience-bound to the consumer, and carrying only the scope that
 			// admits a delivery: this token cannot invoke an operation.
@@ -202,7 +237,7 @@ func main() {
 			// For a caller of the consumer's protected operations. Cannot deliver.
 			claims["scope"] = operateScope
 		default:
-			http.Error(w, "role must be provider, tenant, both, consumer, delivery, or operate",
+			http.Error(w, "role must be provider, tenant, stranger, consumer, delivery, or operate",
 				http.StatusBadRequest)
 			return
 		}
@@ -299,7 +334,7 @@ func banner(kid string) {
 	fmt.Fprint(out, "    make token                              save a provider token\n")
 	fmt.Fprint(out, "    make api P=/v1/tenants/<id>             call it\n")
 	fmt.Fprint(out, "    make api M=POST P=/v1/organizations B=body.json\n\n")
-	fmt.Fprintf(out, "Tokens: http://%s/token?role=provider   (also tenant, both)\n", listen)
+	fmt.Fprintf(out, "Tokens: http://%s/token?role=provider   (also tenant, stranger, consumer)\n", listen)
 	fmt.Fprintf(out, "        role=consumer   aud=%s, for the authoritative fresh check\n", audience)
 	fmt.Fprintf(out, "        role=delivery   aud=%s, for the dispatcher\n", referenceAudience)
 	fmt.Fprintf(out, "        role=operate    aud=%s, for a caller of its operations\n", referenceAudience)

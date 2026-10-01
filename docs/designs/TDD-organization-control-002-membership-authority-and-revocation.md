@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.4.0
+  version: 1.5.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-09-26
+  last_reviewed: 2026-10-01
   parent_sad: SAD-004
 ---
 
@@ -237,6 +237,7 @@ lives in that consumer's database, never here.
 ```sql
 CREATE TABLE projection.consumer (
     consumer_id        TEXT        PRIMARY KEY,
+    principal_id       UUID        NOT NULL UNIQUE,
     projection_version TEXT        NOT NULL,
     max_accepted_age   INTERVAL    NOT NULL,
     stale_behavior     TEXT        NOT NULL,
@@ -265,6 +266,14 @@ clearing the mark there would refuse its next progress report for a reason unrel
 what it changed. A re-bootstrap may move the mark forward and never backward: a lower mark
 would claim the consumer rebuilt from an older instant than one it has already reported
 progress against, which no sequence of correct operations produces.
+
+**A consumer is the workload Principal it was registered with.** `principal_id` is how a
+consumer's token is recognized (`ADR-ORG-001 §5.11`, `TDD-organization-control-001` §Caller
+Authority): a workload token is a consumer's when an active row carries its `principal_id`.
+Registration requires it. It is unique across every row, retired ones included, so a workload
+Principal names one consumer for good, and re-registering a consumer under a different
+`principal_id` is refused rather than moving the consumer's records to another workload. A
+`client_id` would not do: a retired client registration frees its `client_key` for the next one.
 
 ### Context Claims Supplied to Token Issuance
 
@@ -691,7 +700,7 @@ finding, and consumer misuse of the fresh-check path.
 | :-- | :-- |
 | Parent system | SAD-004 — Scnehaux Organization Control |
 | Realizes capability | PAD-PLT-002 — Organization & Tenancy Platform |
-| Governed by | ADR-ORG-001 — Separate Organization Authority and Keycloak Projection |
+| Governed by | ADR-ORG-001 — Separate Organization Authority and Keycloak Projection; §5.11 a consumer is a registered workload Principal |
 | Governed by | ADR-GLB-003 — Transactional Outbox |
 | Governed by | ADR-GLB-006 — Event Versioning |
 | Conforms to | STD-IAM-001 §3.3 — one active Tenant context per token; the Membership set is never placed in a token |

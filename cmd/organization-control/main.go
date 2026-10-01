@@ -39,6 +39,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/verify"
 
 	"github.com/anshacerbia2/organization-control/internal/access"
+	"github.com/anshacerbia2/organization-control/internal/authority"
 	"github.com/anshacerbia2/organization-control/internal/config"
 	occontext "github.com/anshacerbia2/organization-control/internal/context"
 	"github.com/anshacerbia2/organization-control/internal/db"
@@ -54,6 +55,16 @@ import (
 )
 
 func main() {
+	// One subcommand: the bootstrap that makes the first provider grant (ADR-ORG-001 §5.11). A
+	// command on the deployable rather than an endpoint, for the reason the first Principal's
+	// ceremony is one: an endpoint needs a caller, and the first grant is what makes the first one.
+	if len(os.Args) > 1 && os.Args[1] == bootstrapCommand {
+		if err := bootstrapProvider(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "organization-control %s: %v\n", bootstrapCommand, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		// The logger may not exist yet when configuration fails, so this one write goes to stderr
 		// directly rather than through a dependency that might be the failure.
@@ -257,11 +268,12 @@ func run() error {
 	}
 
 	// A registered consumer's own routes, on its own connections and its own role. Built only when
-	// consumer authority is configured, because without it no caller could reach them. The frontier
+	// the consumer credential is configured, which is what enables consumer authority: without the
+	// pool no caller could be served. The frontier
 	// takes the raw consumer connections for the reason the provider's frontier takes the raw
 	// provider ones.
 	var consumerServices *httpapi.ConsumerServices
-	if cfg.ConsumerRole != "" {
+	if cfg.ConsumerDSN != "" {
 		consumerConns, err := fdb.Open(ctx, fdb.Config{
 			Name:            "organization-control-consumer",
 			DSN:             cfg.ConsumerDSN,
@@ -322,11 +334,17 @@ func run() error {
 		return fmt.Errorf("jwks source: %w", err)
 	}
 
+	// Provider grants and consumer registrations, read for each request on the provider connections
+	// (TDD-organization-control-001 §Caller Authority). The raw transactor, for the reason the
+	// frontier takes one: the tables carry no policy, and the scope wrapper would file an access
+	// record before the request's own scope is known.
+	records, err := authority.NewReader(providerConns)
+	if err != nil {
+		return fmt.Errorf("caller records: %w", err)
+	}
 	authenticationConfig := httpapi.AuthenticationConfig{
-		TenantClaim:   cfg.TenantClaim,
-		ProviderRole:  cfg.ProviderRole,
-		ConsumerRole:  cfg.ConsumerRole,
-		ConsumerClaim: cfg.ConsumerClaim,
+		Records:   records,
+		Consumers: consumerServices != nil,
 	}
 
 	// The claim rule is this service's, because STD-IAM-002 §3.5 states it in terms of claims
@@ -335,7 +353,7 @@ func run() error {
 		Issuer:                 cfg.TokenIssuer,
 		Audience:               cfg.TokenAudience,
 		Keys:                   keys,
-		Requirement:            httpapi.Requirement(authenticationConfig),
+		Requirement:            httpapi.Requirement(),
 		MaxSkew:                cfg.TokenMaxSkew,
 		RequireAccessTokenType: cfg.EnforceAccessTokenType,
 	})
@@ -356,9 +374,7 @@ func run() error {
 		slog.String("issuer", cfg.TokenIssuer),
 		slog.String("audience", cfg.TokenAudience),
 		slog.String("jwks_url", cfg.JWKSURL),
-		slog.String("tenant_claim", cfg.TenantClaim),
-		slog.String("provider_role", cfg.ProviderRole),
-		slog.String("consumer_role", cfg.ConsumerRole),
+		slog.Bool("consumer_authority", authenticationConfig.Consumers),
 		slog.Duration("max_skew", cfg.TokenMaxSkew))
 
 	// Scope resolution runs inside the chain's innermost position rather than as another Chain

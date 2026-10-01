@@ -169,6 +169,82 @@ table "external_reference" {
   }
 }
 
+// A provider grant: the record that a Principal may act across Tenants through this service.
+//
+// ADR-ORG-001 §5.11 makes provider authority a record this platform holds and checks for each
+// request, by the token's principal_id, rather than a role in the token. TDD-organization-control-001
+// §Caller Authority. Not tenant-scoped: provider authority is the one authority that belongs to no
+// Tenant. The provider role reads and inserts it and holds neither UPDATE nor DELETE, so a grant row
+// is never rewritten.
+table "provider_grant" {
+  schema  = schema.organization
+  comment = "Provider authority over this service, by principal_id. Checked for every provider request."
+
+  column "grant_id" {
+    null = false
+    type = uuid
+  }
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+  // The registered provider scope. Today the one this service checks (STD-IAM-002 §3.1.1).
+  column "scope" {
+    null = false
+    type = text
+  }
+  // The provider who made the grant, by principal_id. NULL only on the bootstrap grant, which no
+  // provider could make because none existed yet.
+  column "granted_by" {
+    null = true
+    type = uuid
+  }
+  // Who ran the bootstrap command, as they gave their name. Set on the bootstrap grant only.
+  column "bootstrap_operator" {
+    null = true
+    type = text
+  }
+  column "reason" {
+    null = false
+    type = text
+  }
+  column "granted_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.grant_id]
+  }
+
+  // The per-request lookup, and one grant per Principal and scope.
+  index "provider_grant_principal_scope" {
+    unique  = true
+    columns = [column.principal_id, column.scope]
+  }
+
+  // At most one bootstrap grant, against two concurrent runs and against psql. The same shape as
+  // consumer_single_active: every bootstrap row indexes the same key, so the second collides.
+  index "provider_grant_single_bootstrap" {
+    unique = true
+    on {
+      expr = "(true)"
+    }
+    where = "granted_by IS NULL"
+  }
+
+  check "provider_grant_scope_check" {
+    expr = "scope IN ('provider:organization-control')"
+  }
+  check "provider_grant_reason_check" {
+    expr = "btrim(reason) <> ''"
+  }
+  check "provider_grant_origin_check" {
+    expr = "(granted_by IS NULL) = (bootstrap_operator IS NOT NULL)"
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // tenant — RLS. A tenant-scoped caller sees exactly one row: its own.
 // ---------------------------------------------------------------------------------------------
@@ -987,6 +1063,13 @@ table "consumer" {
     null = false
     type = text
   }
+  // The workload Principal this consumer is. A workload token is this consumer's when its
+  // principal_id matches an active row (ADR-ORG-001 §5.11). Unique across every row, retired ones
+  // included, so a workload names one consumer for good.
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
   column "projection_version" {
     null = false
     type = text
@@ -1100,6 +1183,11 @@ table "consumer" {
       expr = "(true)"
     }
     where = "retired_at IS NULL"
+  }
+
+  index "consumer_principal" {
+    unique  = true
+    columns = [column.principal_id]
   }
 
   // A negative count is not a low ratio, it is a broken counter. Constrained here so a defect

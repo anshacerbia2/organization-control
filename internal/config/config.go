@@ -68,30 +68,10 @@ type Config struct {
 	// issuer's clients move to at+jwt.
 	EnforceAccessTokenType bool
 
-	// TenantClaim is the claim naming the Tenant a caller administers, and ProviderRole is the
-	// realm role that confers cross-Tenant authority.
-	//
-	// Both are configuration rather than constants because the claim namespace is a property of the
-	// realm this deployable is pointed at, and hard-coding it would make the same binary unusable
-	// against a second realm. Neither is defaulted: a default claim name that no token carries
-	// would leave every caller with no Tenant, and a default provider role name that no token
-	// carries would leave provider authority unreachable — both fail closed, and both fail in a way
-	// an operator would debug as a permissions bug rather than as a missing variable.
-	TenantClaim  string
-	ProviderRole string
-
-	// ConsumerRole and ConsumerClaim describe a registered projection consumer: the realm role it
-	// carries, and the claim naming which consumer it is.
-	//
-	// Optional, and only together. Left unset, consumer authority does not exist and the two
-	// context checks stay provider-only. Set, they let a consumer ask whether one principal holds
-	// context in one Tenant without holding the authority to administer every Tenant.
-	ConsumerRole  string
-	ConsumerClaim string
-
 	// ConsumerDSN is the consumer's own credential, a login role inheriting organization_consumer_rt.
-	// Required exactly when consumer authority is configured, and never another pool's: a consumer
-	// on the provider credential could read and write every table the control plane can.
+	// Optional: set, it is what enables consumer authority, because only then is there a pool to
+	// serve a consumer. Never another pool's: a consumer on the provider credential could read and
+	// write every table the control plane can.
 	ConsumerDSN string
 
 	// The three provisioning bounds of TDD-organization-control-003 §Configuration.
@@ -143,8 +123,6 @@ func Load() (Config, error) {
 		"ORGANIZATION_TOKEN_ISSUER":   &cfg.TokenIssuer,
 		"ORGANIZATION_TOKEN_AUDIENCE": &cfg.TokenAudience,
 		"ORGANIZATION_JWKS_URL":       &cfg.JWKSURL,
-		"ORGANIZATION_TENANT_CLAIM":   &cfg.TenantClaim,
-		"ORGANIZATION_PROVIDER_ROLE":  &cfg.ProviderRole,
 	}
 	for name, target := range required {
 		*target = strings.TrimSpace(os.Getenv(name))
@@ -182,30 +160,22 @@ func Load() (Config, error) {
 				"process could have produced"))
 	}
 
-	cfg.ConsumerRole = strings.TrimSpace(os.Getenv("ORGANIZATION_CONSUMER_ROLE"))
-	cfg.ConsumerClaim = strings.TrimSpace(os.Getenv("ORGANIZATION_CONSUMER_CLAIM"))
-	// Refused at startup rather than left to fail per request. A role with no claim would
-	// authenticate a consumer the meter cannot name, and a claim with no role would be read by
-	// nothing -- both are silent when they are wrong.
-	if (cfg.ConsumerRole == "") != (cfg.ConsumerClaim == "") {
-		problems = append(problems, errors.New(
-			"ORGANIZATION_CONSUMER_ROLE and ORGANIZATION_CONSUMER_CLAIM must be set together or not at all"))
-	}
 	cfg.ConsumerDSN = strings.TrimSpace(os.Getenv("ORGANIZATION_CONSUMER_DATABASE_URL"))
-	switch {
-	case cfg.ConsumerRole != "" && cfg.ConsumerDSN == "":
-		// Not defaulted to the provider credential: that fallback is the over-privilege this
-		// credential exists to remove, and nothing would report it.
-		problems = append(problems, errors.New(
-			"ORGANIZATION_CONSUMER_DATABASE_URL is required when ORGANIZATION_CONSUMER_ROLE is set"))
-	case cfg.ConsumerRole == "" && cfg.ConsumerDSN != "":
-		problems = append(problems, errors.New(
-			"ORGANIZATION_CONSUMER_DATABASE_URL is set but consumer authority is not; no caller could use it"))
-	case cfg.ConsumerDSN != "" && (cfg.ConsumerDSN == cfg.ProviderDSN ||
-		cfg.ConsumerDSN == cfg.TenantDSN || cfg.ConsumerDSN == cfg.ResolutionDSN):
+	if cfg.ConsumerDSN != "" && (cfg.ConsumerDSN == cfg.ProviderDSN ||
+		cfg.ConsumerDSN == cfg.TenantDSN || cfg.ConsumerDSN == cfg.ResolutionDSN) {
 		problems = append(problems, errors.New(
 			"ORGANIZATION_CONSUMER_DATABASE_URL matches another pool's DSN, so a consumer would run "+
 				"with that pool's privileges rather than its own"))
+	}
+
+	// Authority no longer comes from these (ADR-ORG-001 §5.11, TDD-organization-control-001 §Caller
+	// Authority). Refused rather than ignored: a deployment still setting one expects provider or
+	// consumer authority to come from a role or a claim name, and ignoring it would leave that
+	// deployment believing so while every provider is refused for a reason it cannot see.
+	for name, now := range RemovedSettings {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			problems = append(problems, fmt.Errorf("%s is no longer read: %s", name, now))
+		}
 	}
 
 	cfg.ListenAddress = stringOr("ORGANIZATION_LISTEN_ADDRESS", ":8080")
@@ -303,4 +273,14 @@ func intOr(key string, fallback int, problems *[]error) int {
 		return fallback
 	}
 	return value
+}
+
+// RemovedSettings are the variables that named a claim or a role, with what replaced each.
+var RemovedSettings = map[string]string{
+	"ORGANIZATION_TENANT_CLAIM": "the Tenant is the tenant_id claim STD-IAM-002 §3.2 names; unset it",
+	"ORGANIZATION_PROVIDER_ROLE": "a provider is a Principal holding a provider grant this service records " +
+		"(organization-control bootstrap-provider makes the first); unset it",
+	"ORGANIZATION_CONSUMER_ROLE": "a consumer is a workload registered with its principal_id, and " +
+		"ORGANIZATION_CONSUMER_DATABASE_URL enables consumer authority; unset it",
+	"ORGANIZATION_CONSUMER_CLAIM": "the consumer is found by the token's principal_id; unset it",
 }

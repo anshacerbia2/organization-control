@@ -83,6 +83,12 @@ var boundaries = map[string][]string{
 	"(*" + module + "/internal/projection.FrontierReader).FrontierFor": {providerRole, consumerRole},
 	// projection.NewSignalsReader(providerConns), read by the enforcement gauges on each collection.
 	"(*" + module + "/internal/projection.SignalsReader).Read": {providerRole},
+	// authority.NewReader(providerConns), the caller records authentication reads for each request.
+	"(*" + module + "/internal/authority.Reader).ProviderGrant": {providerRole},
+	"(*" + module + "/internal/authority.Reader).ConsumerFor":   {providerRole},
+	// authority.NewGrants(conns) in cmd/organization-control/bootstrap.go, on
+	// ORGANIZATION_PROVIDER_DATABASE_URL: the bootstrap that makes the first provider grant.
+	"(*" + module + "/internal/authority.Grants).Bootstrap": {providerRole},
 }
 
 // Statement is one SQL constant and where it was reached.

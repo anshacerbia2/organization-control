@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anshacerbia2/foundation-platform/id"
+
 	"github.com/anshacerbia2/organization-control/internal/db"
 )
 
@@ -103,7 +105,12 @@ var (
 
 // Consumer is one row of projection.consumer.
 type Consumer struct {
-	ConsumerID        string
+	ConsumerID string
+
+	// PrincipalID is the workload Principal this consumer is. A workload token is this consumer's
+	// when its principal_id matches and the consumer is active (ADR-ORG-001 §5.11).
+	PrincipalID id.UUID
+
 	ProjectionVersion string
 	MaxAcceptedAge    time.Duration
 	StaleBehavior     StaleBehavior
@@ -123,7 +130,13 @@ type Consumer struct {
 
 // Registration is a consumer declaring what it needs.
 type Registration struct {
-	ConsumerID        string
+	ConsumerID string
+
+	// PrincipalID is the consumer's workload Principal. Required, and fixed at the first
+	// registration: re-registering under another is refused (TDD-organization-control-002
+	// §Consumer Registry).
+	PrincipalID id.UUID
+
 	ProjectionVersion string
 	MaxAcceptedAge    time.Duration
 	StaleBehavior     StaleBehavior
@@ -133,6 +146,10 @@ func (r Registration) validate() error {
 	switch {
 	case strings.TrimSpace(r.ConsumerID) == "":
 		return fmt.Errorf("%w: a consumer identifier is required", ErrInvalid)
+	case r.PrincipalID.IsNil():
+		// The consumer's token is recognized by this and nothing else. A consumer registered
+		// without it could never authenticate, and would sit in the single active slot.
+		return fmt.Errorf("%w: the consumer's workload principal_id is required", ErrInvalid)
 	case strings.TrimSpace(r.ProjectionVersion) == "":
 		// The projection is a contract, and a consumer that cannot name the version it reads
 		// cannot be told that the contract changed under it.
@@ -176,9 +193,12 @@ func NewRegistry(pool *db.ProviderPool) (*Registry, error) {
 // consumer coming back under an identity it previously held is a legitimate act, and the
 // single-consumer rule is about how many are active at once rather than about which names have
 // ever been used.
+//
+// `principal_id` is written on insert and never updated: identityConflict refuses a re-registration
+// naming another one before this runs.
 const upsertStatement = `INSERT INTO projection.consumer
-    (consumer_id, projection_version, max_accepted_age, stale_behavior)
-VALUES ($1, $2, $3, $4)
+    (consumer_id, principal_id, projection_version, max_accepted_age, stale_behavior)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (consumer_id) DO UPDATE
 SET projection_version = excluded.projection_version,
     max_accepted_age   = excluded.max_accepted_age,
@@ -196,6 +216,40 @@ const otherActiveConsumer = `SELECT consumer_id
 FROM projection.consumer
 WHERE retired_at IS NULL AND consumer_id <> $1
 FOR UPDATE`
+
+// identityStatement reads the rows that would make the registration change whose workload a consumer
+// is: this consumer under another principal_id, or another consumer, retired or not, under this one.
+const identityStatement = `SELECT consumer_id, principal_id::text
+FROM projection.consumer
+WHERE (consumer_id = $1 AND principal_id <> $2) OR (consumer_id <> $1 AND principal_id = $2)
+LIMIT 1`
+
+// identityConflict refuses a registration that would move a consumer to another workload, or give a
+// workload a second consumer.
+//
+// Refused rather than updated. A consumer's records -- its snapshot mark, its reported positions, its
+// dead-letter debt -- are about one workload, and moving them to another would let that workload
+// inherit an authority and a history it never had. consumer_principal is the database's guarantee for
+// the second case; this read turns its violation into an answer that names the consumer in the way.
+func identityConflict(ctx context.Context, tx db.Tx, reg Registration) error {
+	rows, err := tx.Query(ctx, identityStatement, reg.ConsumerID, reg.PrincipalID.String())
+	if err != nil {
+		return fmt.Errorf("projection: checking the consumer's principal: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return rows.Err()
+	}
+	var consumer, principal string
+	if err := rows.Scan(&consumer, &principal); err != nil {
+		return fmt.Errorf("projection: reading the consumer's principal: %w", err)
+	}
+	if consumer == reg.ConsumerID {
+		return fmt.Errorf("%w: %s is registered with another principal_id; a consumer's workload does not change",
+			ErrInvalid, consumer)
+	}
+	return fmt.Errorf("%w: principal_id is already registered as consumer %s", ErrInvalid, consumer)
+}
 
 // activeHolder reports the active consumer other than the named one, and whether there is one.
 func activeHolder(ctx context.Context, tx db.Tx, consumerID string) (string, bool, error) {
@@ -229,6 +283,7 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Consumer, er
 
 	consumer := Consumer{
 		ConsumerID:        reg.ConsumerID,
+		PrincipalID:       reg.PrincipalID,
 		ProjectionVersion: reg.ProjectionVersion,
 		MaxAcceptedAge:    reg.MaxAcceptedAge,
 		StaleBehavior:     reg.StaleBehavior,
@@ -247,12 +302,16 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Consumer, er
 			if held {
 				return fmt.Errorf("%w: %s holds it; retire that consumer first", ErrSingleConsumer, holder)
 			}
+			if err := identityConflict(ctx, tx, reg); err != nil {
+				return err
+			}
 
 			return tx.QueryRow(ctx, upsertStatement,
-				reg.ConsumerID, reg.ProjectionVersion, reg.MaxAcceptedAge, string(reg.StaleBehavior),
+				reg.ConsumerID, reg.PrincipalID.String(), reg.ProjectionVersion, reg.MaxAcceptedAge,
+				string(reg.StaleBehavior),
 			).Scan(&consumer.RegisteredAt)
 		}); err != nil {
-		if errors.Is(err, ErrSingleConsumer) {
+		if errors.Is(err, ErrSingleConsumer) || errors.Is(err, ErrInvalid) {
 			return Consumer{}, err
 		}
 		return Consumer{}, fmt.Errorf("projection: register consumer: %w", err)
@@ -306,6 +365,7 @@ func (r *Registry) Retire(ctx context.Context, consumerID string) error {
 }
 
 const selectConsumer = `SELECT consumer_id,
+       principal_id::text,
        projection_version,
        max_accepted_age,
        stale_behavior,
@@ -334,13 +394,18 @@ func (r *Registry) Get(ctx context.Context, consumerID string) (Consumer, error)
 }
 
 func load(ctx context.Context, tx db.Tx, consumerID string, consumer *Consumer) error {
-	var behavior string
+	var behavior, principal string
 	if err := tx.QueryRow(ctx, selectConsumer, consumerID).Scan(
-		&consumer.ConsumerID, &consumer.ProjectionVersion, &consumer.MaxAcceptedAge,
+		&consumer.ConsumerID, &principal, &consumer.ProjectionVersion, &consumer.MaxAcceptedAge,
 		&behavior, &consumer.RegisteredAt, &consumer.SnapshotMark,
 		&consumer.LastReportedMark, &consumer.LastReportedAt); err != nil {
 		return fmt.Errorf("%w: %s", ErrNotRegistered, consumerID)
 	}
+	parsed, err := id.Parse(principal)
+	if err != nil {
+		return fmt.Errorf("projection: stored principal_id %q is not an identifier", principal)
+	}
+	consumer.PrincipalID = parsed
 	consumer.StaleBehavior = StaleBehavior(behavior)
 	if !consumer.StaleBehavior.Valid() {
 		return fmt.Errorf("projection: stored stale_behavior %q is not a declared behavior", behavior)

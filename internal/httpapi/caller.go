@@ -20,8 +20,9 @@ import (
 // be tested without one. What this package owns is the step after — turning a caller into a scope —
 // because that is the step with a security property worth asserting.
 type Caller struct {
-	// Subject is the acting administrative identity. It becomes `db.Scope.Actor`, which is what
-	// every lifecycle event and every privileged-access record is attributed to.
+	// Subject is the acting Principal, by the token's principal_id, never its sub (STD-IAM-002
+	// §3.2). It becomes `db.Scope.Actor`, which is what every lifecycle event and every
+	// privileged-access record is attributed to.
 	Subject id.UUID
 
 	// Tenant is the Tenant this caller administers. Nil for a provider caller.
@@ -30,17 +31,18 @@ type Caller struct {
 	// Consumer names the registered projection consumer this caller is, and is empty for every
 	// other caller.
 	//
-	// It comes from the token and never from a request body. The fresh check is metered per
-	// consumer, so a consumer able to name itself in the body could spend another consumer's
-	// budget -- and the meter exists to make an over-eager consumer visible, which it cannot do
-	// if the counter it increments is chosen by the caller.
+	// It comes from the consumer registry, by the token's principal_id, and never from a request
+	// body. The fresh check is metered per consumer, so a consumer able to name itself in the body
+	// could spend another consumer's budget -- and the meter exists to make an over-eager consumer
+	// visible, which it cannot do if the counter it increments is chosen by the caller.
 	Consumer string
 
-	// Provider is set when the caller holds cross-Tenant provider authority.
+	// Provider is set when the caller holds cross-Tenant provider authority: a provider grant this
+	// service records for the Principal, read when the request was authenticated (ADR-ORG-001 §5.11).
 	//
 	// A boolean rather than a role list because this package makes no authorization decision: it
-	// asks which of the two isolation scopes applies. Whether this caller may hold provider
-	// authority at all was decided before the value was set.
+	// asks which isolation scope applies. Whether this caller holds provider authority at all was
+	// decided before the value was set.
 	Provider bool
 }
 

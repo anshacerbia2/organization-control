@@ -217,14 +217,49 @@ misconfigured process start and fail later.
 | `ORGANIZATION_TOKEN_ISSUER` | yes | Compared for exact equality |
 | `ORGANIZATION_TOKEN_AUDIENCE` | yes | This resource's registered identifier |
 | `ORGANIZATION_JWKS_URL` | yes | Key source. Never read from a token |
-| `ORGANIZATION_TENANT_CLAIM` | yes | The claim carrying the Tenant a caller administers |
-| `ORGANIZATION_PROVIDER_ROLE` | yes | The realm role conferring cross-Tenant authority |
+| `ORGANIZATION_CONSUMER_DATABASE_URL` | no | Connects as `organization_consumer_app` → `organization_consumer_rt`. Set, it enables consumer authority |
 | `ORGANIZATION_LISTEN_ADDRESS` | no | Defaults to `:8080` |
 | `ORGANIZATION_TOKEN_MAX_SKEW` | no | 30s; capped at 60s by STD-IAM-002 §3.5 |
 | `ORGANIZATION_TOKEN_TYPE` | no | `report` (default) accepts a token whose header `typ` is not `at+jwt` and logs it with its `azp`; `enforce` refuses it with 401 (STD-IAM-002 §3.5 step 5, RFC 9068 §4). The dev issuer types its tokens `at+jwt` |
 | `ORGANIZATION_PROVISIONING_TIMEOUT` | no | 30m. Age at which a provisioning request becomes `unresolved` |
 | `ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL` | no | 15m. Cadence for the unresolved sweep |
 | `ORGANIZATION_TENANT_NAME_MAX` | no | 120. Tenant display-name bound |
+
+### Who a caller is
+
+A caller is read from the token's standard claims and this service's own records, never from a role
+in the token (ADR-ORG-001 §5.11, TDD-organization-control-001 §Caller Authority). Every token needs a
+`principal_id` and a `subject_type`; the `principal_id` is the actor every event and evidence row
+names, and `sub` is not read.
+
+| Caller | Token | Record read for each request |
+| :-- | :-- | :-- |
+| Tenant administrator | `tenant_id` | — |
+| Provider | `subject_type` `human`, `acr`, `auth_time`, no `tenant_id` | a provider grant for the `principal_id` |
+| Projection consumer | `subject_type` `workload`, `workload_owner`, no `tenant_id` | an active consumer registered with the `principal_id` |
+
+A revoked grant or a retired consumer stops at the next request, not when the token expires. A record
+read that fails answers 503 and admits nobody.
+
+**The first provider grant** is made once, by a command on the deployable:
+
+```text
+ORGANIZATION_PROVIDER_DATABASE_URL=… organization-control bootstrap-provider \
+    -principal-id <the first Principal's principal_id> -operator "<your name>" -reason "<why>"
+```
+
+It refuses when any grant exists, records the operator and the reason in a row no runtime role can
+change, and creates no identity: the Principal is the one the Identity Control API's ceremony minted.
+Rerun for the same Principal, it reports the grant and writes nothing.
+
+**A consumer registers with its workload `principal_id`** (`"principal_id"` in
+`POST /v1/projections/consumers`). It stays that consumer's for good: re-registering under another is
+refused.
+
+**Four settings are gone, and startup refuses them:** `ORGANIZATION_TENANT_CLAIM`,
+`ORGANIZATION_PROVIDER_ROLE`, `ORGANIZATION_CONSUMER_ROLE` and `ORGANIZATION_CONSUMER_CLAIM`. Unset
+them. A database holding consumers registered before `principal_id` existed refuses the migration
+that adds it; on a development database, clear `projection.consumer` and register again.
 
 **A reconcile interval longer than the provisioning timeout is refused at startup.** A sweep slower
 than the timeout leaves a request sitting `requested` well past the age at which its outcome is meant
@@ -301,7 +336,12 @@ make token                     # terminal 3: saves a provider token to .token
 make api P=/v1/tenants/<id>
 make api M=POST P=/v1/organizations B=body.json
 make token ROLE=tenant         # a Tenant-scoped token, refused 403 on a provider route
+make token ROLE=stranger       # a person holding no provider grant, refused 403
 ```
+
+A provider token names the dev provider, whose grant `scripts/ci-fixture.sql` seeds. On a database
+without the fixture, run `organization-control bootstrap-provider` for a Principal and ask the issuer
+for `role=provider&principal_id=<it>`.
 
 `make api` sends `X-Administrative-Reason` because every provider-scoped call writes a row to
 `audit.privileged_access` and the service answers 400 rather than recording an unexplained one.

@@ -132,8 +132,8 @@ func (f *fixture) register(t *testing.T) string {
 	t.Helper()
 	consumerID := "ctx-" + mustID(t).String()
 	f.exec(t, `INSERT INTO projection.consumer
-	    (consumer_id, projection_version, max_accepted_age, stale_behavior)
-	    VALUES ($1, 'v1', interval '30 seconds', 'fail_closed')`, consumerID)
+	    (consumer_id, principal_id, projection_version, max_accepted_age, stale_behavior)
+	    VALUES ($1, gen_random_uuid(), 'v1', interval '30 seconds', 'fail_closed')`, consumerID)
 	t.Cleanup(func() {
 		f.exec(t, `DELETE FROM projection.consumer WHERE consumer_id = $1`, consumerID)
 	})

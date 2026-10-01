@@ -1,7 +1,7 @@
 package httpapi
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -21,32 +21,54 @@ type TokenVerifier interface {
 	Verify(token string) (verify.Claims, error)
 }
 
-// AuthenticationConfig names the two claims that decide a caller's authority.
+// The claims a caller is read from, as STD-IAM-002 §3.2 names them. Constants rather than
+// configuration: the standard fixes the names, and a setting would let one deployment read a claim
+// another deployment's realm never writes.
+const (
+	// PrincipalIDClaim is the enterprise identifier, and the actor every event and every evidence row
+	// names. `sub` is the protocol subject and is not read: STD-IAM-002 §3.2 keeps it out of every
+	// foreign key.
+	PrincipalIDClaim = "principal_id"
+
+	// SubjectTypeClaim says whether the Principal is a person or a workload.
+	SubjectTypeClaim = "subject_type"
+
+	// TenantIDClaim carries the one Tenant a tenant-scoped caller administers.
+	TenantIDClaim = "tenant_id"
+
+	// AuthContextClassClaim and AuthTimeClaim are the assurance claims STD-IAM-002 §3.2 makes
+	// mandatory on a privileged token, which a provider's is.
+	AuthContextClassClaim = "acr"
+	AuthTimeClaim         = "auth_time"
+
+	// WorkloadOwnerClaim is mandatory on a workload token (STD-IAM-002 §3.5 rule 7).
+	WorkloadOwnerClaim = "workload_owner"
+)
+
+// CallerRecords reads the two records a caller's authority comes from (ADR-ORG-001 §5.11).
 //
-// They are configuration rather than constants because the claim namespace belongs to the realm this
-// deployable is pointed at. `config.Config` requires both, so a deployment cannot start with either
-// unset.
+// A token says who the caller is; whether that Principal is a provider or a registered consumer is
+// this service's own record, read for each request, so a revoked grant or a retired consumer stops at
+// the next request rather than when the token expires. An interface so this package reads no table:
+// internal/authority implements it on the provider connections.
+type CallerRecords interface {
+	// ProviderGrant reports whether the Principal holds a provider grant over this service.
+	ProviderGrant(ctx context.Context, principal id.UUID) (bool, error)
+
+	// ConsumerFor names the active projection consumer registered with the Principal, or "" when
+	// there is none.
+	ConsumerFor(ctx context.Context, principal id.UUID) (string, error)
+}
+
+// AuthenticationConfig is what authentication needs besides the verifier.
 type AuthenticationConfig struct {
-	// TenantClaim carries the Tenant a caller administers, as a UUID string.
-	TenantClaim string
+	// Records is where provider grants and consumer registrations are read. Required.
+	Records CallerRecords
 
-	// ProviderRole is the realm role conferring cross-Tenant authority. Read from `realm_access.
-	// roles`, which is where Keycloak puts realm roles.
-	ProviderRole string
-
-	// ConsumerRole is the realm role of a registered projection consumer, and ConsumerClaim is
-	// the claim carrying which consumer it is.
-	//
-	// A third authority rather than reusing the provider role, because the two need different
-	// things: a provider administers every Tenant, while a consumer only asks whether one
-	// principal holds context in one Tenant. Handing a consumer the provider role to ask that
-	// question makes every product that performs a fresh check as privileged as the control
-	// plane, which is the blast radius the estate is trying not to create.
-	//
-	// Both are optional and go together: with ConsumerRole unset, consumer authority does not
-	// exist and the context routes remain provider-only.
-	ConsumerRole  string
-	ConsumerClaim string
+	// Consumers is whether consumer authority exists: true when the consumer pool is configured.
+	// Without the pool no consumer route could be served, so a consumer token is refused instead
+	// of admitted to a scope nothing can open.
+	Consumers bool
 }
 
 // Authenticate builds the middleware that resolves a Caller from a bearer token.
@@ -57,23 +79,20 @@ type AuthenticationConfig struct {
 //
 // # What this function decides, and what it does not
 //
-// It decides who the caller is and which of the two isolation scopes they may ask for. It decides
-// nothing about whether they may perform the operation — the routes do that, via `requireTenant` and
-// `requireProvider`, and the domain refuses independently. A transport layer that made the
-// authorization decision would make it somewhere the domain cannot see it.
+// It decides who the caller is and which of the three scopes they may ask for
+// (TDD-organization-control-001 §Caller Authority). It decides nothing about whether they may
+// perform the operation — the routes do that, via `requireTenant` and `requireProvider`, and the
+// domain refuses independently. A transport layer that made the authorization decision would make
+// it somewhere the domain cannot see it.
 func Authenticate(verifier TokenVerifier, cfg AuthenticationConfig) (Middleware, error) {
 	switch {
 	case verifier == nil:
 		return nil, errors.New("httpapi: a token verifier is required")
-	case strings.TrimSpace(cfg.TenantClaim) == "":
-		return nil, errors.New("httpapi: the tenant claim name is required")
-	case strings.TrimSpace(cfg.ProviderRole) == "":
-		return nil, errors.New("httpapi: the provider role name is required")
-	case strings.TrimSpace(cfg.ConsumerRole) != "" && strings.TrimSpace(cfg.ConsumerClaim) == "":
-		// Refused rather than defaulted. A consumer role with no claim naming the consumer would
-		// authenticate a caller whose identity the meter cannot record, and the fresh-check meter
-		// exists precisely to be attributable.
-		return nil, errors.New("httpapi: a consumer role without a consumer claim would confer authority nobody can be metered for")
+	case cfg.Records == nil:
+		// Refused rather than defaulted to "nobody is a provider". A middleware unable to read the
+		// records would refuse every provider and consumer, and the deployment would look broken
+		// for a reason nothing names.
+		return nil, errors.New("httpapi: the caller records are required")
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -107,13 +126,23 @@ func Authenticate(verifier TokenVerifier, cfg AuthenticationConfig) (Middleware,
 				return
 			}
 
-			// Unreachable when the verifier carries this package's own Requirement, which applies
-			// the same rule and rejects first — the composition root wires it that way. It stays
-			// because `Authenticate` accepts any TokenVerifier: a caller supplying a verifier with
-			// a weaker requirement would otherwise reach a handler with no caller in the context,
-			// and `ResolveScope` would report that as 401 rather than as what it is.
-			caller, err := callerFromClaims(claims, cfg)
+			// Unreachable for a claim failure when the verifier carries this package's own
+			// Requirement, which applies the same rule and rejects first — the composition root wires
+			// it that way. It stays because `Authenticate` accepts any TokenVerifier.
+			presented, err := presentedFromClaims(claims)
 			if err != nil {
+				platform.Problem(w, r, platform.Forbidden, err.Error())
+				return
+			}
+
+			caller, err := authorize(r.Context(), presented, cfg)
+			switch {
+			case errors.Is(err, errRecords):
+				// The records could not be read. Nobody is admitted: a provider let through because
+				// the grant table was unreachable is the failure this read exists to prevent.
+				platform.Problem(w, r, platform.DependencyUnavailable, "The caller's authority could not be read")
+				return
+			case err != nil:
 				platform.Problem(w, r, platform.Forbidden, err.Error())
 				return
 			}
@@ -131,10 +160,11 @@ type Middleware = func(http.Handler) http.Handler
 // Fixed text rather than the requirement's own message. `verify` wraps a requirement failure with
 // two `%w` verbs, which `errors.Unwrap` cannot split, so recovering the inner message would mean
 // string-matching the outer prefix — brittle, and it would put the verifier's phrasing on the wire
-// the moment that prefix changed. The three ways to fail are named here instead, which is what a
-// caller needs to fix their own token and discloses nothing about this service's configuration.
-const insufficientClaims = "The token's claims confer no scope: it must carry either the provider " +
-	"role or a Tenant claim, not both and not neither, and its subject must be an identifier"
+// the moment that prefix changed. The ways to fail are named here instead, which is what a caller
+// needs to fix their own token and discloses nothing about this service's configuration.
+const insufficientClaims = "The token's claims confer no scope: it must carry a principal_id and a " +
+	"subject_type, and either a tenant_id, or no tenant_id with acr and auth_time for a person or " +
+	"workload_owner for a workload"
 
 // Requirement is the claim rule `verify.New` refuses to build without.
 //
@@ -143,13 +173,12 @@ const insufficientClaims = "The token's claims confer no scope: it must carry ei
 // STD-IAM-002 §3.5 does not accept. The rule belongs here because it is stated in terms of claims
 // foundation-platform is forbidden from naming.
 //
-// It is the same function `Authenticate` uses to build the caller, with the caller discarded. Two
-// implementations of one rule would drift, and the direction they drift in is the dangerous one: a
-// verifier that admits a token the mapper then cannot place would produce a 403 on a valid token, and
-// a verifier stricter than the mapper would reject callers the service means to serve.
-func Requirement(cfg AuthenticationConfig) verify.RequirementFunc {
+// It is the claim half of authentication, the same function the middleware runs, with the result
+// discarded. The record half needs a request context and a database and so cannot run inside the
+// verifier; a token that passes here and names nobody the records know is refused by the middleware.
+func Requirement() verify.RequirementFunc {
 	return func(claims verify.Claims) error {
-		_, err := callerFromClaims(claims, cfg)
+		_, err := presentedFromClaims(claims)
 		return err
 	}
 }
@@ -168,93 +197,106 @@ func bearer(r *http.Request) (string, bool) {
 	return token, true
 }
 
-// realmAccess is the Keycloak claim carrying realm roles.
-type realmAccess struct {
-	Roles []string `json:"roles"`
+// presented is what a token claims about its bearer, before any record is read.
+type presented struct {
+	principal id.UUID
+	workload  bool
+	tenant    id.UUID
 }
 
-// callerFromClaims maps verified claims onto the two authorities this service recognises.
+// presentedFromClaims applies the claim rule of TDD-organization-control-001 §Caller Authority.
 //
-// The provider check comes first and is exclusive: a token carrying the provider role AND a Tenant
-// claim is refused rather than resolved to either. The two readings — cross-Tenant authority, or
-// authority over that one Tenant — differ in the permissive direction, and a service that silently
-// picked one would disagree with the caller about what the request did. `db.ProviderScope` refuses
-// the same combination, so the refusal does not depend on this function being the only check.
-func callerFromClaims(claims verify.Claims, cfg AuthenticationConfig) (Caller, error) {
-	subject, err := id.Parse(strings.TrimSpace(claims.Subject))
+// A token with a Tenant is a tenant caller, whoever it names. One without is a candidate provider
+// when it names a person, and must then carry the assurance claims a privileged token carries; or a
+// candidate consumer when it names a workload, and must then carry its owner. Realm roles are not
+// read: STD-IAM-002 §3.2 keeps them out of every access token, and a role the token did carry would
+// be a grant the kernel holds, which ADR-ORG-001 §5.11 does not let it.
+func presentedFromClaims(claims verify.Claims) (presented, error) {
+	raw, _ := claims.String(PrincipalIDClaim)
+	principal, err := id.Parse(strings.TrimSpace(raw))
+	if err != nil || principal.IsNil() {
+		// The principal becomes `db.Scope.Actor`, which every lifecycle event and every
+		// privileged-access record is attributed to. One that is not an identifier cannot be
+		// recorded as an actor, so the alternative to refusing is evidence naming nobody.
+		return presented{}, errors.New("the token carries no principal_id that is a valid identifier")
+	}
+
+	subjectType, _ := claims.String(SubjectTypeClaim)
+	var workload bool
+	switch subjectType {
+	case "human":
+	case "workload":
+		workload = true
+	default:
+		return presented{}, errors.New("the token's subject_type is not human or workload")
+	}
+
+	// Present at all means tenant-scoped. An empty or non-string tenant_id is refused rather than
+	// read as absent: read as absent, a person's token would fall through to the provider path,
+	// which is the permissive reading of an ambiguous claim.
+	if claims.Has(TenantIDClaim) {
+		rawTenant, _ := claims.String(TenantIDClaim)
+		tenant, err := id.Parse(strings.TrimSpace(rawTenant))
+		if err != nil || tenant.IsNil() {
+			return presented{}, errors.New("the tenant_id claim is not a valid identifier")
+		}
+		return presented{principal: principal, workload: workload, tenant: tenant}, nil
+	}
+
+	if workload {
+		if owner, ok := claims.String(WorkloadOwnerClaim); !ok || strings.TrimSpace(owner) == "" {
+			return presented{}, errors.New("a workload token without a Tenant must carry workload_owner")
+		}
+		return presented{principal: principal, workload: true}, nil
+	}
+
+	// STD-IAM-002 §3.1.1: a provider-scope token carries acr and auth_time. Without auth_time no
+	// step-up rule could ever be evaluated, so its absence is a refusal, not a downgrade.
+	if acr, ok := claims.String(AuthContextClassClaim); !ok || strings.TrimSpace(acr) == "" {
+		return presented{}, errors.New("a token without a Tenant must carry acr")
+	}
+	if _, ok := claims.Int64(AuthTimeClaim); !ok {
+		return presented{}, errors.New("a token without a Tenant must carry auth_time")
+	}
+	return presented{principal: principal}, nil
+}
+
+// errRecords marks a failure to read the caller records, which is answered 503 rather than 403.
+var errRecords = errors.New("httpapi: the caller records could not be read")
+
+// authorize reads the record a token without a Tenant needs, and builds the caller.
+//
+// One record per request, never both: a person can only be a provider and a workload only a
+// consumer, so the token's subject_type decides which is read. A workload holding a provider grant
+// gains nothing from it — STD-IAM-002 §3.2 keeps provider authority off workload tokens — and a
+// person registered as a consumer is not one.
+func authorize(ctx context.Context, p presented, cfg AuthenticationConfig) (Caller, error) {
+	if !p.tenant.IsNil() {
+		return Caller{Subject: p.principal, Tenant: p.tenant}, nil
+	}
+
+	if p.workload {
+		if !cfg.Consumers {
+			return Caller{}, errors.New("the token names a workload and no Tenant, and consumer authority is not configured")
+		}
+		consumer, err := cfg.Records.ConsumerFor(ctx, p.principal)
+		if err != nil {
+			return Caller{}, errors.Join(errRecords, err)
+		}
+		if consumer == "" {
+			return Caller{}, errors.New("the token names a workload and no Tenant, and no active consumer is registered with its principal_id")
+		}
+		return Caller{Subject: p.principal, Consumer: consumer}, nil
+	}
+
+	granted, err := cfg.Records.ProviderGrant(ctx, p.principal)
 	if err != nil {
-		// The subject becomes `db.Scope.Actor`, which every lifecycle event and every
-		// privileged-access record is attributed to. A non-UUID subject cannot be recorded as an
-		// actor, so the alternative to refusing is evidence naming nobody.
-		return Caller{}, errors.New("the token subject is not a valid identifier")
+		return Caller{}, errors.Join(errRecords, err)
 	}
-
-	provider, consumerRole := false, false
-	if raw, ok := claims.Raw("realm_access"); ok {
-		var access realmAccess
-		if err := json.Unmarshal(raw, &access); err != nil {
-			return Caller{}, errors.New("the realm_access claim is not an object")
-		}
-		for _, role := range access.Roles {
-			switch role {
-			case cfg.ProviderRole:
-				provider = true
-			case cfg.ConsumerRole:
-				// Only when configured. An empty ConsumerRole would otherwise match a token
-				// carrying an empty role string.
-				consumerRole = cfg.ConsumerRole != ""
-			}
-		}
+	if !granted {
+		return Caller{}, errors.New("the token carries no Tenant, and its principal_id holds no provider grant")
 	}
-
-	rawTenant, hasTenant := claims.String(cfg.TenantClaim)
-	rawTenant = strings.TrimSpace(rawTenant)
-	hasTenant = hasTenant && rawTenant != ""
-
-	if consumerRole {
-		// Exclusive against both other authorities, in the same permissive-direction argument the
-		// provider/Tenant pair already makes: a token carrying consumer authority *and* provider
-		// authority has two readings that differ in what it may do, and resolving to either
-		// silently would mean the caller and the service disagree about the request.
-		if provider {
-			return Caller{}, errors.New(
-				"the token carries both consumer and provider authority, and the two confer different scopes")
-		}
-		if hasTenant {
-			return Caller{}, errors.New(
-				"the token carries consumer authority and a Tenant, and the two confer different scopes")
-		}
-		consumerID := ""
-		if raw, ok := claims.String(cfg.ConsumerClaim); ok {
-			consumerID = strings.TrimSpace(raw)
-		}
-		if consumerID == "" {
-			return Caller{}, errors.New("the token carries consumer authority but names no consumer")
-		}
-		return Caller{Subject: subject, Consumer: consumerID}, nil
-	}
-
-	if provider {
-		if hasTenant {
-			return Caller{}, errors.New(
-				"the token carries both provider authority and a Tenant, and the two confer " +
-					"different scopes")
-		}
-		return Caller{Subject: subject, Provider: true}, nil
-	}
-
-	if !hasTenant {
-		// Refused here rather than left to produce an empty scope downstream. `db.TenantScope`
-		// would reject a nil Tenant, but that rejection is a programming-error path reported as
-		// 500 — and a caller whose token simply lacks the claim deserves to be told that.
-		return Caller{}, errors.New("the token carries neither provider authority nor a Tenant")
-	}
-
-	tenantID, err := id.Parse(rawTenant)
-	if err != nil {
-		return Caller{}, errors.New("the Tenant claim is not a valid identifier")
-	}
-	return Caller{Subject: subject, Tenant: tenantID}, nil
+	return Caller{Subject: p.principal, Provider: true}, nil
 }
 
 // ReportTokenType wraps a verifier for ORGANIZATION_TOKEN_TYPE=report. A token whose header typ is
