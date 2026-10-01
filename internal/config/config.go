@@ -63,6 +63,11 @@ type Config struct {
 	// TokenMaxSkew tolerates clock drift, capped at 60 seconds by STD-IAM-002 §3.5.
 	TokenMaxSkew time.Duration
 
+	// EnforceAccessTokenType is ORGANIZATION_TOKEN_TYPE=enforce: a token whose header typ is not at+jwt
+	// is refused (STD-IAM-002 §3.5 step 5). The default, report, accepts it and logs it, while the
+	// issuer's clients move to at+jwt.
+	EnforceAccessTokenType bool
+
 	// TenantClaim is the claim naming the Tenant a caller administers, and ProviderRole is the
 	// realm role that confers cross-Tenant authority.
 	//
@@ -208,6 +213,13 @@ func Load() (Config, error) {
 	cfg.OTLPEndpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 
 	cfg.TokenMaxSkew = durationOr("ORGANIZATION_TOKEN_MAX_SKEW", 30*time.Second, &problems)
+	switch mode := stringOr("ORGANIZATION_TOKEN_TYPE", "report"); mode {
+	case "report":
+	case "enforce":
+		cfg.EnforceAccessTokenType = true
+	default:
+		problems = append(problems, fmt.Errorf("ORGANIZATION_TOKEN_TYPE is %q; it is report or enforce", mode))
+	}
 	if cfg.TokenMaxSkew > 60*time.Second {
 		problems = append(problems, errors.New(
 			"ORGANIZATION_TOKEN_MAX_SKEW exceeds the 60s ceiling STD-IAM-002 §3.5 sets"))

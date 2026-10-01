@@ -1,11 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,6 +56,12 @@ func newSigner(t *testing.T) signer {
 // sign builds a PS256 token carrying the supplied claims plus valid registered claims.
 func (s signer) sign(t *testing.T, claims map[string]any) string {
 	t.Helper()
+	return s.signTyped(t, "JWT", claims)
+}
+
+// signTyped is sign with the header typ given.
+func (s signer) signTyped(t *testing.T, typ string, claims map[string]any) string {
+	t.Helper()
 
 	now := time.Now().UTC()
 	payload := map[string]any{
@@ -76,7 +85,7 @@ func (s signer) sign(t *testing.T, claims map[string]any) string {
 
 	// PS256 is the one algorithm the verifier permits, and it is named here rather than taken from
 	// a variable so a test cannot accidentally assert against a different one.
-	head := encode(map[string]string{"alg": "PS256", "kid": testKeyID, "typ": "JWT"})
+	head := encode(map[string]string{"alg": "PS256", "kid": testKeyID, "typ": typ})
 	body := encode(payload)
 	signed := head + "." + body
 
@@ -368,5 +377,46 @@ func TestAuthenticateRefusesToBuildWithoutItsClaimNames(t *testing.T) {
 
 	if _, err := Authenticate(nil, testAuthConfig()); err == nil {
 		t.Error("Authenticate built a middleware with no verifier")
+	}
+}
+
+// ORGANIZATION_TOKEN_TYPE=report accepts a token typed JWT and logs it with its client; one typed
+// at+jwt is accepted and not logged.
+func TestReportModeLogsATokenNotTypedAtJWT(t *testing.T) {
+	s := newSigner(t)
+	var logged bytes.Buffer
+	verifier := ReportTokenType(s.verifier(t), slog.New(slog.NewJSONHandler(&logged, nil)))
+	claims := map[string]any{"sub": "01a0f64a-c533-7000-a956-c3f095484aa6", "azp": "legacy-client",
+		testAuthConfig().TenantClaim: "01a0f64a-c533-7000-a956-c3f095484aa7"}
+
+	if _, err := verifier.Verify(s.signTyped(t, "JWT", claims)); err != nil {
+		t.Fatalf("report mode refused a JWT-typed token: %v", err)
+	}
+	if !strings.Contains(logged.String(), "not typed at+jwt") || !strings.Contains(logged.String(), `"client":"legacy-client"`) {
+		t.Errorf("logged %q, want the client named", logged.String())
+	}
+	logged.Reset()
+	if _, err := verifier.Verify(s.signTyped(t, "at+jwt", claims)); err != nil || logged.Len() != 0 {
+		t.Errorf("an at+jwt token answered %v and logged %q", err, logged.String())
+	}
+}
+
+// ORGANIZATION_TOKEN_TYPE=enforce refuses a token typed JWT with the 401 every verification failure
+// gets, and accepts one typed at+jwt.
+func TestEnforceModeRefusesATokenNotTypedAtJWT(t *testing.T) {
+	s := newSigner(t)
+	strict, err := verify.New(verify.Config{Issuer: testIssuer, Audience: testAudience,
+		Keys: verify.StaticKeys{testKeyID: &s.key.PublicKey}, Requirement: Requirement(testAuthConfig()),
+		RequireAccessTokenType: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := map[string]any{"sub": "01a0f64a-c533-7000-a956-c3f095484aa6",
+		testAuthConfig().TenantClaim: "01a0f64a-c533-7000-a956-c3f095484aa7"}
+	if _, err := strict.Verify(s.signTyped(t, "JWT", claims)); !errors.Is(err, verify.ErrTokenType) {
+		t.Errorf("a JWT-typed token answered %v, want ErrTokenType", err)
+	}
+	if _, err := strict.Verify(s.signTyped(t, "at+jwt", claims)); err != nil {
+		t.Errorf("an at+jwt token was refused: %v", err)
 	}
 }

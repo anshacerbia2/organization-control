@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -254,4 +255,30 @@ func callerFromClaims(claims verify.Claims, cfg AuthenticationConfig) (Caller, e
 		return Caller{}, errors.New("the Tenant claim is not a valid identifier")
 	}
 	return Caller{Subject: subject, Tenant: tenantID}, nil
+}
+
+// ReportTokenType wraps a verifier for ORGANIZATION_TOKEN_TYPE=report. A token whose header typ is
+// not at+jwt is accepted, as the verifier without RequireAccessTokenType accepts it, and logged with
+// the client it was issued to, so an operator sees which clients still need the token profile before
+// the service moves to enforce. The log carries no claim value but the client identifier.
+func ReportTokenType(verifier TokenVerifier, logger *slog.Logger) TokenVerifier {
+	return reportingVerifier{verifier: verifier, logger: logger}
+}
+
+type reportingVerifier struct {
+	verifier TokenVerifier
+	logger   *slog.Logger
+}
+
+func (v reportingVerifier) Verify(token string) (verify.Claims, error) {
+	claims, err := v.verifier.Verify(token)
+	if err != nil {
+		return claims, err
+	}
+	if typ := claims.TokenType(); !strings.EqualFold(typ, "at+jwt") && !strings.EqualFold(typ, "application/at+jwt") {
+		client, _ := claims.String("azp")
+		v.logger.Warn("a caller's token is not typed at+jwt; ORGANIZATION_TOKEN_TYPE=enforce would refuse it",
+			slog.String("typ", typ), slog.String("client", client))
+	}
+	return claims, nil
 }

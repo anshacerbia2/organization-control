@@ -221,6 +221,7 @@ misconfigured process start and fail later.
 | `ORGANIZATION_PROVIDER_ROLE` | yes | The realm role conferring cross-Tenant authority |
 | `ORGANIZATION_LISTEN_ADDRESS` | no | Defaults to `:8080` |
 | `ORGANIZATION_TOKEN_MAX_SKEW` | no | 30s; capped at 60s by STD-IAM-002 §3.5 |
+| `ORGANIZATION_TOKEN_TYPE` | no | `report` (default) accepts a token whose header `typ` is not `at+jwt` and logs it with its `azp`; `enforce` refuses it with 401 (STD-IAM-002 §3.5 step 5, RFC 9068 §4). The dev issuer types its tokens `at+jwt` |
 | `ORGANIZATION_PROVISIONING_TIMEOUT` | no | 30m. Age at which a provisioning request becomes `unresolved` |
 | `ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL` | no | 15m. Cadence for the unresolved sweep |
 | `ORGANIZATION_TENANT_NAME_MAX` | no | 120. Tenant display-name bound |

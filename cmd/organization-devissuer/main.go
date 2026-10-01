@@ -245,7 +245,8 @@ const algorithm = "PS256"
 
 // sign produces a compact PS256 JWT.
 func sign(key *rsa.PrivateKey, kid string, claims map[string]any) (string, error) {
-	header, err := json.Marshal(map[string]any{"alg": algorithm, "typ": "JWT", "kid": kid})
+	// at+jwt, as RFC 9068 §2.1 types an access token and STD-IAM-002 §3.5 has the verifier check.
+	header, err := json.Marshal(map[string]any{"alg": algorithm, "typ": "at+jwt", "kid": kid})
 	if err != nil {
 		return "", err
 	}

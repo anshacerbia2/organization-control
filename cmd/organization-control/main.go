@@ -332,17 +332,22 @@ func run() error {
 	// The claim rule is this service's, because STD-IAM-002 §3.5 states it in terms of claims
 	// foundation-platform is forbidden from naming. The verifier refuses to build without one.
 	verifier, err := verify.New(verify.Config{
-		Issuer:      cfg.TokenIssuer,
-		Audience:    cfg.TokenAudience,
-		Keys:        keys,
-		Requirement: httpapi.Requirement(authenticationConfig),
-		MaxSkew:     cfg.TokenMaxSkew,
+		Issuer:                 cfg.TokenIssuer,
+		Audience:               cfg.TokenAudience,
+		Keys:                   keys,
+		Requirement:            httpapi.Requirement(authenticationConfig),
+		MaxSkew:                cfg.TokenMaxSkew,
+		RequireAccessTokenType: cfg.EnforceAccessTokenType,
 	})
 	if err != nil {
 		return fmt.Errorf("token verifier: %w", err)
 	}
+	var tokens httpapi.TokenVerifier = verifier
+	if !cfg.EnforceAccessTokenType {
+		tokens = httpapi.ReportTokenType(verifier, logger)
+	}
 
-	authentication, err := httpapi.Authenticate(verifier, authenticationConfig)
+	authentication, err := httpapi.Authenticate(tokens, authenticationConfig)
 	if err != nil {
 		return fmt.Errorf("authentication middleware: %w", err)
 	}
