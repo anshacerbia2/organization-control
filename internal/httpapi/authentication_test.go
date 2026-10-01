@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -15,26 +16,93 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/verify"
 )
 
 // The tests below sign real tokens and verify them through a real verifier.
 //
 // `verify.Claims` keeps its non-registered claims in an unexported map populated only by decoding a
-// token, so a fake verifier cannot produce a Claims carrying a Tenant claim or a realm role — the two
+// token, so a fake verifier cannot produce a Claims carrying a principal_id or a tenant_id — the
 // values this mapping exists to read. A stub would therefore only be able to test the paths that read
 // nothing, which are not the paths worth testing. Signing is the cheaper honesty.
+//
+// The records are a fake: which Principals hold a provider grant and which are registered consumers
+// is a database read, asserted as the provider role in internal/authority's integration suite.
 
 const (
 	testIssuer   = "https://issuer.test/realms/scnehaux"
 	testAudience = "organization-control"
 	testKeyID    = "test-key"
-	testClaim    = "https://scnehaux.com/tenant_id"
-	testRole     = "organization-provider"
 )
 
+// fakeRecords answers the two record reads from maps.
+type fakeRecords struct {
+	providers map[id.UUID]bool
+	consumers map[id.UUID]string
+	err       error
+	reads     int
+}
+
+func (f *fakeRecords) ProviderGrant(_ context.Context, principal id.UUID) (bool, error) {
+	f.reads++
+	return f.providers[principal], f.err
+}
+
+func (f *fakeRecords) ConsumerFor(_ context.Context, principal id.UUID) (string, error) {
+	f.reads++
+	return f.consumers[principal], f.err
+}
+
+// The Principals the fake records know.
+var (
+	testProvider         = id.MustParse("01a0f64a-c533-7000-a956-c3f095484a01")
+	testConsumerWorkload = id.MustParse("01a0f64a-c533-7000-a956-c3f095484a02")
+	testConsumerName     = "foundation-reference"
+)
+
+func testRecords() *fakeRecords {
+	return &fakeRecords{
+		providers: map[id.UUID]bool{testProvider: true},
+		consumers: map[id.UUID]string{testConsumerWorkload: testConsumerName},
+	}
+}
+
 func testAuthConfig() AuthenticationConfig {
-	return AuthenticationConfig{TenantClaim: testClaim, ProviderRole: testRole}
+	return AuthenticationConfig{Records: testRecords(), Consumers: true}
+}
+
+// The three token shapes of TDD-organization-control-001 §Caller Authority.
+func tenantClaims(principal, tenant id.UUID) map[string]any {
+	return map[string]any{"sub": "kc-user", "principal_id": principal.String(), "subject_type": "human",
+		"tenant_id": tenant.String()}
+}
+
+func providerClaims(principal id.UUID) map[string]any {
+	return map[string]any{"sub": "kc-user", "principal_id": principal.String(), "subject_type": "human",
+		"acr": "2", "auth_time": time.Now().Unix()}
+}
+
+func consumerClaims(principal id.UUID) map[string]any {
+	return map[string]any{"sub": "service-account-reference", "principal_id": principal.String(),
+		"subject_type": "workload", "workload_owner": "01a0f64a-c533-7000-a956-c3f095484a0f"}
+}
+
+func without(claims map[string]any, names ...string) map[string]any {
+	out := map[string]any{}
+	for k, v := range claims {
+		out[k] = v
+	}
+	for _, name := range names {
+		delete(out, name)
+	}
+	return out
+}
+
+func with(claims map[string]any, name string, value any) map[string]any {
+	out := without(claims)
+	out[name] = value
+	return out
 }
 
 // signer mints tokens for the tests and exposes the matching public key.
@@ -106,7 +174,7 @@ func (s signer) verifier(t *testing.T) *verify.Verifier {
 		Issuer:      testIssuer,
 		Audience:    testAudience,
 		Keys:        verify.StaticKeys{testKeyID: &s.key.PublicKey},
-		Requirement: Requirement(testAuthConfig()),
+		Requirement: Requirement(),
 	})
 	if err != nil {
 		t.Fatalf("verifier: %v", err)
@@ -115,10 +183,10 @@ func (s signer) verifier(t *testing.T) *verify.Verifier {
 }
 
 // authenticated runs one request through the middleware and reports the caller it established.
-func authenticated(t *testing.T, s signer, token string) (Caller, bool, *httptest.ResponseRecorder) {
+func authenticated(t *testing.T, s signer, cfg AuthenticationConfig, token string) (Caller, bool, *httptest.ResponseRecorder) {
 	t.Helper()
 
-	middleware, err := Authenticate(s.verifier(t), testAuthConfig())
+	middleware, err := Authenticate(s.verifier(t), cfg)
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
@@ -140,116 +208,132 @@ func authenticated(t *testing.T, s signer, token string) (Caller, bool, *httptes
 	return seen, called, recorder
 }
 
-func TestAuthenticateResolvesATenantCaller(t *testing.T) {
+func TestAuthenticateResolvesATenantCallerByPrincipalID(t *testing.T) {
 	t.Parallel()
 
 	s := newSigner(t)
-	subject := mustID(t)
-	tenantID := mustID(t)
+	principal, tenantID := mustID(t), mustID(t)
+	records := testRecords()
 
-	caller, called, recorder := authenticated(t, s, s.sign(t, map[string]any{
-		"sub":     subject.String(),
-		testClaim: tenantID.String(),
-	}))
+	caller, called, recorder := authenticated(t, s, AuthenticationConfig{Records: records, Consumers: true},
+		s.sign(t, tenantClaims(principal, tenantID)))
 
 	if !called {
-		t.Fatalf("the handler did not run; the middleware answered %d: %s",
-			recorder.Code, recorder.Body.String())
+		t.Fatalf("the handler did not run; the middleware answered %d: %s", recorder.Code, recorder.Body.String())
 	}
 	switch {
-	case caller.Provider:
-		t.Error("a token with no provider role produced a provider caller")
-	case caller.Subject != subject:
-		t.Errorf("the caller's subject is %s, want %s", caller.Subject, subject)
+	case caller.Provider || caller.Consumer != "":
+		t.Errorf("a tenant token produced %+v", caller)
+	case caller.Subject != principal:
+		t.Errorf("the actor is %s, want the principal_id %s, never sub", caller.Subject, principal)
 	case caller.Tenant != tenantID:
 		t.Errorf("the caller's Tenant is %s, want %s", caller.Tenant, tenantID)
 	}
+	if records.reads != 0 {
+		t.Errorf("a tenant token read %d records, want none", records.reads)
+	}
 }
 
-func TestAuthenticateResolvesAProviderCaller(t *testing.T) {
+func TestAuthenticateResolvesAProviderFromItsGrant(t *testing.T) {
 	t.Parallel()
 
 	s := newSigner(t)
-	subject := mustID(t)
-
-	caller, called, recorder := authenticated(t, s, s.sign(t, map[string]any{
-		"sub":          subject.String(),
-		"realm_access": map[string]any{"roles": []string{"offline_access", testRole}},
-	}))
+	caller, called, recorder := authenticated(t, s, testAuthConfig(), s.sign(t, providerClaims(testProvider)))
 
 	if !called {
-		t.Fatalf("the handler did not run; the middleware answered %d: %s",
-			recorder.Code, recorder.Body.String())
+		t.Fatalf("the handler did not run; the middleware answered %d: %s", recorder.Code, recorder.Body.String())
 	}
-	switch {
-	case !caller.Provider:
-		t.Error("a token carrying the provider role produced a tenant caller")
-	case !caller.Tenant.IsNil():
-		t.Errorf("a provider caller carries Tenant %s", caller.Tenant)
-	case caller.Subject != subject:
-		t.Errorf("the caller's subject is %s, want %s", caller.Subject, subject)
+	if !caller.Provider || !caller.Tenant.IsNil() || caller.Subject != testProvider {
+		t.Errorf("a granted provider produced %+v", caller)
 	}
 }
 
-// TestAuthenticateRefusesBothAuthorities is the ambiguity that must not be resolved silently.
-//
-// A token carrying provider authority and a Tenant could mean cross-Tenant authority or authority
-// over that one Tenant. The two differ in the permissive direction.
-func TestAuthenticateRefusesBothAuthorities(t *testing.T) {
+func TestAuthenticateResolvesAConsumerFromItsRegistration(t *testing.T) {
 	t.Parallel()
 
 	s := newSigner(t)
-	_, called, recorder := authenticated(t, s, s.sign(t, map[string]any{
-		"sub":          mustID(t).String(),
-		testClaim:      mustID(t).String(),
-		"realm_access": map[string]any{"roles": []string{testRole}},
-	}))
+	caller, called, recorder := authenticated(t, s, testAuthConfig(), s.sign(t, consumerClaims(testConsumerWorkload)))
 
-	if called {
-		t.Error("a token carrying both authorities was admitted")
+	if !called {
+		t.Fatalf("the handler did not run; the middleware answered %d: %s", recorder.Code, recorder.Body.String())
 	}
-	// 403 rather than 401: the token is valid and its claims do not confer a usable scope, so
-	// obtaining a new token with the same claims would not help.
-	if recorder.Code != http.StatusForbidden {
-		t.Errorf("a token carrying both authorities answered %d, want 403", recorder.Code)
+	if caller.Consumer != testConsumerName || caller.Provider || caller.Subject != testConsumerWorkload {
+		t.Errorf("a registered consumer produced %+v", caller)
 	}
 }
 
-func TestAuthenticateRefusesATokenWithNeitherAuthority(t *testing.T) {
+// Every refusal below is 403: the token is authentic, and its claims or the records confer no scope,
+// so a new token carrying the same claims would fail the same way.
+func TestAuthenticateRefusesWhatConfersNoScope(t *testing.T) {
 	t.Parallel()
 
 	s := newSigner(t)
-	_, called, recorder := authenticated(t, s, s.sign(t, map[string]any{
-		"sub": mustID(t).String(),
-	}))
+	stranger := mustID(t)
+	cases := map[string]struct {
+		cfg    AuthenticationConfig
+		claims map[string]any
+	}{
+		"no principal_id":         {testAuthConfig(), without(providerClaims(testProvider), "principal_id")},
+		"principal_id not a UUID": {testAuthConfig(), with(providerClaims(testProvider), "principal_id", "kc-user")},
+		"no subject_type":         {testAuthConfig(), without(providerClaims(testProvider), "subject_type")},
+		"subject_type unknown":    {testAuthConfig(), with(providerClaims(testProvider), "subject_type", "agent")},
+		"tenant_id nil":           {testAuthConfig(), tenantClaims(mustID(t), id.UUID{})},
+		"tenant_id not a UUID":    {testAuthConfig(), with(providerClaims(testProvider), "tenant_id", "acme")},
+		"tenant_id empty":         {testAuthConfig(), with(providerClaims(testProvider), "tenant_id", "")},
 
-	if called {
-		t.Error("a token conferring no scope was admitted")
+		// A provider token is a person's, without a Tenant, with the assurance claims and a grant.
+		"provider without a grant": {testAuthConfig(), providerClaims(stranger)},
+		"provider without acr":     {testAuthConfig(), without(providerClaims(testProvider), "acr")},
+		"provider without auth_time": {testAuthConfig(),
+			without(providerClaims(testProvider), "auth_time")},
+		// The role this service used to read. It confers nothing now.
+		"a realm role and no grant": {testAuthConfig(), with(providerClaims(stranger), "realm_access",
+			map[string]any{"roles": []string{"provider-admin"}})},
+		// A workload holding a provider grant is not a provider: a workload token never carries
+		// provider authority (STD-IAM-002 §3.2), so the grant read is not even made.
+		"workload with a grant": {testAuthConfig(), consumerClaims(testProvider)},
+
+		// A consumer token is a workload's, without a Tenant, with its owner and a registration.
+		"consumer not registered":   {testAuthConfig(), consumerClaims(stranger)},
+		"consumer without an owner": {testAuthConfig(), without(consumerClaims(testConsumerWorkload), "workload_owner")},
+		"consumer authority off": {AuthenticationConfig{Records: testRecords()},
+			consumerClaims(testConsumerWorkload)},
+		// A person registered as a consumer is not one.
+		"person registered as a consumer": {testAuthConfig(), providerClaims(testConsumerWorkload)},
 	}
-	if recorder.Code != http.StatusForbidden {
-		t.Errorf("a token conferring no scope answered %d, want 403", recorder.Code)
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, called, recorder := authenticated(t, s, c.cfg, s.sign(t, c.claims))
+			if called {
+				t.Fatal("the token was admitted")
+			}
+			if recorder.Code != http.StatusForbidden {
+				t.Errorf("answered %d, want 403: %s", recorder.Code, recorder.Body.String())
+			}
+		})
 	}
 }
 
-// TestAuthenticateRefusesANonUUIDSubject guards what the subject becomes.
-//
-// It is written into every lifecycle event and every privileged-access row as the actor. A subject
-// that cannot be parsed cannot be recorded, and the alternative to refusing is evidence naming
-// nobody.
-func TestAuthenticateRefusesANonUUIDSubject(t *testing.T) {
+// A record read that fails admits nobody, and says the dependency is down rather than that the
+// caller is not entitled.
+func TestAFailedRecordReadAnswers503(t *testing.T) {
 	t.Parallel()
 
 	s := newSigner(t)
-	_, called, recorder := authenticated(t, s, s.sign(t, map[string]any{
-		"sub":     "service-account-organization",
-		testClaim: mustID(t).String(),
-	}))
-
-	if called {
-		t.Error("a token with a non-UUID subject was admitted")
-	}
-	if recorder.Code != http.StatusForbidden {
-		t.Errorf("a non-UUID subject answered %d, want 403", recorder.Code)
+	records := testRecords()
+	records.err = errors.New("connection refused")
+	for name, claims := range map[string]map[string]any{
+		"provider": providerClaims(testProvider),
+		"consumer": consumerClaims(testConsumerWorkload),
+	} {
+		_, called, recorder := authenticated(t, s, AuthenticationConfig{Records: records, Consumers: true},
+			s.sign(t, claims))
+		if called || recorder.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s: answered %d, called=%t, want 503 and no handler", name, recorder.Code, called)
+		}
+		if strings.Contains(recorder.Body.String(), "connection refused") {
+			t.Errorf("%s: the refusal disclosed the database error", name)
+		}
 	}
 }
 
@@ -257,10 +341,7 @@ func TestAuthenticateRefusesAMissingOrMalformedHeader(t *testing.T) {
 	t.Parallel()
 
 	s := newSigner(t)
-	valid := s.sign(t, map[string]any{
-		"sub":     mustID(t).String(),
-		testClaim: mustID(t).String(),
-	})
+	valid := s.sign(t, tenantClaims(mustID(t), mustID(t)))
 
 	middleware, err := Authenticate(s.verifier(t), testAuthConfig())
 	if err != nil {
@@ -309,16 +390,13 @@ func TestAuthenticateRefusesAMissingOrMalformedHeader(t *testing.T) {
 
 // TestRequirementAndMapperAgree is the property that keeps one rule from becoming two.
 //
-// The verifier applies Requirement and the middleware applies callerFromClaims. If they disagreed, a
-// token could pass verification and then fail to map — a 403 on a token the service accepted — or the
-// reverse. They are the same function here, and this asserts the equivalence rather than trusting it
-// to stay true.
+// The verifier applies Requirement and the middleware applies presentedFromClaims. They are the same
+// function here, and this asserts the equivalence rather than trusting it to stay true.
 func TestRequirementAndMapperAgree(t *testing.T) {
 	t.Parallel()
 
 	s := newSigner(t)
-	cfg := testAuthConfig()
-	requirement := Requirement(cfg)
+	requirement := Requirement()
 
 	// A verifier with a requirement that admits everything, so this test observes the mapper and
 	// the requirement independently on the same claim sets.
@@ -333,13 +411,13 @@ func TestRequirementAndMapperAgree(t *testing.T) {
 	}
 
 	sets := []map[string]any{
-		{"sub": mustID(t).String(), testClaim: mustID(t).String()},
-		{"sub": mustID(t).String(), "realm_access": map[string]any{"roles": []string{testRole}}},
-		{"sub": mustID(t).String()},
-		{"sub": "not-a-uuid", testClaim: mustID(t).String()},
-		{"sub": mustID(t).String(), testClaim: "not-a-uuid"},
-		{"sub": mustID(t).String(), testClaim: mustID(t).String(),
-			"realm_access": map[string]any{"roles": []string{testRole}}},
+		tenantClaims(mustID(t), mustID(t)),
+		providerClaims(mustID(t)),
+		consumerClaims(mustID(t)),
+		without(providerClaims(mustID(t)), "principal_id"),
+		without(providerClaims(mustID(t)), "acr"),
+		without(consumerClaims(mustID(t)), "workload_owner"),
+		with(providerClaims(mustID(t)), "tenant_id", "not-a-uuid"),
 	}
 
 	for index, set := range sets {
@@ -348,33 +426,22 @@ func TestRequirementAndMapperAgree(t *testing.T) {
 			t.Fatalf("set %d did not verify: %v", index, err)
 		}
 
-		_, mapErr := callerFromClaims(claims, cfg)
+		_, mapErr := presentedFromClaims(claims)
 		requireErr := requirement.Require(claims)
 
 		if (mapErr == nil) != (requireErr == nil) {
-			t.Errorf("set %d: the mapper says %v and the requirement says %v",
-				index, mapErr, requireErr)
+			t.Errorf("set %d: the mapper says %v and the requirement says %v", index, mapErr, requireErr)
 		}
 	}
 }
 
-func TestAuthenticateRefusesToBuildWithoutItsClaimNames(t *testing.T) {
+func TestAuthenticateRefusesToBuildWithoutItsRecords(t *testing.T) {
 	t.Parallel()
 
 	s := newSigner(t)
-	verifier := s.verifier(t)
-
-	cases := map[string]AuthenticationConfig{
-		"no tenant claim":  {ProviderRole: testRole},
-		"no provider role": {TenantClaim: testClaim},
-		"neither":          {},
+	if _, err := Authenticate(s.verifier(t), AuthenticationConfig{}); err == nil {
+		t.Error("Authenticate built a middleware with no caller records")
 	}
-	for name, cfg := range cases {
-		if _, err := Authenticate(verifier, cfg); err == nil {
-			t.Errorf("%s: Authenticate built a middleware that could confer no scope", name)
-		}
-	}
-
 	if _, err := Authenticate(nil, testAuthConfig()); err == nil {
 		t.Error("Authenticate built a middleware with no verifier")
 	}
@@ -386,8 +453,7 @@ func TestReportModeLogsATokenNotTypedAtJWT(t *testing.T) {
 	s := newSigner(t)
 	var logged bytes.Buffer
 	verifier := ReportTokenType(s.verifier(t), slog.New(slog.NewJSONHandler(&logged, nil)))
-	claims := map[string]any{"sub": "01a0f64a-c533-7000-a956-c3f095484aa6", "azp": "legacy-client",
-		testAuthConfig().TenantClaim: "01a0f64a-c533-7000-a956-c3f095484aa7"}
+	claims := with(tenantClaims(mustID(t), mustID(t)), "azp", "legacy-client")
 
 	if _, err := verifier.Verify(s.signTyped(t, "JWT", claims)); err != nil {
 		t.Fatalf("report mode refused a JWT-typed token: %v", err)
@@ -406,13 +472,12 @@ func TestReportModeLogsATokenNotTypedAtJWT(t *testing.T) {
 func TestEnforceModeRefusesATokenNotTypedAtJWT(t *testing.T) {
 	s := newSigner(t)
 	strict, err := verify.New(verify.Config{Issuer: testIssuer, Audience: testAudience,
-		Keys: verify.StaticKeys{testKeyID: &s.key.PublicKey}, Requirement: Requirement(testAuthConfig()),
+		Keys: verify.StaticKeys{testKeyID: &s.key.PublicKey}, Requirement: Requirement(),
 		RequireAccessTokenType: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims := map[string]any{"sub": "01a0f64a-c533-7000-a956-c3f095484aa6",
-		testAuthConfig().TenantClaim: "01a0f64a-c533-7000-a956-c3f095484aa7"}
+	claims := tenantClaims(mustID(t), mustID(t))
 	if _, err := strict.Verify(s.signTyped(t, "JWT", claims)); !errors.Is(err, verify.ErrTokenType) {
 		t.Errorf("a JWT-typed token answered %v, want ErrTokenType", err)
 	}

@@ -129,6 +129,15 @@
     ],
     "internal/access": ["internal/db"],
 
+    "_comment_authority": [
+      "internal/authority reads the two records a caller's authority comes from -- provider grants",
+      "and consumer registrations -- and makes the first provider grant (ADR-ORG-001 5.11). It",
+      "reaches internal/db for the Transactor type and nothing else. internal/httpapi does not",
+      "import it: authentication reads the records through an interface the composition root fills,",
+      "so the transport holds no statement."
+    ],
+    "internal/authority": ["internal/db"],
+
     "_comment_config": [
       "internal/config reads the environment and has no internal edges. A configuration package",
       "that could reach a domain package could validate a value by calling the thing it configures,",
@@ -151,6 +160,7 @@
     ],
     "cmd/organization-control": [
       "internal/access",
+      "internal/authority",
       "internal/config",
       "internal/db",
       "internal/httpapi",

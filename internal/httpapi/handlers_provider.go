@@ -611,6 +611,7 @@ func (h *handlers) recordDeprovisioning(w http.ResponseWriter, r *http.Request) 
 
 type registerConsumerRequest struct {
 	ConsumerID            string  `json:"consumer_id"`
+	PrincipalID           string  `json:"principal_id"`
 	ProjectionVersion     string  `json:"projection_version"`
 	MaxAcceptedAgeSeconds seconds `json:"max_accepted_age_seconds"`
 	StaleBehavior         string  `json:"stale_behavior"`
@@ -624,8 +625,20 @@ func (h *handlers) registerConsumer(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Parsed here so a malformed value is a 400 naming the field; an absent one reaches the
+	// registry's own rule as the nil identifier.
+	var principal id.UUID
+	if strings.TrimSpace(body.PrincipalID) != "" {
+		parsed, err := id.Parse(strings.TrimSpace(body.PrincipalID))
+		if err != nil {
+			platform.Problem(w, r, platform.ValidationFailed, "principal_id is not a valid identifier")
+			return
+		}
+		principal = parsed
+	}
 	record, err := h.services.Registry.Register(r.Context(), projection.Registration{
 		ConsumerID:        body.ConsumerID,
+		PrincipalID:       principal,
 		ProjectionVersion: body.ProjectionVersion,
 		MaxAcceptedAge:    body.MaxAcceptedAgeSeconds.Duration(),
 		StaleBehavior:     projection.StaleBehavior(body.StaleBehavior),

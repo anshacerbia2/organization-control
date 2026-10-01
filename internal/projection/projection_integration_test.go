@@ -151,6 +151,7 @@ func (f *fixture) register(t *testing.T) string {
 	consumerID := "test-" + mustID(t).String()
 	if _, err := f.registry.Register(f.ctx, Registration{
 		ConsumerID:        consumerID,
+		PrincipalID:       principalOf(consumerID),
 		ProjectionVersion: "v1",
 		MaxAcceptedAge:    30 * time.Second,
 		StaleBehavior:     StaleFailClosed,
@@ -655,9 +656,10 @@ func TestRegistrationRefusesAnUndeclaredContract(t *testing.T) {
 
 	cases := map[string]Registration{
 		"no identifier":     {ProjectionVersion: "v1", MaxAcceptedAge: time.Second, StaleBehavior: StaleFailClosed},
-		"no version":        {ConsumerID: "c", MaxAcceptedAge: time.Second, StaleBehavior: StaleFailClosed},
-		"no freshness":      {ConsumerID: "c", ProjectionVersion: "v1", StaleBehavior: StaleFailClosed},
-		"unknown behaviour": {ConsumerID: "c", ProjectionVersion: "v1", MaxAcceptedAge: time.Second, StaleBehavior: "best_effort"},
+		"no version":        {ConsumerID: "c", PrincipalID: principalOf("c"), MaxAcceptedAge: time.Second, StaleBehavior: StaleFailClosed},
+		"no freshness":      {ConsumerID: "c", PrincipalID: principalOf("c"), ProjectionVersion: "v1", StaleBehavior: StaleFailClosed},
+		"unknown behaviour": {ConsumerID: "c", PrincipalID: principalOf("c"), ProjectionVersion: "v1", MaxAcceptedAge: time.Second, StaleBehavior: "best_effort"},
+		"no principal_id":   {ConsumerID: "c", ProjectionVersion: "v1", MaxAcceptedAge: time.Second, StaleBehavior: StaleFailClosed},
 	}
 	for name, reg := range cases {
 		if _, err := f.registry.Register(f.ctx, reg); err == nil {

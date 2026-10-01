@@ -44,7 +44,7 @@ help:
 	@echo   make run               terminal 2: the service on $(ADDR)
 	@echo   make token             save a provider token to $(TOKEN_FILE)
 	@echo   make token ROLE=tenant a Tenant-scoped token: 403 on a provider route
-	@echo   make token ROLE=both   authentic, confers no scope: also 403
+	@echo   make token ROLE=stranger  a person holding no provider grant: also 403
 	@echo   make api P=/v1/tenants/ID              GET a path with that token
 	@echo   make api M=POST P=/v1/organizations B=body.json    send a body
 	@echo   make stop              free $(ISSUER) and $(ADDR) after a stale run
@@ -81,8 +81,7 @@ run:
 # --fail-with-body, not -f: the issuer explains its own refusals in the body, and -f
 # discarded that. `make token ROLE=tenant` was answered "role=tenant needs a tenant_id"
 # and reported here as "Could not reach the issuer" -- a guess printed over the answer.
-# Only ROLE=tenant carries it. ROLE=both mints its own Tenant claim, because its purpose is
-# to be refused: provider authority and authority over one Tenant in the same token.
+# Only ROLE=tenant carries it.
 TENANT_QUERY = $(if $(filter tenant,$(ROLE)),&tenant_id=$(TENANT),)
 
 token:

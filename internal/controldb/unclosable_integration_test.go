@@ -36,16 +36,16 @@ func TestThePostStageNamesOnlyDeadLettersNoResolutionCanClose(t *testing.T) {
 	if activeConsumer == "" {
 		activeConsumer = "unclosable-active-" + newID(t)
 		adminExec(t, ctx, pool, `INSERT INTO projection.consumer
-		    (consumer_id, projection_version, max_accepted_age, stale_behavior)
-		    VALUES ($1, 1, interval '1 minute', 'fail_closed')`, activeConsumer)
+		    (consumer_id, principal_id, projection_version, max_accepted_age, stale_behavior)
+		    VALUES ($1, gen_random_uuid(), 1, interval '1 minute', 'fail_closed')`, activeConsumer)
 		t.Cleanup(func() {
 			adminExec(t, context.Background(), pool, `DELETE FROM projection.consumer WHERE consumer_id = $1`, activeConsumer)
 		})
 	}
 	retiredConsumer := "unclosable-retired-" + newID(t)
 	adminExec(t, ctx, pool, `INSERT INTO projection.consumer
-	    (consumer_id, projection_version, max_accepted_age, stale_behavior, retired_at)
-	    VALUES ($1, 1, interval '1 minute', 'fail_closed', now())`, retiredConsumer)
+	    (consumer_id, principal_id, projection_version, max_accepted_age, stale_behavior, retired_at)
+	    VALUES ($1, gen_random_uuid(), 1, interval '1 minute', 'fail_closed', now())`, retiredConsumer)
 	t.Cleanup(func() {
 		adminExec(t, context.Background(), pool, `DELETE FROM projection.consumer WHERE consumer_id = $1`, retiredConsumer)
 	})

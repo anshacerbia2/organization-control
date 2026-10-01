@@ -27,7 +27,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/verify"
 )
 
@@ -98,7 +97,7 @@ func (j *jwksIssuer) verifier(t *testing.T) *verify.Verifier {
 		Issuer:      testIssuer,
 		Audience:    testAudience,
 		Keys:        keys,
-		Requirement: Requirement(testAuthConfig()),
+		Requirement: Requirement(),
 	})
 	if err != nil {
 		t.Fatalf("verify.New: %v", err)
@@ -106,25 +105,19 @@ func (j *jwksIssuer) verifier(t *testing.T) *verify.Verifier {
 	return verifier
 }
 
-// claims returns a provider token's claims, using the same claim and role names the rest of this
-// package's tests use.
+// claims returns a provider token's claims: the shape the rest of this package's tests use, naming
+// the Principal the fake records hold a grant for.
 func (j *jwksIssuer) claims(t *testing.T) map[string]any {
 	t.Helper()
 
-	subject, err := id.NewV7()
-	if err != nil {
-		t.Fatalf("mint subject: %v", err)
-	}
 	now := time.Now().UTC()
-	return map[string]any{
-		"iss":          testIssuer,
-		"aud":          []string{testAudience},
-		"sub":          subject.String(),
-		"iat":          now.Unix(),
-		"nbf":          now.Unix(),
-		"exp":          now.Add(10 * time.Minute).Unix(),
-		"realm_access": map[string]any{"roles": []string{testRole}},
-	}
+	claims := providerClaims(testProvider)
+	claims["iss"] = testIssuer
+	claims["aud"] = []string{testAudience}
+	claims["iat"] = now.Unix()
+	claims["nbf"] = now.Unix()
+	claims["exp"] = now.Add(10 * time.Minute).Unix()
+	return claims
 }
 
 // sign mints a token with the permitted algorithm.
@@ -195,12 +188,13 @@ func TestATokenVerifiesAgainstKeysFetchedOverHTTP(t *testing.T) {
 		t.Error("the verification succeeded without ever fetching the key set")
 	}
 
-	caller, err := callerFromClaims(verified, testAuthConfig())
+	presented, err := presentedFromClaims(verified)
 	if err != nil {
 		t.Fatalf("the verified claims map to no caller: %v", err)
 	}
-	if !caller.Provider {
-		t.Error("the realm role did not confer provider authority")
+	caller, err := authorize(t.Context(), presented, testAuthConfig())
+	if err != nil || !caller.Provider {
+		t.Errorf("the granted Principal did not resolve to a provider: %+v, %v", caller, err)
 	}
 }
 
@@ -275,7 +269,7 @@ func TestAnUnreachableKeySourceRefusesRatherThanAdmits(t *testing.T) {
 		Issuer:      testIssuer,
 		Audience:    testAudience,
 		Keys:        keys,
-		Requirement: Requirement(testAuthConfig()),
+		Requirement: Requirement(),
 	})
 	if err != nil {
 		t.Fatalf("verify.New: %v", err)

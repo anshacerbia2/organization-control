@@ -35,8 +35,6 @@ func required(t *testing.T) {
 	t.Setenv("ORGANIZATION_TOKEN_ISSUER", "https://issuer.example")
 	t.Setenv("ORGANIZATION_TOKEN_AUDIENCE", "organization-control")
 	t.Setenv("ORGANIZATION_JWKS_URL", "https://issuer.example/jwks")
-	t.Setenv("ORGANIZATION_TENANT_CLAIM", "https://scnehaux.com/tenant")
-	t.Setenv("ORGANIZATION_PROVIDER_ROLE", "provider-admin")
 }
 
 // TestTheProvisioningBoundsCarryTheirDocumentedDefaults pins the three rows of
@@ -122,45 +120,50 @@ func TestAResolutionCredentialSharedWithAnotherPoolIsRefused(t *testing.T) {
 	}
 }
 
-// The consumer's credential goes with consumer authority, and is never another pool's. Falling back to
-// the provider credential is the over-privilege the consumer role exists to remove.
-func TestTheConsumerCredentialGoesWithConsumerAuthority(t *testing.T) {
-	consumer := func(t *testing.T) {
-		required(t)
-		t.Setenv("ORGANIZATION_CONSUMER_ROLE", "projection-consumer")
-		t.Setenv("ORGANIZATION_CONSUMER_CLAIM", "https://scnehaux.com/consumer_id")
-		t.Setenv("ORGANIZATION_CONSUMER_DATABASE_URL", "postgres://organization_consumer_app@localhost/control")
-	}
-
+// The consumer's credential is what enables consumer authority, and is never another pool's. Falling
+// back to the provider credential is the over-privilege the consumer role exists to remove.
+func TestTheConsumerCredentialIsItsOwn(t *testing.T) {
 	t.Run("accepted with its own credential", func(t *testing.T) {
-		consumer(t)
-		if _, err := Load(); err != nil {
+		required(t)
+		t.Setenv("ORGANIZATION_CONSUMER_DATABASE_URL", "postgres://organization_consumer_app@localhost/control")
+		cfg, err := Load()
+		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-	})
-	t.Run("refused without a credential", func(t *testing.T) {
-		consumer(t)
-		t.Setenv("ORGANIZATION_CONSUMER_DATABASE_URL", "")
-		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ORGANIZATION_CONSUMER_DATABASE_URL") {
-			t.Fatalf("Load accepted consumer authority with no consumer credential: %v", err)
+		if cfg.ConsumerDSN == "" {
+			t.Error("the consumer credential was not kept")
 		}
 	})
-	t.Run("refused without consumer authority", func(t *testing.T) {
-		consumer(t)
-		t.Setenv("ORGANIZATION_CONSUMER_ROLE", "")
-		t.Setenv("ORGANIZATION_CONSUMER_CLAIM", "")
-		if _, err := Load(); err == nil {
-			t.Fatal("Load accepted a consumer credential nothing can use")
+	t.Run("absent, consumer authority is off", func(t *testing.T) {
+		required(t)
+		cfg, err := Load()
+		if err != nil || cfg.ConsumerDSN != "" {
+			t.Fatalf("Load answered %v with consumer DSN %q", err, cfg.ConsumerDSN)
 		}
 	})
 	for _, shared := range []string{
 		"ORGANIZATION_PROVIDER_DATABASE_URL", "ORGANIZATION_TENANT_DATABASE_URL", "ORGANIZATION_RESOLUTION_DATABASE_URL",
 	} {
 		t.Run("refused when shared with "+shared, func(t *testing.T) {
-			consumer(t)
+			required(t)
 			t.Setenv("ORGANIZATION_CONSUMER_DATABASE_URL", os.Getenv(shared))
 			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ORGANIZATION_CONSUMER_DATABASE_URL") {
 				t.Fatalf("Load accepted a consumer DSN identical to %s: %v", shared, err)
+			}
+		})
+	}
+}
+
+// A setting that named a claim or a role is refused, so a deployment expecting authority from one
+// learns at startup that it no longer comes from there (TDD-organization-control-001 §Caller
+// Authority).
+func TestARemovedAuthoritySettingIsRefused(t *testing.T) {
+	for name := range RemovedSettings {
+		t.Run(name, func(t *testing.T) {
+			required(t)
+			t.Setenv(name, "anything")
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("Load accepted %s: %v", name, err)
 			}
 		})
 	}

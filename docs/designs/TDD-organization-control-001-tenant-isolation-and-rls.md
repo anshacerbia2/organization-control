@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.5.0
+  version: 1.6.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-09-27
+  last_reviewed: 2026-10-01
   parent_sad: SAD-004
 ---
 
@@ -38,6 +38,8 @@ its implementation.
 - The isolation predicate and the session binding it reads.
 - Runtime roles, grants, and the single code path permitted to set tenant scope.
 - Provider-scoped administration and how it is separated from tenant-scoped access.
+- How a caller's authority is read: the token's standard claims, this service's provider
+  grants, and its consumer registry (`ADR-ORG-001 §5.11`).
 - Cross-tenant denial tests executed as the runtime role.
 
 **Out of scope**
@@ -134,7 +136,8 @@ CREATE ROLE organization_consumer_rt NOLOGIN;
 Privileges are deny by default in every schema. `grants.sql` revokes everything from the
 runtime roles, removes the default privileges that would hand a later table to them, and
 then grants each table and privilege a statement in this repository needs. No runtime role
-holds `DELETE` on any business table, because nothing deletes a business row. The tenant-scoped
+holds `DELETE` on any business table, because nothing deletes a business row. The provider role
+reads and inserts `organization.provider_grant` and cannot change a grant (§Caller Authority). The tenant-scoped
 role cannot create or change a Tenant, reach `organization`, `operation`, `projection` or
 `audit`, or read Membership history. The provider role reads Membership and cannot write
 it. `tools/grantcheck` keeps the grant list honest in both directions (§Grant Derivation):
@@ -279,14 +282,13 @@ whichever one ran last.
 
 ```text
 resolve(request):
-    actor    := authenticated principal and administrative context
+    actor    := authenticated principal and administrative context (§Caller Authority)
     requested := tenant identifier carried by the request, if any
 
     if actor is a registered projection consumer:
-        refuse if it also carries provider authority or a Tenant
         return ConsumerScope                  -- cross-Tenant, opens only the consumer pool
 
-    if actor holds provider administrative scope for this operation:
+    if actor holds a provider grant:
         require reason and correlation identifier
         emit privileged-administration event
         return ProviderScope
@@ -324,6 +326,97 @@ deployment:
 - The provider routes checked the scope alone. A consumer token that added
   `X-Administrative-Reason` was admitted to every provider route: it could suspend a Tenant,
   retire an Organization, or close or waive a dead letter.
+
+### Caller Authority
+
+A caller is one of three, decided from the token's standard claims and this service's own
+records, never from a role in the token (`ADR-ORG-001 §5.11`, `STD-IAM-002 §3.1.1`). Every
+token needs a `principal_id` that is a UUID and a `subject_type` of `human` or `workload`; the
+`principal_id` is the actor every event and every evidence row names, and `sub` is not read.
+
+| Caller | Claims | Record read for each request | Refused when |
+| :-- | :-- | :-- | :-- |
+| Tenant administrator | `tenant_id` | — | `tenant_id` is not a UUID |
+| Provider | `subject_type` `human`, `acr`, `auth_time`; no `tenant_id` | a provider grant for the `principal_id` | no grant, or `acr` or `auth_time` absent |
+| Projection consumer | `subject_type` `workload`, `workload_owner`; no `tenant_id` | an active consumer registered with the `principal_id` | none registered, or consumer authority not configured |
+
+```text
+authenticate(token):
+    verify signature, iss, aud, typ, exp                 -- foundation-platform verify
+    principal := principal_id, a UUID
+    type      := subject_type, human or workload
+    if tenant_id present:
+        return Tenant(principal, tenant_id)
+    if type is human:
+        require acr and auth_time
+        require a provider grant for principal          -- read now
+        return Provider(principal)
+    require workload_owner
+    consumer := the active consumer registered with principal   -- read now
+    return Consumer(principal, consumer)
+```
+
+The claim rule runs inside the verifier, and the two records are read after it, on the provider
+connections, in one read-only transaction. The verifier sees only claims, so it cannot read a
+record; a claim-shaped token reaches the record read and is refused there if it names nobody the
+records know. A record read that fails answers `503` and admits nobody.
+
+The read happens for every request rather than once per token. A token outlives the record it
+was issued against by up to its lifetime; a read per request makes a revoked grant or a retired
+consumer stop at the next request (`ADR-ORG-001 §5.11`). It is two indexed lookups by
+`principal_id`.
+
+**The provider grant.**
+
+```sql
+CREATE TABLE organization.provider_grant (
+    grant_id           UUID        PRIMARY KEY,
+    principal_id       UUID        NOT NULL,
+    scope              TEXT        NOT NULL,
+    granted_by         UUID,
+    bootstrap_operator TEXT,
+    reason             TEXT        NOT NULL,
+    granted_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT provider_grant_scope_check CHECK (scope IN ('provider:organization-control')),
+    CONSTRAINT provider_grant_reason_check CHECK (btrim(reason) <> ''),
+    CONSTRAINT provider_grant_origin_check
+        CHECK ((granted_by IS NULL) = (bootstrap_operator IS NOT NULL))
+);
+CREATE UNIQUE INDEX provider_grant_principal_scope ON organization.provider_grant (principal_id, scope);
+CREATE UNIQUE INDEX provider_grant_single_bootstrap ON organization.provider_grant ((true))
+    WHERE granted_by IS NULL;
+```
+
+`scope` is checked against the registered scopes, which today is the one this service checks
+(`STD-IAM-002 §3.1.1`). A grant names who made it: a provider's `principal_id`, or, for the
+first grant only, the operator who ran the bootstrap. The provider role holds `SELECT` and
+`INSERT` on the table and no `UPDATE` or `DELETE`, so a grant row cannot be rewritten. Granting
+and revoking through the API is the next change (ROADMAP item 22); until it lands, the bootstrap
+grant is the only one.
+
+**The bootstrap.** `organization-control bootstrap-provider -principal-id <uuid> -operator
+<name> -reason <text>` makes the first grant, following `ADR-ORG-001 §5.11`:
+
+1. it runs on the provider connections, in one transaction;
+2. it refuses when any grant exists, and the partial unique index refuses a second bootstrap row
+   even against two concurrent runs;
+3. it records the operator and the reason in the row, which no runtime role can change;
+4. it creates no identity: the Principal is one the Identity Control API's ceremony minted.
+
+A rerun naming the Principal the bootstrap already granted reports that grant and writes
+nothing, so a run whose answer was lost can be repeated. A rerun naming anyone else is refused.
+
+**The consumer.** `projection.consumer` carries the consumer's `principal_id`, unique across
+every row, retired ones included, so a workload Principal is one consumer for good. Registration
+requires it, and re-registering a consumer under a different `principal_id` is refused
+(`TDD-organization-control-002` §Consumer Registry). Consumer authority exists only when
+`ORGANIZATION_CONSUMER_DATABASE_URL` is set, because only then is there a pool to serve it.
+
+**Why no setting names a claim or a role.** The claim names are fixed by `STD-IAM-002 §3.2`, so
+`ORGANIZATION_TENANT_CLAIM`, `ORGANIZATION_PROVIDER_ROLE`, `ORGANIZATION_CONSUMER_ROLE` and
+`ORGANIZATION_CONSUMER_CLAIM` are gone. Startup refuses a deployment that still sets one, because
+such a deployment expects authority to come from where it no longer does, and a silently ignored
+setting would leave it believing so.
 
 ### Grant and Policy Assertion
 
@@ -455,7 +548,7 @@ because its statements live in foundation-platform and run in foundation-referen
 | `ORGANIZATION_TENANT_DATABASE_URL` | none, required | A login role inheriting `organization_rt` |
 | `ORGANIZATION_PROVIDER_DATABASE_URL` | none, required | A login role inheriting `organization_provider_rt` |
 | `ORGANIZATION_RESOLUTION_DATABASE_URL` | none, required | A login role inheriting `organization_resolution_rt` (TDD-005) |
-| `ORGANIZATION_CONSUMER_DATABASE_URL` | none; required when `ORGANIZATION_CONSUMER_ROLE` is set, refused otherwise | A login role inheriting `organization_consumer_rt` |
+| `ORGANIZATION_CONSUMER_DATABASE_URL` | none; set, it enables consumer authority | A login role inheriting `organization_consumer_rt` |
 | `DB_MAX_CONNS` | `20` | Each pool's ceiling |
 
 Startup refuses any of these DSNs equal to another, because two pools on one credential run
@@ -492,6 +585,26 @@ administrative connection is explicitly not accepted as evidence.
   and correlation identifier before the transaction body runs.
 - A tenant-scoped handler holds no reference to the provider pool, asserted by the
   import and wiring test.
+
+### Caller Authority
+
+- A tenant token, a provider token, and a consumer token resolve to their callers, each by its
+  `principal_id`, and `sub` is never the actor.
+- A token without `principal_id`, with one that is not a UUID, or with a `subject_type` other than
+  `human` or `workload`, is refused.
+- A human token without `tenant_id` and without a grant is refused with `403`, and so is one
+  without `acr` or `auth_time`.
+- A workload token without `tenant_id` is refused when no active consumer carries its
+  `principal_id`, when it lacks `workload_owner`, and when consumer authority is not configured.
+- A token carrying `realm_access` roles gains nothing from them.
+- A failed record read answers `503`.
+- The bootstrap grants once, reports the same grant on a rerun for the same Principal, refuses a
+  rerun for another, and refuses when any grant exists; two concurrent runs leave one row
+  (integration, as the provider role).
+- The provider role cannot update or delete a grant.
+- Registering a consumer without `principal_id`, or under a different one than it holds, is
+  refused; two consumers cannot share one.
+- Startup refuses each of the four removed settings.
 
 ### Structural
 
@@ -587,7 +700,8 @@ rejection triage, provider-access review, and suspected cross-tenant exposure.
 | Parent system | SAD-004 — Scnehaux Organization Control |
 | Realizes capability | PAD-PLT-002 — Organization & Tenancy Platform |
 | Governed by | ADR-GLB-002 — Enterprise PostgreSQL Row-Level Security for Isolation |
-| Governed by | ADR-ORG-001 — Separate Organization Authority and Keycloak Projection |
+| Governed by | ADR-ORG-001 — Separate Organization Authority and Keycloak Projection; §5.11 provider and consumer authority |
+| Conforms to | STD-IAM-002 §3.1.1, §3.2, §3.5 — the grant's holder checks its own record; `principal_id` is the persisted identifier |
 | Conforms to | STD-GLB-002 — `FORCE ROW LEVEL SECURITY`, non-owner runtime role, no `SUPERUSER`/`BYPASSRLS`, isolation proven as the runtime role |
 | Enterprise constraint | EAD-003 — private domain persistence; cross-domain database access is prohibited |
 | Enterprise constraint | EAD-006 — tenant isolation, privileged access attribution, and default deny |

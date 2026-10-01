@@ -15,18 +15,32 @@ package projection
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/anshacerbia2/foundation-platform/id"
+
 	"github.com/anshacerbia2/organization-control/internal/db"
 )
+
+// principalOf is the workload principal_id a test consumer is registered with: derived from its name,
+// so re-registering the same consumer names the same Principal, as a real consumer would.
+func principalOf(consumerID string) id.UUID {
+	sum := sha256.Sum256([]byte(consumerID))
+	sum[6] = sum[6]&0x0f | 0x80 // version 8, name-derived
+	sum[8] = sum[8]&0x3f | 0x80 // RFC 9562 variant
+	return id.MustParse(fmt.Sprintf("%x-%x-%x-%x-%x", sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16]))
+}
 
 func (f *fixture) registerNamed(t *testing.T, consumerID string) error {
 	t.Helper()
 	_, err := f.registry.Register(f.ctx, Registration{
 		ConsumerID:        consumerID,
+		PrincipalID:       principalOf(consumerID),
 		ProjectionVersion: "v1",
 		MaxAcceptedAge:    30 * time.Second,
 		StaleBehavior:     StaleFailClosed,
@@ -86,6 +100,7 @@ func TestReRegisteringTheActiveConsumerIsNotASecondConsumer(t *testing.T) {
 
 	updated, err := f.registry.Register(f.ctx, Registration{
 		ConsumerID:        consumerID,
+		PrincipalID:       principalOf(consumerID),
 		ProjectionVersion: "v2",
 		MaxAcceptedAge:    90 * time.Second,
 		StaleBehavior:     StaleUseWithMarker,
@@ -198,6 +213,7 @@ func TestRegisteringARetiredIdentityRevivesIt(t *testing.T) {
 
 	if _, err := f.registry.Register(f.ctx, Registration{
 		ConsumerID:        consumerID,
+		PrincipalID:       principalOf(consumerID),
 		ProjectionVersion: "v1",
 		MaxAcceptedAge:    30 * time.Second,
 		StaleBehavior:     StaleFailClosed,
@@ -232,8 +248,8 @@ func TestTheDatabaseRefusesASecondActiveConsumerWithoutTheRegistry(t *testing.T)
 	err := db.WithProviderScope(f.ctx, f.provider, "projection scope suite",
 		func(ctx context.Context, tx db.Tx) error {
 			_, err := tx.Exec(ctx, `INSERT INTO projection.consumer
-			    (consumer_id, projection_version, max_accepted_age, stale_behavior)
-			    VALUES ($1, 'v1', interval '30 seconds', 'fail_closed')`, second)
+			    (consumer_id, principal_id, projection_version, max_accepted_age, stale_behavior)
+			    VALUES ($1, gen_random_uuid(), 'v1', interval '30 seconds', 'fail_closed')`, second)
 			return err
 		})
 	if err == nil {
@@ -245,5 +261,43 @@ func TestTheDatabaseRefusesASecondActiveConsumerWithoutTheRegistry(t *testing.T)
 	}
 	if got := f.activeCount(t); got != 1 {
 		t.Errorf("%d active consumers, want 1", got)
+	}
+}
+
+// A consumer is the workload it was registered with (ADR-ORG-001 §5.11). Re-registering it under
+// another principal_id would hand its records and its authority to a different workload, and a
+// workload naming two consumers would make its token ambiguous; both are refused.
+func TestAConsumerKeepsItsWorkload(t *testing.T) {
+	f := newFixture(t)
+
+	consumerID := "workload-kept-" + mustID(t).String()
+	if err := f.registerNamed(t, consumerID); err != nil {
+		t.Fatalf("registering the consumer: %v", err)
+	}
+
+	_, err := f.registry.Register(f.ctx, Registration{
+		ConsumerID: consumerID, PrincipalID: mustID(t), ProjectionVersion: "v1",
+		MaxAcceptedAge: 30 * time.Second, StaleBehavior: StaleFailClosed,
+	})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "another principal_id") {
+		t.Errorf("re-registering under another principal_id answered %v, want ErrInvalid", err)
+	}
+	record, err := f.registry.Get(f.ctx, consumerID)
+	if err != nil || record.PrincipalID != principalOf(consumerID) {
+		t.Errorf("the consumer reads as %+v, %v; its principal_id must be unchanged", record, err)
+	}
+
+	if err := f.registry.Retire(f.ctx, consumerID); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	other := "workload-other-" + mustID(t).String()
+	_, err = f.registry.Register(f.ctx, Registration{
+		ConsumerID: other, PrincipalID: principalOf(consumerID), ProjectionVersion: "v1",
+		MaxAcceptedAge: 30 * time.Second, StaleBehavior: StaleFailClosed,
+	})
+	t.Cleanup(func() { f.exec(t, `DELETE FROM projection.consumer WHERE consumer_id = $1`, other) })
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), consumerID) {
+		t.Errorf("a second consumer under a retired consumer's principal_id answered %v, want ErrInvalid naming %s",
+			err, consumerID)
 	}
 }
