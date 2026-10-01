@@ -188,3 +188,21 @@ func TestEveryProblemIsReportedAtOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestTheTokenTypeIsReportedUnlessEnforcementIsAsked(t *testing.T) {
+	for _, c := range []struct {
+		value   string
+		enforce bool
+		ok      bool
+	}{{"", false, true}, {"report", false, true}, {"enforce", true, true}, {"strict", false, false}} {
+		required(t)
+		t.Setenv("ORGANIZATION_TOKEN_TYPE", c.value)
+		cfg, err := Load()
+		if c.ok && (err != nil || cfg.EnforceAccessTokenType != c.enforce) {
+			t.Errorf("%q: enforce %v, err %v", c.value, cfg.EnforceAccessTokenType, err)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("%q was accepted", c.value)
+		}
+	}
+}
