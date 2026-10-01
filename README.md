@@ -252,6 +252,18 @@ It refuses when any grant exists, records the operator and the reason in a row n
 change, and creates no identity: the Principal is the one the Identity Control API's ceremony minted.
 Rerun for the same Principal, it reports the grant and writes nothing.
 
+**Every later grant, and every revocation, goes through the API**, as a provider, with
+`X-Administrative-Reason`:
+
+```text
+GET   /v1/provider-grants                       every grant, active and revoked
+POST  /v1/provider-grants                       {"principal_id": "..."}
+POST  /v1/provider-grants/{grant_id}/revoke
+```
+
+A revoked grant confers nothing from the next request on, and stays listed with who revoked it and
+why. The last active grant cannot be revoked: grant another provider first.
+
 **A consumer registers with its workload `principal_id`** (`"principal_id"` in
 `POST /v1/projections/consumers`). It stays that consumer's for good: re-registering under another is
 refused.

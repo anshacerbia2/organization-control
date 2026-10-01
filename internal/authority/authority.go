@@ -44,9 +44,11 @@ func NewReader(tx db.Transactor) (*Reader, error) {
 }
 
 const providerGrantStatement = `SELECT EXISTS (
-    SELECT 1 FROM organization.provider_grant WHERE principal_id = $1 AND scope = $2)`
+    SELECT 1 FROM organization.provider_grant
+    WHERE principal_id = $1 AND scope = $2 AND revoked_at IS NULL)`
 
-// ProviderGrant reports whether the Principal holds a provider grant over this service.
+// ProviderGrant reports whether the Principal holds an active provider grant over this service. A
+// revoked grant confers nothing from the next request on.
 func (r *Reader) ProviderGrant(ctx context.Context, principal id.UUID) (bool, error) {
 	if principal.IsNil() {
 		return false, errors.New("authority: a principal is required")

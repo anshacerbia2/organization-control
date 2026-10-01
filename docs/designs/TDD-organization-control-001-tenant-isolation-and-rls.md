@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.6.0
+  version: 1.7.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -377,29 +377,79 @@ CREATE TABLE organization.provider_grant (
     bootstrap_operator TEXT,
     reason             TEXT        NOT NULL,
     granted_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    revoked_at         TIMESTAMPTZ,
+    revoked_by         UUID,
+    revoke_reason      TEXT,
     CONSTRAINT provider_grant_scope_check CHECK (scope IN ('provider:organization-control')),
     CONSTRAINT provider_grant_reason_check CHECK (btrim(reason) <> ''),
     CONSTRAINT provider_grant_origin_check
-        CHECK ((granted_by IS NULL) = (bootstrap_operator IS NOT NULL))
+        CHECK ((granted_by IS NULL) = (bootstrap_operator IS NOT NULL)),
+    CONSTRAINT provider_grant_revocation_check
+        CHECK ((revoked_at IS NULL) = (revoked_by IS NULL)
+           AND (revoked_at IS NULL) = (revoke_reason IS NULL)
+           AND (revoke_reason IS NULL OR btrim(revoke_reason) <> ''))
 );
-CREATE UNIQUE INDEX provider_grant_principal_scope ON organization.provider_grant (principal_id, scope);
+CREATE UNIQUE INDEX provider_grant_principal_scope ON organization.provider_grant (principal_id, scope)
+    WHERE revoked_at IS NULL;
 CREATE UNIQUE INDEX provider_grant_single_bootstrap ON organization.provider_grant ((true))
     WHERE granted_by IS NULL;
 ```
 
 `scope` is checked against the registered scopes, which today is the one this service checks
 (`STD-IAM-002 §3.1.1`). A grant names who made it: a provider's `principal_id`, or, for the
-first grant only, the operator who ran the bootstrap. The provider role holds `SELECT` and
-`INSERT` on the table and no `UPDATE` or `DELETE`, so a grant row cannot be rewritten. Granting
-and revoking through the API is the next change (ROADMAP item 22); until it lands, the bootstrap
-grant is the only one.
+first grant only, the operator who ran the bootstrap. A grant is active until it is revoked, and
+the authority read counts only an active one. The provider role holds `SELECT` and `INSERT` on
+the table, `UPDATE` on the three revocation columns alone, and no `DELETE`: who was granted, by
+whom, when and why cannot be rewritten, and a revoked grant stays as the record. One Principal
+holds at most one active grant per scope; after a revocation it may be granted again, as a new
+row.
+
+**Granting and revoking, through the API** (`ADR-ORG-001 §5.11`):
+
+```text
+GET   /v1/provider-grants                       every grant, active and revoked, newest first
+POST  /v1/provider-grants                       {"principal_id": ...}
+POST  /v1/provider-grants/{grant_id}/revoke
+```
+
+Each is a provider route: it needs a provider caller and `X-Administrative-Reason`, and runs in
+the provider scope, so the access record names the actor and the reason before the work runs.
+The reason is also the grant's or the revocation's own. A grant names the calling provider as
+`granted_by`; a revocation names it as `revoked_by`.
+
+```text
+grant(principal):
+    insert the grant, granted_by = caller,
+        doing nothing on conflict with the partial unique index
+    refuse when nothing was inserted: principal already holds one   -- 409
+
+revoke(grant):
+    lock every active grant (FOR UPDATE)
+    refuse when the grant is unknown                  -- 404
+    refuse when it is already revoked                 -- 409
+    refuse when it is the last active grant           -- 409
+    set revoked_at, revoked_by = caller, revoke_reason
+```
+
+**The last active grant is not revoked.** With none left, nobody could grant again, and the
+bootstrap refuses a table that holds any grant, revoked ones included, so the estate would have
+no way back to a provider short of the database owner. A provider revokes another's grant, or its
+own while another remains. Locking the active grants first is what makes the rule hold against two
+revocations at once: the second waits, then counts one. A grant needs no lock: the partial unique
+index is what refuses a second active grant, against two concurrent requests as well, and the
+insert reports the conflict rather than failing on it.
+
+A revocation takes effect at the next request, because the authority read happens for every
+request. A Principal is not checked against the Identity Control API when granted: this service
+reaches no other domain (`ADR-ORG-001 §5.4`), and a grant naming a `principal_id` no token carries
+confers nothing.
 
 **The bootstrap.** `organization-control bootstrap-provider -principal-id <uuid> -operator
 <name> -reason <text>` makes the first grant, following `ADR-ORG-001 §5.11`:
 
 1. it runs on the provider connections, in one transaction;
-2. it refuses when any grant exists, and the partial unique index refuses a second bootstrap row
-   even against two concurrent runs;
+2. it refuses when any grant exists, revoked ones included, and the partial unique index refuses a
+   second bootstrap row even against two concurrent runs;
 3. it records the operator and the reason in the row, which no runtime role can change;
 4. it creates no identity: the Principal is one the Identity Control API's ceremony minted.
 
@@ -601,7 +651,16 @@ administrative connection is explicitly not accepted as evidence.
 - The bootstrap grants once, reports the same grant on a rerun for the same Principal, refuses a
   rerun for another, and refuses when any grant exists; two concurrent runs leave one row
   (integration, as the provider role).
-- The provider role cannot update or delete a grant.
+- The provider role cannot delete a grant, and cannot update a column outside the three
+  revocation columns.
+- A provider grants another Principal, which is then a provider at its next request; a second
+  active grant for the same Principal is refused with `409`.
+- A revoked grant confers nothing at the next request, and stays listed with who revoked it and
+  why. The Principal may be granted again.
+- Revoking the last active grant is refused with `409`, and two concurrent revocations of the last
+  two grants leave one.
+- A grant or revocation without `X-Administrative-Reason`, or from a tenant or consumer caller, is
+  refused before a transaction opens.
 - Registering a consumer without `principal_id`, or under a different one than it holds, is
   refused; two consumers cannot share one.
 - Startup refuses each of the four removed settings.

@@ -186,10 +186,13 @@ GRANT SELECT, INSERT, UPDATE ON operation.offboarding_obligation TO organization
 GRANT USAGE ON SCHEMA organization TO organization_provider_rt;
 GRANT SELECT, INSERT, UPDATE ON organization.organization TO organization_provider_rt;
 
--- organization.provider_grant -- provider only: SELECT for the authority read every request makes,
--- INSERT for the bootstrap. No UPDATE and no DELETE, so a grant row is never rewritten: it is the
--- record of who was given cross-Tenant authority, by whom, and why (ADR-ORG-001 §5.11).
+-- organization.provider_grant -- provider only: SELECT for the authority read every request makes
+-- and the grant list, INSERT for the bootstrap and a grant, and UPDATE on the three revocation
+-- columns alone. No DELETE, and no UPDATE of who was granted, by whom, when or why: a grant row is
+-- the record of who was given cross-Tenant authority, and a revoked one stays as that record
+-- (ADR-ORG-001 §5.11). The revocation's FOR UPDATE lock needs the column privilege as well.
 GRANT SELECT, INSERT ON organization.provider_grant TO organization_provider_rt;
+GRANT UPDATE (revoked_at, revoked_by, revoke_reason) ON organization.provider_grant TO organization_provider_rt;
 
 -- projection.consumer -- provider only: the consumer registry, progress reports, the snapshot
 -- mark, and the fresh check's metering. The resolver reads it through its own role, below.

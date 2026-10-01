@@ -17,6 +17,7 @@ import (
 	platform "github.com/anshacerbia2/foundation-platform/httpapi"
 	"github.com/anshacerbia2/foundation-platform/idempotency"
 
+	"github.com/anshacerbia2/organization-control/internal/authority"
 	"github.com/anshacerbia2/organization-control/internal/context"
 	"github.com/anshacerbia2/organization-control/internal/db"
 	"github.com/anshacerbia2/organization-control/internal/invitation"
@@ -183,6 +184,15 @@ var mapping = []struct {
 
 	// Context.
 	{context.ErrInvalid, platform.ValidationFailed},
+
+	// Provider grants.
+	{authority.ErrInvalid, platform.ValidationFailed},
+	{authority.ErrGrantNotFound, platform.NotFound},
+	{authority.ErrAlreadyGranted, platform.StateTransitionRefused},
+	{authority.ErrAlreadyRevoked, platform.StateTransitionRefused},
+	// StateTransitionRefused: the request is well formed, and the estate refuses it until another
+	// provider holds a grant. The refusal says so.
+	{authority.ErrLastGrant, platform.StateTransitionRefused},
 	{context.ErrNotRegistered, platform.Forbidden},
 	{context.ErrRequestRequired, platform.ValidationFailed},
 }

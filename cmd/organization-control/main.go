@@ -266,6 +266,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("context service: %w", err)
 	}
+	// Granting and revoking provider authority, in the provider scope like every provider route.
+	providerGrants, err := authority.NewAdministration(providerPool)
+	if err != nil {
+		return fmt.Errorf("provider grant administration: %w", err)
+	}
 
 	// A registered consumer's own routes, on its own connections and its own role. Built only when
 	// the consumer credential is configured, which is what enables consumer authority: without the
@@ -315,8 +320,9 @@ func run() error {
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 			Replayer: replayer, Resolver: resolver,
-			Frontier: frontier,
-			Consumer: consumerServices,
+			ProviderGrants: providerGrants,
+			Frontier:       frontier,
+			Consumer:       consumerServices,
 		},
 		Database:         tenantConns,
 		Telemetry:        telemetry,

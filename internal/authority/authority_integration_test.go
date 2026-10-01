@@ -85,18 +85,22 @@ func emptyGrants(t *testing.T, ctx context.Context, owner *fdb.Pool) {
 		grantID, principal, scope, reason string
 		grantedBy, operator               *string
 		grantedAt                         time.Time
+		revokedAt                         *time.Time
+		revokedBy, revokeReason           *string
 	}
 	var saved []row
 	if err := owner.InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT grant_id::text, principal_id::text, scope, reason,
-		    granted_by::text, bootstrap_operator, granted_at FROM organization.provider_grant`)
+		    granted_by::text, bootstrap_operator, granted_at, revoked_at, revoked_by::text, revoke_reason
+		    FROM organization.provider_grant`)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var r row
-			if err := rows.Scan(&r.grantID, &r.principal, &r.scope, &r.reason, &r.grantedBy, &r.operator, &r.grantedAt); err != nil {
+			if err := rows.Scan(&r.grantID, &r.principal, &r.scope, &r.reason, &r.grantedBy, &r.operator, &r.grantedAt,
+				&r.revokedAt, &r.revokedBy, &r.revokeReason); err != nil {
 				return err
 			}
 			saved = append(saved, r)
@@ -110,9 +114,11 @@ func emptyGrants(t *testing.T, ctx context.Context, owner *fdb.Pool) {
 		exec(t, context.Background(), owner, `DELETE FROM organization.provider_grant`)
 		for _, r := range saved {
 			exec(t, context.Background(), owner, `INSERT INTO organization.provider_grant
-			    (grant_id, principal_id, scope, reason, granted_by, bootstrap_operator, granted_at)
-			    VALUES ($1, $2, $3, $4, $5::uuid, $6, $7)`,
-				r.grantID, r.principal, r.scope, r.reason, r.grantedBy, r.operator, r.grantedAt)
+			    (grant_id, principal_id, scope, reason, granted_by, bootstrap_operator, granted_at,
+			     revoked_at, revoked_by, revoke_reason)
+			    VALUES ($1, $2, $3, $4, $5::uuid, $6, $7, $8, $9::uuid, $10)`,
+				r.grantID, r.principal, r.scope, r.reason, r.grantedBy, r.operator, r.grantedAt,
+				r.revokedAt, r.revokedBy, r.revokeReason)
 		}
 	})
 }
@@ -154,7 +160,7 @@ func TestTheBootstrapMakesTheFirstGrantOnce(t *testing.T) {
 	for name, statement := range map[string]string{
 		"rewrite a grant": `UPDATE organization.provider_grant SET principal_id = gen_random_uuid()`,
 		"delete a grant":  `DELETE FROM organization.provider_grant`,
-	} {
+	} { // the revocation columns are the provider role's, and administration_integration_test.go covers them
 		err := provider.InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
 			_, err := tx.Exec(ctx, statement)
 			return err
