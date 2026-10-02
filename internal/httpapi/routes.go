@@ -319,6 +319,6 @@ func (s Surface) Mount(probeChain, anonymousChain, apiChain func(http.Handler) h
 	root.Handle("GET /healthz", probeChain(s.Probes))
 	root.Handle("GET /readyz", probeChain(s.Probes))
 	root.Handle("POST /v1/invitations/lookup", anonymousChain(s.Anonymous))
-	root.Handle("/", apiChain(s.API))
+	root.Handle("/", apiChain(reasonHeaders(s.API)))
 	return root
 }
