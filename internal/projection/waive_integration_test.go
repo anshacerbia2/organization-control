@@ -20,9 +20,8 @@ import (
 	"github.com/anshacerbia2/organization-control/internal/db"
 )
 
-// deadLetterFor files an unresolved authority-bearing incident refused by consumer, or by nobody
-// when consumer is nil.
-func deadLetterFor(t *testing.T, f *fixture, consumer any) id.UUID {
+// deadLetterFor files an unresolved authority-bearing incident refused by consumer.
+func deadLetterFor(t *testing.T, f *fixture, consumer string) id.UUID {
 	t.Helper()
 	eventID := mustID(t)
 	f.exec(t, `INSERT INTO platform.dead_letter
@@ -64,7 +63,7 @@ func TestARetiredConsumersIncidentIsWaivedAndStaysOpen(t *testing.T) {
 
 	r, sink := resolver(t, f)
 	before := sink.calls
-	waiver, err := r.Waive(f.ctx, eventID, "the consumer was decommissioned", time.Now().Add(30*24*time.Hour))
+	waiver, err := r.Waive(f.ctx, eventID, "retired-consumer", "the consumer was decommissioned", time.Now().Add(30*24*time.Hour))
 	if err != nil {
 		t.Fatalf("Waive: %v", err)
 	}
@@ -120,21 +119,23 @@ func TestAWaiverIsRefusedWhereItWouldHideALiveOutage(t *testing.T) {
 	later := time.Now().Add(7 * 24 * time.Hour)
 
 	cases := []struct {
-		what    string
-		eventID id.UUID
-		until   time.Time
-		reason  string
-		want    error
+		what     string
+		eventID  id.UUID
+		consumer string
+		until    time.Time
+		reason   string
+		want     error
 	}{
-		{"the active consumer's own incident", deadLetterFor(t, f, active), later, "x", ErrNotWaivable},
-		{"an incident naming no consumer", deadLetterFor(t, f, nil), later, "x", ErrNotWaivable},
-		{"an expiry beyond the bound", deadLetterFor(t, f, "gone"), time.Now().Add(MaxWaiver + 24*time.Hour), "x", ErrInvalid},
-		{"an expiry already past", deadLetterFor(t, f, "gone"), time.Now().Add(-time.Hour), "x", ErrInvalid},
-		{"no reason", deadLetterFor(t, f, "gone"), later, "   ", ErrInvalid},
-		{"an unknown incident", mustID(t), later, "x", ErrDeadLetterNotFound},
+		{"an active consumer's own incident", deadLetterFor(t, f, active), active, later, "x", ErrNotWaivable},
+		{"no consumer named", deadLetterFor(t, f, "gone"), " ", later, "x", ErrInvalid},
+		{"an expiry beyond the bound", deadLetterFor(t, f, "gone"), "gone", time.Now().Add(MaxWaiver + 24*time.Hour), "x", ErrInvalid},
+		{"an expiry already past", deadLetterFor(t, f, "gone"), "gone", time.Now().Add(-time.Hour), "x", ErrInvalid},
+		{"no reason", deadLetterFor(t, f, "gone"), "gone", later, "   ", ErrInvalid},
+		{"an unknown incident", mustID(t), "gone", later, "x", ErrDeadLetterNotFound},
+		{"another consumer's name", deadLetterFor(t, f, "gone"), "elsewhere", later, "x", ErrDeadLetterNotFound},
 	}
 	for _, c := range cases {
-		_, err := r.Waive(f.ctx, c.eventID, c.reason, c.until)
+		_, err := r.Waive(f.ctx, c.eventID, c.consumer, c.reason, c.until)
 		if !errors.Is(err, c.want) {
 			t.Errorf("%s: Waive returned %v, want %v", c.what, err, c.want)
 			continue
@@ -145,7 +146,7 @@ func TestAWaiverIsRefusedWhereItWouldHideALiveOutage(t *testing.T) {
 	}
 
 	// The refusal for the active consumer says what to do instead.
-	_, err := r.Waive(f.ctx, cases[0].eventID, "x", later)
+	_, err := r.Waive(f.ctx, cases[0].eventID, active, "x", later)
 	if err == nil || !strings.Contains(err.Error(), "replay or supersede") {
 		t.Errorf("the refusal does not name the corrective path: %v", err)
 	}
@@ -159,10 +160,10 @@ func TestAWaiverIsNotStackedOrAppliedToAClosedIncident(t *testing.T) {
 	r, _ := resolver(t, f)
 
 	eventID := deadLetterFor(t, f, "gone")
-	if _, err := r.Waive(f.ctx, eventID, "decommissioned", time.Now().Add(24*time.Hour)); err != nil {
+	if _, err := r.Waive(f.ctx, eventID, "gone", "decommissioned", time.Now().Add(24*time.Hour)); err != nil {
 		t.Fatalf("Waive: %v", err)
 	}
-	if _, err := r.Waive(f.ctx, eventID, "again", time.Now().Add(48*time.Hour)); !errors.Is(err, ErrAlreadyWaived) {
+	if _, err := r.Waive(f.ctx, eventID, "gone", "again", time.Now().Add(48*time.Hour)); !errors.Is(err, ErrAlreadyWaived) {
 		t.Errorf("a second waiver while the first stands returned %v, want ErrAlreadyWaived", err)
 	}
 
@@ -170,7 +171,7 @@ func TestAWaiverIsNotStackedOrAppliedToAClosedIncident(t *testing.T) {
 	f.exec(t, `UPDATE platform.dead_letter
 	              SET resolved_at = now(), resolution_type = 'REPLAYED', resolved_by = 'suite', resolution_reference = 'x'
 	            WHERE event_id = $1`, closed.String())
-	if _, err := r.Waive(f.ctx, closed, "x", time.Now().Add(24*time.Hour)); !errors.Is(err, ErrAlreadyResolved) {
+	if _, err := r.Waive(f.ctx, closed, "gone", "x", time.Now().Add(24*time.Hour)); !errors.Is(err, ErrAlreadyResolved) {
 		t.Errorf("waiving a resolved incident returned %v, want ErrAlreadyResolved", err)
 	}
 }

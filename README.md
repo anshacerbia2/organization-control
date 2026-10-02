@@ -481,10 +481,10 @@ the provider connections, by `projection.SignalsReader`:
 
 | Series (Prometheus name) | What it is |
 | :-- | :-- |
-| `organization_outbox_unpublished{lane}` | rows waiting to be published, per lane (`priority`, `standard`) |
-| `organization_outbox_oldest_unpublished_age_seconds{lane}` | the dispatcher's lag |
-| `organization_security_debt_dead_letters` | unresolved authority-bearing dead letters; above zero, every projection-backed check refuses |
-| `organization_security_debt_oldest_age_seconds` | how long the oldest has been open |
+| `organization_outbox_unpublished{consumer,lane}` | deliveries waiting to be published to each active consumer, per lane (`priority`, `standard`) |
+| `organization_outbox_oldest_unpublished_age_seconds{consumer,lane}` | that consumer's dispatcher lag |
+| `organization_security_debt_dead_letters{consumer}` | unresolved authority-bearing dead letters the consumer's frontier counts: its own and any naming no consumer; above zero, its projection-backed checks refuse |
+| `organization_security_debt_oldest_age_seconds{consumer}` | how long the oldest has been open |
 | `organization_dead_letters_unresolved_unwaived` | unresolved dead letters with no live waiver |
 | `organization_dead_letters_oldest_unresolved_unwaived_age_seconds` | the oldest of them |
 | `organization_projection_consumer_report_age_seconds{consumer}` | seconds since the consumer last reported progress, or since it registered |

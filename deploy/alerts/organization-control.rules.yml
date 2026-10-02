@@ -12,6 +12,9 @@
 #   consumer report age      critical past its budget      TDD-002 §Operational Notes
 #   verify ratio             warning 0.05, critical 0.5    TDD-002 §Configuration, ORGANIZATION_VERIFY_RATE_ALERT
 #
+# Lag and debt carry a consumer label: each consumer has its own deliveries and dead letters
+# (ADR-GLB-018), so an alert names the consumer that is behind or refusing.
+#
 # Evaluated by whichever Prometheus-compatible backend the Collector feeds; promtool tests them in CI.
 
 groups:
@@ -23,7 +26,7 @@ groups:
           severity: warning
         annotations:
           summary: A security event has waited over 30s to be published.
-          description: The dispatcher is behind on the priority lane. A revocation accepted now is not yet on its way to the consumer.
+          description: The consumer's dispatcher is behind on the priority lane. A revocation accepted now is not yet on its way to that consumer.
 
       - alert: PriorityOutboxLagCritical
         expr: organization_outbox_oldest_unpublished_age_seconds{lane="priority"} > 120
@@ -52,7 +55,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: An authority-bearing event was dead-lettered, and every projection-backed check is refusing.
+          summary: An authority-bearing event was dead-lettered at this consumer, and its projection-backed checks are refusing.
           description: Replay it, then resolve it (TDD-organization-control-005 §Operational Notes).
 
       - alert: UnresolvedDeadLetterStale
@@ -87,7 +90,9 @@ groups:
           summary: A consumer is using the fresh check on more than half its requests.
 
       - alert: EnforcementTelemetryAbsent
-        expr: absent(organization_outbox_unpublished)
+        # The stale count, because it is reported whether or not any consumer is registered; the lag
+        # and debt series exist only per active consumer.
+        expr: absent(organization_dead_letters_unresolved_unwaived)
         for: 10m
         labels:
           severity: critical

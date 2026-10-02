@@ -9,7 +9,12 @@ package projection
 // # Two reasons, and why the others are absent
 //
 // REPLAYED: this producer's own dispatcher witnessed the consumer accept the event -- a delivery
-// receipt carrying consumer_applied, for this event, for the consumer that is actually enforcing.
+// receipt carrying consumer_applied, for this event, from the consumer whose delivery the dead letter
+// records.
+//
+// A dead letter is keyed (event_id, consumer) (ADR-GLB-018 §5.3), and the consumer half of that key
+// is whose evidence counts. The caller names the incident; it never chooses the evidence, so one
+// consumer's receipt cannot close another consumer's incident for the same event.
 //
 // SUPERSEDED: the same witness, for a newer event about the same Membership. Every Membership event
 // carries the complete security state and its membership_version, and a consumer applies an event
@@ -47,12 +52,6 @@ import (
 )
 
 var (
-	// ErrNoActiveConsumer means nothing is registered to enforce, so no receipt can be the right
-	// one. Refused rather than resolved against whichever consumer happens to have a row: the
-	// predicate asks whether the consumer that is enforcing holds the event, and with none
-	// registered the question has no subject.
-	ErrNoActiveConsumer = errors.New("projection: no active projection consumer is registered")
-
 	// ErrNoAppliedEvidence refuses a closure that nothing justifies.
 	//
 	// The message names what was looked for and what was found, because the commonest cause is
@@ -100,23 +99,11 @@ func NewResolver(pool *db.ResolutionPool) (*Resolver, error) {
 	return &Resolver{pool: pool}, nil
 }
 
-// activeConsumer is the subject the evidence must be about.
-//
-// Derived here, never accepted from the request. The operator chooses the action; the server
-// chooses whose receipt counts. A caller able to name the consumer could close an incident with a
-// receipt from a consumer that is not enforcing anything.
-//
-// One row at most, because the estate refuses a second active projection consumer — enforced by a
-// partial unique index rather than by this query trusting it.
-const activeConsumer = `SELECT consumer_id
-  FROM projection.consumer
- WHERE retired_at IS NULL`
-
 const appliedEvidence = `SELECT EXISTS (
     SELECT 1 FROM platform.delivery_receipt
      WHERE event_id = $1 AND consumer = $2 AND evidence = 'consumer_applied')`
 
-// otherReceipts names who DID acknowledge this event, when the active consumer did not.
+// otherReceipts names who DID acknowledge this event, when the dead letter's consumer did not.
 //
 // This is the diagnostic that separates "the delivery never happened" from "the delivery happened
 // under a name nothing resolves against". Without it both read as an absence of evidence, and only
@@ -146,8 +133,8 @@ const failedTenantVersion = `SELECT h.tenant_id::text, h.tenant_security_version
   FROM (SELECT 1) one
   LEFT JOIN tenant.tenant_event h ON h.event_id = $1`
 
-// The superseding queries find the lowest newer version of the same aggregate the active consumer
-// applied. The lowest, so the reference names the first event that made the failed one moot.
+// The superseding queries find the lowest newer version of the same aggregate the dead letter's
+// consumer applied. The lowest, so the reference names the first event that made the failed one moot.
 const supersedingMembership = `SELECT s.event_id::text, s.membership_version, s.event_type
   FROM (SELECT 1) one
   LEFT JOIN LATERAL (
@@ -176,26 +163,33 @@ const supersedingTenant = `SELECT s.event_id::text, s.tenant_security_version, s
 
 const closeDeadLetter = `UPDATE platform.dead_letter
    SET resolved_at          = now(),
-       resolution_type      = $2,
-       resolved_by          = $3,
-       resolution_reference = $4
+       resolution_type      = $3,
+       resolved_by          = $4,
+       resolution_reference = $5
  WHERE event_id = $1
+   AND consumer = $2
    AND resolved_at IS NULL`
+
+// readForClose is whether the incident is already closed. requireDeadLetter has established that it
+// exists.
+const readForClose = `SELECT resolved_at IS NOT NULL
+  FROM platform.dead_letter
+ WHERE event_id = $1 AND consumer = $2`
 
 // evidenceFinder returns the receipt reference a closure rests on and a sentence saying why, or a
 // refusal.
 type evidenceFinder func(ctx context.Context, tx db.Tx, eventID id.UUID, consumer string) (reference, why string, err error)
 
-// Resolve closes the dead letter as REPLAYED if applied evidence for the event itself supports it,
-// and refuses otherwise.
-func (r *Resolver) Resolve(ctx context.Context, eventID id.UUID) (Resolution, error) {
-	return r.close(ctx, eventID, ResolutionTypeReplayed, replayedEvidence)
+// Resolve closes the consumer's dead letter for the event as REPLAYED if that consumer's applied
+// evidence for the event itself supports it, and refuses otherwise.
+func (r *Resolver) Resolve(ctx context.Context, eventID id.UUID, consumer string) (Resolution, error) {
+	return r.close(ctx, eventID, consumer, ResolutionTypeReplayed, replayedEvidence)
 }
 
-// Supersede closes the dead letter as SUPERSEDED if the active consumer applied a newer event for
-// the same Membership, and refuses otherwise.
-func (r *Resolver) Supersede(ctx context.Context, eventID id.UUID) (Resolution, error) {
-	return r.close(ctx, eventID, ResolutionTypeSuperseded, supersededEvidence)
+// Supersede closes the consumer's dead letter for the event as SUPERSEDED if that consumer applied a
+// newer event for the same Membership or Tenant, and refuses otherwise.
+func (r *Resolver) Supersede(ctx context.Context, eventID id.UUID, consumer string) (Resolution, error) {
+	return r.close(ctx, eventID, consumer, ResolutionTypeSuperseded, supersededEvidence)
 }
 
 func replayedEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer string) (string, string, error) {
@@ -213,7 +207,7 @@ func replayedEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer s
 				"delivered since it was abandoned, so replay it first",
 				ErrNoAppliedEvidence, eventID)
 		}
-		return "", "", fmt.Errorf("%w: the active consumer is %q and %s carries receipts from %s; "+
+		return "", "", fmt.Errorf("%w: the dead letter's consumer is %q and %s carries receipts from %s; "+
 			"a receipt under another name resolves nothing, and the commonest cause is "+
 			"DISPATCH_CONSUMER_NAME disagreeing with the registered consumer",
 			ErrNoAppliedEvidence, consumer, eventID, others)
@@ -259,7 +253,7 @@ func supersededEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer
 		return "", "", fmt.Errorf("projection: reading superseding receipts for %s: %w", eventID, err)
 	}
 	if newer == nil || newerVersion == nil || newerType == nil {
-		return "", "", fmt.Errorf("%w: the active consumer %q has applied no event for %s "+
+		return "", "", fmt.Errorf("%w: the dead letter's consumer %q has applied no event for %s "+
 			"%s above version %d, which %s carried; replay it, or wait for the newer event to be applied",
 			ErrNotSuperseded, consumer, aggregate, *aggregateID, *version, eventID)
 	}
@@ -269,15 +263,18 @@ func supersededEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer
 			aggregate, *aggregateID, *version, *newerVersion, *newerType), nil
 }
 
-// close is what both reasons share: the incident must exist and be open, the evidence must be about
-// the consumer that is enforcing, and the closure and its account commit together.
+// close is what both reasons share: the incident must exist and be open, the evidence must be the
+// incident's own consumer's, and the closure and its account commit together.
 //
 // resolved_by comes from the bound scope rather than from the caller's request. An author taken
 // from a body is an author anybody can write, and the field exists so an investigation can ask who
 // decided this incident was over.
-func (r *Resolver) close(ctx context.Context, eventID id.UUID, kind string, find evidenceFinder) (Resolution, error) {
+func (r *Resolver) close(ctx context.Context, eventID id.UUID, consumer, kind string, find evidenceFinder) (Resolution, error) {
 	if eventID.IsNil() {
 		return Resolution{}, fmt.Errorf("%w: an event identifier is required", ErrInvalid)
+	}
+	if err := requireConsumerName(consumer); err != nil {
+		return Resolution{}, err
 	}
 	scope, ok := db.ScopeFrom(ctx)
 	if !ok {
@@ -285,28 +282,17 @@ func (r *Resolver) close(ctx context.Context, eventID id.UUID, kind string, find
 	}
 
 	var out Resolution
-	err := db.WithResolutionScope(ctx, r.pool, "resolve dead-lettered event "+eventID.String(),
+	err := db.WithResolutionScope(ctx, r.pool, "resolve dead-lettered event "+eventID.String()+" at "+consumer,
 		func(ctx context.Context, tx db.Tx) error {
-			var exists, resolved bool
-			if err := tx.QueryRow(ctx,
-				`SELECT EXISTS (SELECT 1 FROM platform.dead_letter WHERE event_id = $1),
-				        coalesce((SELECT resolved_at IS NOT NULL FROM platform.dead_letter
-				                   WHERE event_id = $1), FALSE)`,
-				eventID.String()).Scan(&exists, &resolved); err != nil {
-				return fmt.Errorf("projection: reading the dead letter for %s: %w", eventID, err)
+			if err := requireDeadLetter(ctx, tx, eventID, consumer); err != nil {
+				return err
 			}
-			if !exists {
-				return fmt.Errorf("%w: %s", ErrDeadLetterNotFound, eventID)
+			var resolved bool
+			if err := tx.QueryRow(ctx, readForClose, eventID.String(), consumer).Scan(&resolved); err != nil {
+				return fmt.Errorf("projection: reading the dead letter for %s at %s: %w", eventID, consumer, err)
 			}
 			if resolved {
-				return fmt.Errorf("%w: %s", ErrAlreadyResolved, eventID)
-			}
-
-			var consumer string
-			if err := tx.QueryRow(ctx, activeConsumer).Scan(&consumer); err != nil {
-				// No row, or the read failed. Either way there is no subject for the predicate,
-				// and closing against a guess is the outcome this refuses.
-				return fmt.Errorf("%w: %v", ErrNoActiveConsumer, err)
+				return fmt.Errorf("%w: %s at %s", ErrAlreadyResolved, eventID, consumer)
 			}
 
 			reference, why, err := find(ctx, tx, eventID, consumer)
@@ -315,7 +301,7 @@ func (r *Resolver) close(ctx context.Context, eventID id.UUID, kind string, find
 			}
 
 			tag, err := tx.Exec(ctx, closeDeadLetter,
-				eventID.String(), kind, scope.Actor().String(), reference)
+				eventID.String(), consumer, kind, scope.Actor().String(), reference)
 			if err != nil {
 				return fmt.Errorf("projection: closing %s: %w", eventID, err)
 			}
@@ -339,8 +325,8 @@ func (r *Resolver) close(ctx context.Context, eventID id.UUID, kind string, find
 			if err := db.RecordAccessInTx(ctx, tx, db.ProviderAccess{
 				Actor:       scope.Actor(),
 				Correlation: scope.Correlation(),
-				Reason: fmt.Sprintf("closed dead-lettered event %s as %s on %s%s",
-					eventID, kind, reference, why),
+				Reason: fmt.Sprintf("closed dead-lettered event %s at %s as %s on %s%s",
+					eventID, consumer, kind, reference, why),
 			}); err != nil {
 				return fmt.Errorf("projection: recording the resolution of %s: %w", eventID, err)
 			}

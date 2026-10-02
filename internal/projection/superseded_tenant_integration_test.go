@@ -34,15 +34,15 @@ func tenantHistory(t *testing.T, f *fixture, eventID, tenantID id.UUID, security
 	})
 }
 
-func deadLetteredTenantEvent(t *testing.T, f *fixture, tenantID id.UUID, securityVersion int64, eventType string) id.UUID {
+func deadLetteredTenantEvent(t *testing.T, f *fixture, consumer string, tenantID id.UUID, securityVersion int64, eventType string) id.UUID {
 	t.Helper()
 	eventID := mustID(t)
 	f.exec(t, `INSERT INTO platform.dead_letter
 	    (event_id, event_type, envelope, payload, aggregate_id, failure_class, failure_detail,
-	     attempts, first_failed_at)
+	     attempts, first_failed_at, consumer)
 	    VALUES ($1::uuid, $2, '{}'::jsonb, '{}'::jsonb, $3::uuid, 'poison',
-	            'the consumer refused the envelope', 3, clock_timestamp())`,
-		eventID.String(), eventType, tenantID.String())
+	            'the consumer refused the envelope', 3, clock_timestamp(), $4)`,
+		eventID.String(), eventType, tenantID.String(), consumer)
 	t.Cleanup(func() {
 		f.exec(t, `DELETE FROM platform.dead_letter WHERE event_id = $1`, eventID.String())
 	})
@@ -67,11 +67,11 @@ func TestATenantEventClosesAsSupersededOnANewerAppliedOne(t *testing.T) {
 	consumer := f.register(t)
 	tenantID := f.seedTenant(t)
 
-	failed := deadLetteredTenantEvent(t, f, tenantID, 2, typeTenantSuspended)
+	failed := deadLetteredTenantEvent(t, f, consumer, tenantID, 2, typeTenantSuspended)
 	newer := appliedTenantEvent(t, f, tenantID, 3, typeTenantRestored, consumer)
 
 	r, _ := resolver(t, f)
-	resolution, err := r.Supersede(f.ctx, failed)
+	resolution, err := r.Supersede(f.ctx, failed, consumer)
 	if err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
@@ -91,11 +91,11 @@ func TestAnOlderTenantEventDoesNotSupersedeANewerOne(t *testing.T) {
 	consumer := f.register(t)
 	tenantID := f.seedTenant(t)
 
-	failed := deadLetteredTenantEvent(t, f, tenantID, 2, typeTenantSuspended)
+	failed := deadLetteredTenantEvent(t, f, consumer, tenantID, 2, typeTenantSuspended)
 	appliedTenantEvent(t, f, tenantID, 1, typeTenantActivated, consumer)
 
 	r, _ := resolver(t, f)
-	if _, err := r.Supersede(f.ctx, failed); !errors.Is(err, ErrNotSuperseded) {
+	if _, err := r.Supersede(f.ctx, failed, consumer); !errors.Is(err, ErrNotSuperseded) {
 		t.Fatalf("Supersede returned %v, want ErrNotSuperseded: an older Tenant event closed a "+
 			"suspension the consumer never applied", err)
 	}

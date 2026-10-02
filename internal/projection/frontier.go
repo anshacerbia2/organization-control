@@ -53,13 +53,27 @@ var AuthorityEventTypes = []string{
 	"com.scnehaux.organization.tenant.lifecycle.retired",
 }
 
+// SubscribableEventTypes are the types a projection consumer may subscribe to at registration: the
+// authority a projection carries, and the repair a reconciliation publishes when it finds the
+// projection wrong (ReconciledEventType). A type outside it is refused, so a misspelt type is an
+// answer at registration rather than a subscription nothing ever matches.
+//
+// The repair is subscribable and is not authority debt: a dead-lettered repair leaves the drift it
+// was correcting, which the next sweep finds and publishes again.
+var SubscribableEventTypes = append(append([]string(nil), AuthorityEventTypes...), ReconciledEventType)
+
 // Frontier is the answer, as facts.
 type Frontier struct {
 	// HighestCommittedMark is the largest stream position visible here. Uncommitted rows are
 	// invisible by definition, so this is a committed position rather than an allocated one.
+	//
+	// It is the estate's, not the consumer's: a consumer is delivered only the types it subscribes
+	// to, so its applied position stays below this while events of other types commit. The owed
+	// pool below is the consumer's own, and is what says whether it has caught up.
 	HighestCommittedMark int64
 
-	// OldestUnpublishedMark and OldestUnpublishedAge describe the oldest delivery still owed.
+	// OldestUnpublishedMark and OldestUnpublishedAge describe the oldest delivery still owed: to
+	// this consumer, or to any consumer in the estate view.
 	//
 	// They may name different rows, and that is not a defect: the mark is the smallest allocated
 	// sequence still unpublished, while the age is measured from the earliest creation among
@@ -146,10 +160,17 @@ func NewFrontierReader(tx db.Transactor) (*FrontierReader, error) {
 // statement only if it committed before the snapshot, and `created_at` precedes its own commit, so
 // `clock_timestamp()` is after both.
 //
+// # Why the owed pool is the consumer's deliveries
+//
+// Each event owes each subscribed consumer a delivery of its own (ADR-GLB-018 §5.2), so what one
+// consumer is still owed says nothing about another. Read from platform.outbox_delivery, a consumer
+// that is current is not reported behind because a slower one is.
+//
 // # Why the owed pool excludes dead-lettered rows
 //
-// `published = FALSE` rather than `published_at IS NULL`: a dead-lettered row is marked published with
-// its error recorded, so it leaves the unpublished pool. Otherwise one poison event would make the
+// `published = FALSE` rather than `published_at IS NULL`: a dead-lettered delivery is marked
+// published with its error recorded, and so is one abandoned at its consumer's retirement, so both
+// leave the unpublished pool. Otherwise one poison event would make the
 // oldest-unpublished age grow forever and every consumer would read itself as permanently stale.
 //
 // That is the right treatment of the pool and the wrong end of the story on its own, so the debt those
@@ -160,8 +181,9 @@ const frontierStatement = `WITH observed AS (
     SELECT max(sequence) AS mark FROM platform.outbox
 ), owed AS (
     SELECT min(sequence) AS mark, min(created_at) AS oldest
-      FROM platform.outbox
+      FROM platform.outbox_delivery
      WHERE published = FALSE
+       AND ($2 = '' OR consumer = $2)
 ), debt AS (
     SELECT count(*) AS rows, min(dead_lettered_at) AS oldest
       FROM platform.dead_letter
@@ -177,14 +199,14 @@ SELECT observed.at,
        extract(epoch FROM observed.at - debt.oldest)::double precision
   FROM observed, committed, owed, debt`
 
-// Frontier is the estate-wide view: every unresolved authority-bearing dead letter, whichever
-// consumer refused it. It is what a provider reads.
+// Frontier is the estate-wide view: every delivery still owed and every unresolved
+// authority-bearing dead letter, whichever consumer they belong to. It is what a provider reads.
 func (f *FrontierReader) Frontier(ctx context.Context) (Frontier, error) {
 	return f.FrontierFor(ctx, "")
 }
 
-// FrontierFor is the view of one consumer: the debt counted is the consumer's own, plus every dead
-// letter that names no consumer.
+// FrontierFor is the view of one consumer: the deliveries it is owed, and the debt that is its own
+// plus every dead letter that names no consumer.
 //
 // The dispatcher records which consumer refused an event (foundation-platform v0.2.8). Before that,
 // every dead letter was nobody's, so one consumer's poison event blinded every projection-backed

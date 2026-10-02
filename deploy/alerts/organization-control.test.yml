@@ -12,12 +12,14 @@ tests:
   - name: outbox lag, both lanes, both severities
     interval: 30s
     input_series:
-      - series: 'organization_outbox_oldest_unpublished_age_seconds{lane="priority"}'
+      - series: 'organization_outbox_oldest_unpublished_age_seconds{consumer="foundation-reference",lane="priority"}'
         values: '10 45 150'
-      - series: 'organization_outbox_oldest_unpublished_age_seconds{lane="standard"}'
+      - series: 'organization_outbox_oldest_unpublished_age_seconds{consumer="foundation-reference",lane="standard"}'
         values: '100 400 1000'
-      - series: 'organization_outbox_unpublished{lane="priority"}'
+      - series: 'organization_outbox_unpublished{consumer="foundation-reference",lane="priority"}'
         values: '1 1 1'
+      - series: 'organization_dead_letters_unresolved_unwaived'
+        values: '0 0 0'
     alert_rule_test:
       - eval_time: 0s
         alertname: PriorityOutboxLagWarning
@@ -25,17 +27,17 @@ tests:
       - eval_time: 30s
         alertname: PriorityOutboxLagWarning
         exp_alerts:
-          - exp_labels: { severity: warning, lane: priority }
+          - exp_labels: { severity: warning, consumer: foundation-reference, lane: priority }
             exp_annotations:
               summary: A security event has waited over 30s to be published.
-              description: The dispatcher is behind on the priority lane. A revocation accepted now is not yet on its way to the consumer.
+              description: The consumer's dispatcher is behind on the priority lane. A revocation accepted now is not yet on its way to that consumer.
       - eval_time: 30s
         alertname: PriorityOutboxLagCritical
         exp_alerts: []
       - eval_time: 60s
         alertname: PriorityOutboxLagCritical
         exp_alerts:
-          - exp_labels: { severity: critical, lane: priority }
+          - exp_labels: { severity: critical, consumer: foundation-reference, lane: priority }
             exp_annotations:
               summary: A security event has waited over 2 minutes to be published.
               description: Revocation enforcement is past its budget. Check the dispatcher and the consumer endpoint.
@@ -45,13 +47,13 @@ tests:
       - eval_time: 30s
         alertname: StandardOutboxLagWarning
         exp_alerts:
-          - exp_labels: { severity: warning, lane: standard }
+          - exp_labels: { severity: warning, consumer: foundation-reference, lane: standard }
             exp_annotations:
               summary: A lifecycle event has waited over 5 minutes to be published.
       - eval_time: 60s
         alertname: StandardOutboxLagCritical
         exp_alerts:
-          - exp_labels: { severity: critical, lane: standard }
+          - exp_labels: { severity: critical, consumer: foundation-reference, lane: standard }
             exp_annotations:
               summary: A lifecycle event has waited over 15 minutes to be published.
       - eval_time: 60s
@@ -61,7 +63,7 @@ tests:
   - name: security debt and a stale dead letter
     interval: 30s
     input_series:
-      - series: 'organization_security_debt_dead_letters'
+      - series: 'organization_security_debt_dead_letters{consumer="foundation-reference"}'
         values: '0 1'
       - series: 'organization_dead_letters_oldest_unresolved_unwaived_age_seconds'
         values: '3600 90000'
@@ -72,9 +74,9 @@ tests:
       - eval_time: 30s
         alertname: SecurityDebt
         exp_alerts:
-          - exp_labels: { severity: critical }
+          - exp_labels: { severity: critical, consumer: foundation-reference }
             exp_annotations:
-              summary: An authority-bearing event was dead-lettered, and every projection-backed check is refusing.
+              summary: An authority-bearing event was dead-lettered at this consumer, and its projection-backed checks are refusing.
               description: Replay it, then resolve it (TDD-organization-control-005 §Operational Notes).
       - eval_time: 0s
         alertname: UnresolvedDeadLetterStale

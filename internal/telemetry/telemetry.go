@@ -124,11 +124,15 @@ func Register(provider metric.MeterProvider, signals reader, deployable, system 
 			return err
 		}
 		for _, lane := range s.Lanes {
-			o.ObserveFloat64(unpublished, float64(lane.Count), with(attribute.String("lane", lane.Lane)))
-			o.ObserveFloat64(unpublishedAge, lane.OldestAge, with(attribute.String("lane", lane.Lane)))
+			labels := with(attribute.String("consumer", lane.Consumer), attribute.String("lane", lane.Lane))
+			o.ObserveFloat64(unpublished, float64(lane.Count), labels)
+			o.ObserveFloat64(unpublishedAge, lane.OldestAge, labels)
 		}
-		o.ObserveFloat64(debt, float64(s.SecurityDebt), with())
-		o.ObserveFloat64(debtAge, s.SecurityDebtOldestAge, with())
+		for _, d := range s.Debt {
+			consumer := attribute.String("consumer", d.Consumer)
+			o.ObserveFloat64(debt, float64(d.Count), with(consumer))
+			o.ObserveFloat64(debtAge, d.OldestAge, with(consumer))
+		}
 		o.ObserveFloat64(stale, float64(s.Stale), with())
 		o.ObserveFloat64(staleAge, s.StaleOldestAge, with())
 		for _, c := range s.Consumers {

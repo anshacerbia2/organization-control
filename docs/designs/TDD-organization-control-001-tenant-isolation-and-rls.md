@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.8.0
+  version: 1.9.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -143,14 +143,23 @@ role cannot create or change a Tenant, reach `organization`, `operation`, `proje
 it. `tools/grantcheck` keeps the grant list honest in both directions (§Grant Derivation):
 a statement needing an ungranted privilege fails CI, and so does a grant nothing needs.
 
+Every role that publishes an event holds `INSERT` on `platform.outbox` and
+`platform.outbox_delivery`, and `SELECT` on `consumer`, `event_types` and `retired_at` of
+`platform.subscription`. `outbox.Append` writes the event and the delivery each subscriber is owed
+in one statement, and reads which consumers subscribe (`ADR-GLB-018 §5.6`). Reading those three
+columns shows which consumers exist and what each receives. That is configuration, not authority
+data, and the role still cannot read the outbox it appends to.
+
 The consumer role holds what a consumer's seven routes need and nothing else:
 
 - `SELECT` on `membership.membership` and `tenant.tenant`, through a `SELECT` policy of its own
   on each, keyed on the cross-Tenant binding;
 - `SELECT` on `projection.consumer`, and `UPDATE` on four of its columns: `snapshot_mark`,
   `last_reported_mark`, `last_reported_at`, `verify_calls_since_report`;
-- `SELECT` on `platform.outbox` and `platform.dead_letter`, for the snapshot mark and the
-  frontier;
+- `SELECT` on `platform.outbox`, `platform.outbox_delivery` and `platform.dead_letter`, for
+  the snapshot mark and the frontier: its own owed deliveries and its own dead letters;
+- `SELECT` on `consumer`, `event_types` and `retired_at` of `platform.subscription`, for the
+  event types its registry row reports;
 - `SELECT` and `INSERT` on `platform.idempotency_key`, for the claim every recorded scope makes.
 
 It cannot write a business row, change its own declared terms or un-retire itself, register

@@ -1310,30 +1310,10 @@ table "consumer" {
     expr = "stale_behavior IN ('use_with_marker', 'revalidate', 'fail_closed')"
   }
 
-  // At most one active projection consumer.
-  //
-  // The distributed enforcement work is scoped to one producer and one projection consumer,
-  // and several things that are correct at that scope are silently wrong beyond it:
-  // platform.dead_letter holds one row per event_id and platform.outbox one `published` flag,
-  // so an event owed to two consumers cannot record two outcomes; dead-letter debt is reported
-  // estate-wide, so one consumer's poison refuses traffic for all of them; and resolution
-  // evidence attaches to an event rather than to a delivery, so evidence produced for one
-  // consumer would resolve another's incident.
-  //
-  // Enforced here rather than only in the registry because `organization_provider_rt` holds
-  // UPDATE and INSERT on this table: an operator with psql goes around any application check,
-  // and a scope boundary that only the application respects is a boundary that ends quietly.
-  //
-  // A unique index on a constant is the standard shape for "at most one row matching": every
-  // active row indexes the same key, so the second one collides. Lifting the scope means
-  // dropping this index, which is a migration someone writes on purpose.
-  index "consumer_single_active" {
-    unique = true
-    on {
-      expr = "(true)"
-    }
-    where = "retired_at IS NULL"
-  }
+  // Several consumers may be active at once (ADR-GLB-018). consumer_single_active, a unique index
+  // on a constant that admitted one active row, held the scope to one projection consumer while the
+  // outbox could record one outcome per event; per-consumer delivery ended that, and the index went
+  // with it in 20261002120000.
 
   index "consumer_principal" {
     unique  = true

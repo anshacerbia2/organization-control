@@ -615,6 +615,10 @@ type registerConsumerRequest struct {
 	ProjectionVersion     string  `json:"projection_version"`
 	MaxAcceptedAgeSeconds seconds `json:"max_accepted_age_seconds"`
 	StaleBehavior         string  `json:"stale_behavior"`
+
+	// EventTypes is the subscription: the event types the consumer applies, each one the registry
+	// offers. Required (TDD-organization-control-002 §Consumer Registry).
+	EventTypes []string `json:"event_types"`
 }
 
 func (h *handlers) registerConsumer(w http.ResponseWriter, r *http.Request) {
@@ -642,6 +646,7 @@ func (h *handlers) registerConsumer(w http.ResponseWriter, r *http.Request) {
 		ProjectionVersion: body.ProjectionVersion,
 		MaxAcceptedAge:    body.MaxAcceptedAgeSeconds.Duration(),
 		StaleBehavior:     projection.StaleBehavior(body.StaleBehavior),
+		EventTypes:        body.EventTypes,
 	})
 	if err != nil {
 		writeError(w, r, err)
@@ -650,16 +655,12 @@ func (h *handlers) registerConsumer(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusCreated, viewConsumer(record))
 }
 
-// retireConsumer withdraws a consumer, freeing the single active slot.
+// retireConsumer withdraws a consumer: its registration, its subscription, and what it was still
+// owed, which is abandoned (ADR-GLB-018 §5.5).
 //
 // Provider-only, and deliberately not available to the consumer itself: a consumer that could
 // retire itself could withdraw its own authority mid-operation, and the decision to stop
 // enforcing through a projection belongs to whoever is replacing it.
-//
-// It exists so ErrSingleConsumer has a way past it that is not "delete the constraint".
-// Rotating a consumer identity, renaming a deployable, or moving the projection to a new one
-// all dead-end at that refusal otherwise, and the shortest route past a refusal with no exit
-// is removing the guard.
 func (h *handlers) retireConsumer(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireProvider(w, r); !ok {
 		return
@@ -1049,6 +1050,7 @@ func (h *handlers) ratesOverThreshold(w http.ResponseWriter, r *http.Request) {
 
 type replayResponse struct {
 	EventID   string `json:"event_id"`
+	Consumer  string `json:"consumer"`
 	EventType string `json:"event_type"`
 	Position  int64  `json:"position"`
 	Resolved  bool   `json:"resolved"`
@@ -1072,7 +1074,7 @@ func (h *handlers) replayDeadLetter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.services.Replayer.Replay(r.Context(), eventID)
+	result, err := h.services.Replayer.Replay(r.Context(), eventID, r.PathValue("consumer"))
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -1080,6 +1082,7 @@ func (h *handlers) replayDeadLetter(w http.ResponseWriter, r *http.Request) {
 
 	respond(w, http.StatusAccepted, replayResponse{
 		EventID:   result.EventID.String(),
+		Consumer:  result.Consumer,
 		EventType: result.EventType,
 		Position:  result.Position,
 		Resolved:  false,
@@ -1101,9 +1104,10 @@ type resolveResponse struct {
 // replays an abandoned delivery holds no UPDATE there, so replaying and closing cannot be done by
 // one process even if this handler were wrong.
 //
-// The consumer whose receipt counts is derived server-side and is absent from the request on
-// purpose: the operator chooses the action, the server chooses the subject the evidence must be
-// about. So is the author — resolved_by comes from the bound scope, because an author taken from
+// The path names the incident, (event_id, consumer), and the incident fixes whose receipt counts:
+// its own consumer's. The caller chooses the incident and the reason, never the evidence, so one
+// consumer's receipt cannot close another consumer's incident. The author is not taken from the
+// request either — resolved_by comes from the bound scope, because an author taken from
 // a body is an author anybody can write.
 //
 // The body is optional and names the reason only. No body is REPLAYED, which is what this route
@@ -1125,7 +1129,7 @@ func (h *handlers) resolveDeadLetter(w http.ResponseWriter, r *http.Request) {
 	if kind == projection.ResolutionTypeSuperseded {
 		resolve = h.services.Resolver.Supersede
 	}
-	result, err := resolve(r.Context(), eventID)
+	result, err := resolve(r.Context(), eventID, r.PathValue("consumer"))
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -1171,7 +1175,7 @@ func (h *handlers) waiveDeadLetter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.services.Resolver.Waive(r.Context(), eventID, body.Reason, body.ExpiresAt)
+	result, err := h.services.Resolver.Waive(r.Context(), eventID, r.PathValue("consumer"), body.Reason, body.ExpiresAt)
 	if err != nil {
 		writeError(w, r, err)
 		return

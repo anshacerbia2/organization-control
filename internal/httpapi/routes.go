@@ -245,12 +245,15 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// Replay does not resolve. It puts an abandoned delivery back on the wire so the dispatcher
 	// carries it again; the incident stays open and the security debt stays blocking until a
 	// resolution consumes the evidence this may produce.
-	api.HandleFunc("POST /v1/dead-letters/{event_id}/replay", h.replayDeadLetter)
+	//
+	// A dead letter is keyed (event_id, consumer) (ADR-GLB-018 §5.3), so the path names both: an
+	// event dead-lettered at two consumers is two incidents, and acting on one touches only it.
+	api.HandleFunc("POST /v1/dead-letters/{event_id}/consumers/{consumer}/replay", h.replayDeadLetter)
 
 	// And the second act, under a different database role. Replay puts the event back on the
 	// wire; this closes the incident once the evidence that delivery produced is there.
-	api.HandleFunc("POST /v1/dead-letters/{event_id}/resolve", h.resolveDeadLetter)
-	api.HandleFunc("POST /v1/dead-letters/{event_id}/waive", h.waiveDeadLetter)
+	api.HandleFunc("POST /v1/dead-letters/{event_id}/consumers/{consumer}/resolve", h.resolveDeadLetter)
+	api.HandleFunc("POST /v1/dead-letters/{event_id}/consumers/{consumer}/waive", h.waiveDeadLetter)
 
 	api.HandleFunc("POST /v1/context/verify", h.verifyContext)
 	api.HandleFunc("POST /v1/context/switch-eligible", h.switchEligible)

@@ -25,23 +25,13 @@ const (
 func TestThePostStageNamesOnlyDeadLettersNoResolutionCanClose(t *testing.T) {
 	pool, ctx := openAdmin(t)
 
-	// One active consumer at most, which the schema enforces: use the one there is, or register one.
-	var activeConsumer string
-	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		return tx.QueryRow(ctx, `SELECT coalesce(max(consumer_id), '') FROM projection.consumer
-		    WHERE retired_at IS NULL`).Scan(&activeConsumer)
-	}); err != nil {
-		t.Fatalf("reading the active consumer: %v", err)
-	}
-	if activeConsumer == "" {
-		activeConsumer = "unclosable-active-" + newID(t)
-		adminExec(t, ctx, pool, `INSERT INTO projection.consumer
-		    (consumer_id, principal_id, projection_version, max_accepted_age, stale_behavior)
-		    VALUES ($1, gen_random_uuid(), 1, interval '1 minute', 'fail_closed')`, activeConsumer)
-		t.Cleanup(func() {
-			adminExec(t, context.Background(), pool, `DELETE FROM projection.consumer WHERE consumer_id = $1`, activeConsumer)
-		})
-	}
+	activeConsumer := "unclosable-active-" + newID(t)
+	adminExec(t, ctx, pool, `INSERT INTO projection.consumer
+	    (consumer_id, principal_id, projection_version, max_accepted_age, stale_behavior)
+	    VALUES ($1, gen_random_uuid(), 1, interval '1 minute', 'fail_closed')`, activeConsumer)
+	t.Cleanup(func() {
+		adminExec(t, context.Background(), pool, `DELETE FROM projection.consumer WHERE consumer_id = $1`, activeConsumer)
+	})
 	retiredConsumer := "unclosable-retired-" + newID(t)
 	adminExec(t, ctx, pool, `INSERT INTO projection.consumer
 	    (consumer_id, principal_id, projection_version, max_accepted_age, stale_behavior, retired_at)
@@ -53,11 +43,13 @@ func TestThePostStageNamesOnlyDeadLettersNoResolutionCanClose(t *testing.T) {
 	legacyUnattributed := deadLetter(t, ctx, pool, testAuthorityType, false, nil)
 	legacyActive := deadLetter(t, ctx, pool, testAuthorityType, false, &activeConsumer)
 	waivable := deadLetter(t, ctx, pool, testAuthorityType, false, &retiredConsumer)
-	replayable := deadLetter(t, ctx, pool, testAuthorityType, true, nil)
+	replayable := deadLetter(t, ctx, pool, testAuthorityType, true, &activeConsumer)
+	// Replayable, but naming no consumer: no route addresses it, so nothing can act on it.
+	replayableUnattributed := deadLetter(t, ctx, pool, testAuthorityType, true, nil)
 	notAuthority := deadLetter(t, ctx, pool, testLifecycleType, false, nil)
 
 	// A recorded version makes it supersedable, whatever else it lacks.
-	versioned := deadLetter(t, ctx, pool, testAuthorityType, false, nil)
+	versioned := deadLetter(t, ctx, pool, testAuthorityType, false, &activeConsumer)
 	tenantID := "11111111-1111-4111-8111-11111111111a"
 	adminExec(t, ctx, pool, `INSERT INTO tenant.tenant_event (event_id, tenant_id, tenant_security_version, event_type)
 	    VALUES ($1::uuid, $2::uuid, 987654321, $3)`, versioned, tenantID, testAuthorityType)
@@ -81,6 +73,7 @@ func TestThePostStageNamesOnlyDeadLettersNoResolutionCanClose(t *testing.T) {
 		"unreplayable, unversioned, the active consumer's": {legacyActive, true},
 		"a retired consumer's, so waivable":                {waivable, false},
 		"replayable":                                       {replayable, false},
+		"replayable, but unattributed":                     {replayableUnattributed, true},
 		"versioned, so supersedable":                       {versioned, false},
 		"not authority-bearing":                            {notAuthority, false},
 	} {

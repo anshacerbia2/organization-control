@@ -59,10 +59,11 @@ func TestTheDispatchRoleTouchesOnlyItsThreeObjects(t *testing.T) {
 	}
 
 	permitted := map[grant]bool{
-		{"platform.outbox", "SELECT"}:      true,
-		{"platform.outbox", "UPDATE"}:      true,
-		{"platform.dead_letter", "INSERT"}: true,
-		// Not for reading incidents. `ON CONFLICT (event_id) DO NOTHING` makes PostgreSQL
+		{"platform.outbox", "SELECT"}:          true,
+		{"platform.outbox_delivery", "SELECT"}: true,
+		{"platform.outbox_delivery", "UPDATE"}: true,
+		{"platform.dead_letter", "INSERT"}:     true,
+		// Not for reading incidents. `ON CONFLICT ON CONSTRAINT dead_letter_delivery` makes PostgreSQL
 		// require SELECT on the table being inserted into; see grants.sql and the capability
 		// test below, which measured it.
 		{"platform.dead_letter", "SELECT"}:      true,
@@ -72,7 +73,7 @@ func TestTheDispatchRoleTouchesOnlyItsThreeObjects(t *testing.T) {
 
 	for _, g := range held {
 		if !permitted[g] {
-			t.Errorf("the dispatch role holds %s on %s, which is outside the outbox and the dead-letter table",
+			t.Errorf("the dispatch role holds %s on %s, which is outside the outbox, its deliveries and the dead-letter table",
 				g.privilege, g.table)
 		}
 	}
@@ -86,7 +87,8 @@ func TestTheDispatchRoleTouchesOnlyItsThreeObjects(t *testing.T) {
 	// version and never granted, is invisible to the check that only looks for excess.
 	for _, required := range []grant{
 		{"platform.outbox", "SELECT"},
-		{"platform.outbox", "UPDATE"},
+		{"platform.outbox_delivery", "SELECT"},
+		{"platform.outbox_delivery", "UPDATE"},
 		{"platform.dead_letter", "INSERT"},
 		{"platform.dead_letter", "SELECT"},
 		{"platform.delivery_receipt", "INSERT"},
@@ -112,15 +114,17 @@ func TestTheDispatchRoleTouchesOnlyItsThreeObjects(t *testing.T) {
 func TestTheDispatchRoleCannotDeleteFromTheOutbox(t *testing.T) {
 	pool, ctx := openAdmin(t)
 
-	var canDelete bool
-	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		return tx.QueryRow(ctx,
-			`SELECT has_table_privilege($1, 'platform.outbox', 'DELETE')`, dispatchRole).Scan(&canDelete)
-	}); err != nil {
-		t.Fatalf("reading DELETE privilege: %v", err)
-	}
-	if canDelete {
-		t.Error("the dispatch role can DELETE from platform.outbox; retention is the maintenance job's decision")
+	for _, table := range []string{"platform.outbox", "platform.outbox_delivery"} {
+		var canDelete bool
+		if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT has_table_privilege($1, $2, 'DELETE')`, dispatchRole, table).Scan(&canDelete)
+		}); err != nil {
+			t.Fatalf("reading DELETE privilege: %v", err)
+		}
+		if canDelete {
+			t.Errorf("the dispatch role can DELETE from %s; retention is the maintenance job's decision", table)
+		}
 	}
 }
 
@@ -217,8 +221,8 @@ func TestTheDispatchRoleOwnsNothing(t *testing.T) {
 // TestTheDispatchRoleCanDeadLetterWithInsertAlone answers the question the catalog cannot.
 //
 // The narrowed grant leaves this role INSERT and nothing else on platform.dead_letter, and the
-// dispatcher's dead-letter write is an `INSERT ... SELECT FROM platform.outbox ... ON CONFLICT
-// (event_id) DO NOTHING`. Whether that shape needs SELECT or UPDATE on its target is PostgreSQL's
+// dispatcher's dead-letter write is an `INSERT ... SELECT FROM platform.outbox JOIN
+// platform.outbox_delivery ... ON CONFLICT ON CONSTRAINT dead_letter_delivery DO NOTHING`. Whether that shape needs SELECT or UPDATE on its target is PostgreSQL's
 // decision, not one to reason out: DO NOTHING does not read the conflicting row, but the grant was
 // narrowed on that belief and a belief is not a test.
 //
@@ -244,19 +248,27 @@ func TestTheDispatchRoleCanDeadLetterWithInsertAlone(t *testing.T) {
 
 	var createdAt time.Time
 	if err := admin.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		return tx.QueryRow(ctx, `
+		if err := tx.QueryRow(ctx, `
 			INSERT INTO platform.outbox
 			    (event_id, event_type, aggregate_id, payload, envelope)
 			VALUES ($1::uuid, 'com.scnehaux.organization.membership.security.revoked', $2::uuid,
 			        '{}'::jsonb, jsonb_build_object('id', $3::text))
 			RETURNING created_at`,
-			eventID.String(), aggregateID.String(), eventID.String()).Scan(&createdAt)
+			eventID.String(), aggregateID.String(), eventID.String()).Scan(&createdAt); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `
+			INSERT INTO platform.outbox_delivery (created_at, event_id, consumer, sequence, event_type, priority)
+			SELECT created_at, event_id, 'capability-probe', sequence, event_type, priority
+			  FROM platform.outbox WHERE created_at = $1 AND event_id = $2`, createdAt, eventID.String())
+		return err
 	}); err != nil {
 		t.Fatalf("seeding the outbox row: %v", err)
 	}
 	t.Cleanup(func() {
 		_ = admin.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 			_, _ = tx.Exec(ctx, `DELETE FROM platform.dead_letter WHERE event_id = $1`, eventID.String())
+			_, _ = tx.Exec(ctx, `DELETE FROM platform.outbox_delivery WHERE event_id = $1`, eventID.String())
 			_, _ = tx.Exec(ctx, `DELETE FROM platform.outbox WHERE event_id = $1`, eventID.String())
 			return nil
 		})
@@ -273,17 +285,19 @@ func TestTheDispatchRoleCanDeadLetterWithInsertAlone(t *testing.T) {
 	dispatch, dispatchCtx := openAs(t, "organization_dispatch_app", password)
 
 	deadLetter := `INSERT INTO platform.dead_letter
-	    (event_id, event_type, envelope, payload, failure_class, failure_detail, attempts,
-	     first_failed_at)
-	SELECT event_id, event_type, envelope, payload, $3, $4, $5,
-	       COALESCE(first_failed_at, now())
-	FROM platform.outbox
-	WHERE created_at = $1 AND event_id = $2
-	ON CONFLICT (event_id) DO NOTHING`
+	    (event_id, event_type, envelope, payload, aggregate_id, priority, failure_class,
+	     failure_detail, attempts, first_failed_at, consumer)
+	SELECT o.event_id, o.event_type, o.envelope, o.payload, o.aggregate_id, o.priority, $3, $4, $5,
+	       COALESCE(d.first_failed_at, now()), $6
+	FROM platform.outbox o
+	JOIN platform.outbox_delivery d
+	  ON d.created_at = o.created_at AND d.event_id = o.event_id AND d.consumer = $6
+	WHERE o.created_at = $1 AND o.event_id = $2
+	ON CONFLICT ON CONSTRAINT dead_letter_delivery DO NOTHING`
 
 	for attempt := 1; attempt <= 2; attempt++ {
 		if err := dispatch.InTx(dispatchCtx, func(ctx context.Context, tx db.Tx) error {
-			_, err := tx.Exec(ctx, deadLetter, createdAt, eventID.String(), "poison", "redacted", 1)
+			_, err := tx.Exec(ctx, deadLetter, createdAt, eventID.String(), "poison", "redacted", 1, "capability-probe")
 			return err
 		}); err != nil {
 			t.Fatalf("attempt %d: the dispatch role cannot dead-letter with INSERT alone: %v\n"+

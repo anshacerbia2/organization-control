@@ -155,13 +155,22 @@ func (f *fixture) register(t *testing.T) string {
 		ProjectionVersion: "v1",
 		MaxAcceptedAge:    30 * time.Second,
 		StaleBehavior:     StaleFailClosed,
+		EventTypes:        SubscribableEventTypes,
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	t.Cleanup(func() {
-		f.exec(t, `DELETE FROM projection.consumer WHERE consumer_id = $1`, consumerID)
-	})
+	t.Cleanup(func() { f.forget(t, consumerID) })
 	return consumerID
+}
+
+// forget removes a test consumer and everything registering it created: its subscription, and the
+// deliveries appends owed it. Left behind, every later test's append would owe a consumer nobody
+// dispatches for, and the estate frontier would read as behind.
+func (f *fixture) forget(t *testing.T, consumerID string) {
+	t.Helper()
+	f.exec(t, `DELETE FROM platform.outbox_delivery WHERE consumer = $1`, consumerID)
+	f.exec(t, `DELETE FROM platform.subscription WHERE consumer = $1`, consumerID)
+	f.exec(t, `DELETE FROM projection.consumer WHERE consumer_id = $1`, consumerID)
 }
 
 // seedTenant creates an Organization and an active Tenant, returning the Tenant identifier.

@@ -310,6 +310,9 @@ type consumerView struct {
 	SnapshotMark          *int64     `json:"snapshot_mark,omitempty"`
 	LastReportedMark      *int64     `json:"last_reported_mark,omitempty"`
 	LastReportedAt        *time.Time `json:"last_reported_at,omitempty"`
+
+	// EventTypes are what its subscription names: the events it is owed a delivery of.
+	EventTypes []string `json:"event_types"`
 }
 
 func viewConsumer(c projection.Consumer) consumerView {
@@ -318,6 +321,15 @@ func viewConsumer(c projection.Consumer) consumerView {
 		MaxAcceptedAgeSeconds: int64(c.MaxAcceptedAge / time.Second),
 		StaleBehavior:         string(c.StaleBehavior), RegisteredAt: c.RegisteredAt,
 		SnapshotMark: c.SnapshotMark, LastReportedMark: c.LastReportedMark,
-		LastReportedAt: c.LastReportedAt,
+		LastReportedAt: c.LastReportedAt, EventTypes: eventTypes(c.EventTypes),
 	}
+}
+
+// eventTypes is never null in a response: a consumer subscribed to nothing reads as [], not as an
+// absent field a client could take for "every type".
+func eventTypes(types []string) []string {
+	if types == nil {
+		return []string{}
+	}
+	return types
 }

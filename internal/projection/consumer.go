@@ -14,10 +14,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
+	fevent "github.com/anshacerbia2/foundation-platform/event"
 	"github.com/anshacerbia2/foundation-platform/id"
+	"github.com/anshacerbia2/foundation-platform/outbox"
 
 	"github.com/anshacerbia2/organization-control/internal/db"
 )
@@ -78,29 +81,6 @@ var (
 	// stream position is monotonic per publisher, so a lower value is either a replay being
 	// misreported as progress or two processes sharing one consumer identity.
 	ErrMarkWentBackwards = errors.New("projection: reported position is below the accepted one")
-
-	// ErrSingleConsumer refuses a second active projection consumer.
-	//
-	// The distributed enforcement work is scoped, deliberately, to one producer and one
-	// projection consumer. Several things that are correct at that scope are silently wrong
-	// beyond it, and none of them announce themselves:
-	//
-	//   - platform.dead_letter has one row per event_id and platform.outbox one `published`
-	//     flag, so an event owed to two consumers cannot record two outcomes;
-	//   - dead-letter debt is therefore reported estate-wide, so one consumer's poison event
-	//     refuses traffic for every other consumer;
-	//   - resolution evidence is attributed to an event rather than to a delivery, so evidence
-	//     produced for one consumer would resolve an incident belonging to another.
-	//
-	// This refusal is that scope made load-bearing rather than documented. A limitation written
-	// in a design note does not survive the day someone registers a second consumer and nothing
-	// goes red; a refusal that names its reason is read by the person who needs to lift it, and
-	// lifting it becomes a decision instead of an accident.
-	//
-	// The exit is Retire: retire the consumer that is finishing, then register its replacement.
-	// An invariant with no legitimate way past it gets removed rather than respected, and a
-	// removed guard leaves no trace at all.
-	ErrSingleConsumer = errors.New("projection: another projection consumer is already active")
 )
 
 // Consumer is one row of projection.consumer.
@@ -115,6 +95,10 @@ type Consumer struct {
 	MaxAcceptedAge    time.Duration
 	StaleBehavior     StaleBehavior
 	RegisteredAt      time.Time
+
+	// EventTypes are the types its active subscription names, in platform.subscription: the
+	// events it is owed a delivery of (ADR-GLB-018 §5.1).
+	EventTypes []string
 
 	// SnapshotMark is the high-water mark of the snapshot this consumer bootstrapped from. Nil
 	// until a snapshot has been taken, which is exactly the condition that refuses a progress
@@ -140,6 +124,37 @@ type Registration struct {
 	ProjectionVersion string
 	MaxAcceptedAge    time.Duration
 	StaleBehavior     StaleBehavior
+
+	// EventTypes are the types the consumer applies, each one SubscribableEventTypes offers. The
+	// registration is the subscription: from its commit every event of these types owes the
+	// consumer a delivery (TDD-organization-control-002 §Consumer Registry).
+	EventTypes []string
+}
+
+// subscription returns the registration's event types, deduplicated and in a stable order, or a
+// refusal naming the first one this registry does not offer.
+func (r Registration) subscription() ([]string, error) {
+	if len(r.EventTypes) == 0 {
+		return nil, fmt.Errorf("%w: event_types names no event type; a consumer owed nothing has nothing to register for", ErrInvalid)
+	}
+	offered := map[string]bool{}
+	for _, t := range SubscribableEventTypes {
+		offered[t] = true
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, raw := range r.EventTypes {
+		t := strings.TrimSpace(raw)
+		if !offered[t] {
+			return nil, fmt.Errorf("%w: event type %q is not one this registry offers", ErrInvalid, raw)
+		}
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (r Registration) validate() error {
@@ -148,7 +163,7 @@ func (r Registration) validate() error {
 		return fmt.Errorf("%w: a consumer identifier is required", ErrInvalid)
 	case r.PrincipalID.IsNil():
 		// The consumer's token is recognized by this and nothing else. A consumer registered
-		// without it could never authenticate, and would sit in the single active slot.
+		// without it could never authenticate.
 		return fmt.Errorf("%w: the consumer's workload principal_id is required", ErrInvalid)
 	case strings.TrimSpace(r.ProjectionVersion) == "":
 		// The projection is a contract, and a consumer that cannot name the version it reads
@@ -161,7 +176,8 @@ func (r Registration) validate() error {
 	case !r.StaleBehavior.Valid():
 		return fmt.Errorf("%w: stale_behavior %q is not a declared behavior", ErrInvalid, r.StaleBehavior)
 	}
-	return nil
+	_, err := r.subscription()
+	return err
 }
 
 // Registry is the consumer registry. It is owned by the publisher and held in this database; each
@@ -184,15 +200,12 @@ func NewRegistry(pool *db.ProviderPool) (*Registry, error) {
 
 // upsertStatement registers a consumer or updates its declared terms.
 //
-// The declared terms are replaced and the progress columns are not. A consumer raising its
-// freshness budget has not un-bootstrapped itself, and clearing `snapshot_mark` here would refuse
-// its next progress report for a reason unrelated to what it changed.
-// upsertStatement registers a consumer or updates its declared terms.
+// The declared terms are replaced and the progress columns are not: a consumer raising its
+// freshness budget has not un-bootstrapped itself. Progress is cleared separately, and only when
+// the subscription is written (see Register).
 //
-// `retired_at = NULL` on conflict revives a retired consumer rather than refusing it. A
-// consumer coming back under an identity it previously held is a legitimate act, and the
-// single-consumer rule is about how many are active at once rather than about which names have
-// ever been used.
+// `retired_at = NULL` on conflict revives a retired consumer rather than refusing it. A consumer
+// coming back under an identity it previously held is a legitimate act.
 //
 // `principal_id` is written on insert and never updated: identityConflict refuses a re-registration
 // naming another one before this runs.
@@ -206,16 +219,20 @@ SET projection_version = excluded.projection_version,
     retired_at         = NULL
 RETURNING registered_at`
 
-// otherActiveConsumer names an active consumer that is not this one, if there is one.
-//
-// FOR UPDATE, so two registrations arriving together cannot both read zero and both insert.
-// The database's partial unique index is the real guarantee -- it holds against psql as well
-// as against this code -- and this read exists to turn that constraint violation into an
-// answer that says which consumer is in the way.
-const otherActiveConsumer = `SELECT consumer_id
-FROM projection.consumer
-WHERE retired_at IS NULL AND consumer_id <> $1
-FOR UPDATE`
+// priorStatement reads what the registration replaces: whether the consumer exists, whether it is
+// retired, and the event types of its active subscription. At most one row, iterated rather than
+// QueryRow'd because no row is the expected case for a new consumer.
+const priorStatement = `SELECT c.retired_at IS NOT NULL, s.event_types
+FROM projection.consumer c
+LEFT JOIN platform.subscription s ON s.consumer = c.consumer_id AND s.retired_at IS NULL
+WHERE c.consumer_id = $1
+FOR UPDATE OF c`
+
+// resetProgressStatement clears what a consumer reported about a model built from deliveries it
+// will no longer receive in full. Its next progress report is refused until it bootstraps again.
+const resetProgressStatement = `UPDATE projection.consumer
+SET snapshot_mark = NULL, last_reported_mark = NULL, last_reported_at = NULL
+WHERE consumer_id = $1`
 
 // identityStatement reads the rows that would make the registration change whose workload a consumer
 // is: this consumer under another principal_id, or another consumer, retired or not, under this one.
@@ -251,33 +268,54 @@ func identityConflict(ctx context.Context, tx db.Tx, reg Registration) error {
 	return fmt.Errorf("%w: principal_id is already registered as consumer %s", ErrInvalid, consumer)
 }
 
-// activeHolder reports the active consumer other than the named one, and whether there is one.
-func activeHolder(ctx context.Context, tx db.Tx, consumerID string) (string, bool, error) {
-	rows, err := tx.Query(ctx, otherActiveConsumer, consumerID)
+// prior reports whether the consumer exists, whether it is retired, and its active subscription.
+func prior(ctx context.Context, tx db.Tx, consumerID string) (exists, retired bool, types []string, err error) {
+	rows, err := tx.Query(ctx, priorStatement, consumerID)
 	if err != nil {
-		return "", false, fmt.Errorf("projection: checking for an active consumer: %w", err)
+		return false, false, nil, fmt.Errorf("projection: reading the consumer's registration: %w", err)
 	}
 	defer rows.Close()
-
-	var holder string
-	held := rows.Next()
-	if held {
-		if err := rows.Scan(&holder); err != nil {
-			return "", false, fmt.Errorf("projection: reading the active consumer: %w", err)
+	if rows.Next() {
+		exists = true
+		if err := rows.Scan(&retired, &types); err != nil {
+			return false, false, nil, fmt.Errorf("projection: reading the consumer's registration: %w", err)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return "", false, fmt.Errorf("projection: checking for an active consumer: %w", err)
+		return false, false, nil, fmt.Errorf("projection: reading the consumer's registration: %w", err)
 	}
-	return holder, held, nil
+	return exists, retired, types, nil
 }
 
-// Register records or updates a consumer's declared terms.
+func sameTypes(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	x, y := append([]string(nil), a...), append([]string(nil), b...)
+	sort.Strings(x)
+	sort.Strings(y)
+	for i := range x {
+		if x[i] != y[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Register records or updates a consumer's declared terms and its subscription, in one transaction.
 //
-// Refused when a different consumer is already active. See ErrSingleConsumer for why the
-// scope is enforced rather than documented.
+// The subscription is written when the consumer is new, is being revived, has none, or names other
+// types; otherwise it is left alone. Writing it clears the consumer's snapshot mark and reported
+// position. A revived consumer was delivered nothing while it was retired, and one whose types
+// changed was never delivered the events of a newly added type that committed before the change.
+// Either way its model is not one a stream position can vouch for, so it bootstraps again.
+// That is the cost a subscription change carries (ADR-GLB-018 §5.1).
 func (r *Registry) Register(ctx context.Context, reg Registration) (Consumer, error) {
 	if err := reg.validate(); err != nil {
+		return Consumer{}, err
+	}
+	types, err := reg.subscription()
+	if err != nil {
 		return Consumer{}, err
 	}
 
@@ -287,31 +325,45 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Consumer, er
 		ProjectionVersion: reg.ProjectionVersion,
 		MaxAcceptedAge:    reg.MaxAcceptedAge,
 		StaleBehavior:     reg.StaleBehavior,
+		EventTypes:        types,
 	}
 
 	if err := db.WithProviderScope(ctx, r.pool,
 		"register projection consumer "+reg.ConsumerID,
 		func(ctx context.Context, tx db.Tx) error {
-			// Iterated rather than QueryRow'd: no row is the expected case here, and this
-			// package has no no-rows sentinel to distinguish that from a failed statement.
-			// Treating them alike would report a broken database as a free slot.
-			holder, held, err := activeHolder(ctx, tx, reg.ConsumerID)
-			if err != nil {
-				return err
-			}
-			if held {
-				return fmt.Errorf("%w: %s holds it; retire that consumer first", ErrSingleConsumer, holder)
-			}
 			if err := identityConflict(ctx, tx, reg); err != nil {
 				return err
 			}
+			exists, retired, current, err := prior(ctx, tx, reg.ConsumerID)
+			if err != nil {
+				return err
+			}
 
-			return tx.QueryRow(ctx, upsertStatement,
+			if err := tx.QueryRow(ctx, upsertStatement,
 				reg.ConsumerID, reg.PrincipalID.String(), reg.ProjectionVersion, reg.MaxAcceptedAge,
 				string(reg.StaleBehavior),
-			).Scan(&consumer.RegisteredAt)
+			).Scan(&consumer.RegisteredAt); err != nil {
+				return err
+			}
+
+			if exists && !retired && current != nil && sameTypes(current, types) {
+				return nil
+			}
+			eventTypes := make([]fevent.Type, len(types))
+			for i, t := range types {
+				eventTypes[i] = fevent.Type(t)
+			}
+			if err := outbox.Subscribe(ctx, tx, reg.ConsumerID, eventTypes); err != nil {
+				return fmt.Errorf("projection: subscribing %s: %w", reg.ConsumerID, err)
+			}
+			if exists {
+				if _, err := tx.Exec(ctx, resetProgressStatement, reg.ConsumerID); err != nil {
+					return fmt.Errorf("projection: clearing the progress of %s: %w", reg.ConsumerID, err)
+				}
+			}
+			return nil
 		}); err != nil {
-		if errors.Is(err, ErrSingleConsumer) || errors.Is(err, ErrInvalid) {
+		if errors.Is(err, ErrInvalid) {
 			return Consumer{}, err
 		}
 		return Consumer{}, fmt.Errorf("projection: register consumer: %w", err)
@@ -323,12 +375,14 @@ const retireStatement = `UPDATE projection.consumer
 SET retired_at = now()
 WHERE consumer_id = $1 AND retired_at IS NULL`
 
-// Retire withdraws a consumer, freeing the single active slot.
+// Retire withdraws a consumer: its registry row, its subscription, and what it was still owed.
 //
-// It exists because ErrSingleConsumer would otherwise have no legitimate exit: rotating a
-// consumer identity, renaming a deployable, or moving the projection to a new one would all
-// dead-end at the refusal, and the fastest way past a refusal with no exit is to delete the
-// guard. This is the intended path, and it leaves a row rather than removing one.
+// In one transaction, the row is stamped retired, the subscription retired (outbox.Unsubscribe),
+// and every delivery still owed to it abandoned (outbox.Abandon, ADR-GLB-018 §5.5). Its dispatcher
+// refuses to start once it is retired, so nothing would deliver those, and left owed they would hold
+// outbox retention for every day they belong to. Retiring an already-retired consumer runs the same
+// two steps again, which finds nothing to do on a consumer retired this way and finishes one retired
+// before subscriptions existed.
 //
 // The row is kept and stamped rather than deleted. `snapshot_mark` and the reported positions
 // are the record of what that consumer was told and what it claimed to have applied, and an
@@ -347,34 +401,40 @@ func (r *Registry) Retire(ctx context.Context, consumerID string) error {
 			if err != nil {
 				return fmt.Errorf("projection: retire consumer: %w", err)
 			}
-			if tag.RowsAffected() == 1 {
-				return nil
+			if tag.RowsAffected() != 1 {
+				// Nothing was updated: either the consumer is already retired, or it does not
+				// exist. Distinguished with a second read rather than reported as one outcome,
+				// because an operator retiring a name they mistyped must not be told it worked.
+				var exists bool
+				if err := tx.QueryRow(ctx,
+					"SELECT true FROM projection.consumer WHERE consumer_id = $1", consumerID,
+				).Scan(&exists); err != nil {
+					return fmt.Errorf("%w: %s", ErrNotRegistered, consumerID)
+				}
 			}
-
-			// Nothing was updated: either the consumer is already retired, or it does not
-			// exist. Distinguished with a second read rather than reported as one outcome,
-			// because an operator retiring a name they mistyped must not be told it worked.
-			var exists bool
-			if err := tx.QueryRow(ctx,
-				"SELECT true FROM projection.consumer WHERE consumer_id = $1", consumerID,
-			).Scan(&exists); err != nil {
-				return fmt.Errorf("%w: %s", ErrNotRegistered, consumerID)
+			if err := outbox.Unsubscribe(ctx, tx, consumerID); err != nil {
+				return fmt.Errorf("projection: retiring the subscription of %s: %w", consumerID, err)
+			}
+			if _, err := outbox.Abandon(ctx, tx, consumerID, "projection consumer "+consumerID+" retired"); err != nil {
+				return fmt.Errorf("projection: abandoning what %s was owed: %w", consumerID, err)
 			}
 			return nil
 		})
 }
 
-const selectConsumer = `SELECT consumer_id,
-       principal_id::text,
-       projection_version,
-       max_accepted_age,
-       stale_behavior,
-       registered_at,
-       snapshot_mark,
-       last_reported_mark,
-       last_reported_at
-FROM projection.consumer
-WHERE consumer_id = $1 AND retired_at IS NULL`
+const selectConsumer = `SELECT c.consumer_id,
+       c.principal_id::text,
+       c.projection_version,
+       c.max_accepted_age,
+       c.stale_behavior,
+       c.registered_at,
+       c.snapshot_mark,
+       c.last_reported_mark,
+       c.last_reported_at,
+       coalesce(s.event_types, '{}')
+FROM projection.consumer c
+LEFT JOIN platform.subscription s ON s.consumer = c.consumer_id AND s.retired_at IS NULL
+WHERE c.consumer_id = $1 AND c.retired_at IS NULL`
 
 // Get reads one consumer, or reports that it is not registered.
 //
@@ -398,7 +458,7 @@ func load(ctx context.Context, tx db.Tx, consumerID string, consumer *Consumer) 
 	if err := tx.QueryRow(ctx, selectConsumer, consumerID).Scan(
 		&consumer.ConsumerID, &principal, &consumer.ProjectionVersion, &consumer.MaxAcceptedAge,
 		&behavior, &consumer.RegisteredAt, &consumer.SnapshotMark,
-		&consumer.LastReportedMark, &consumer.LastReportedAt); err != nil {
+		&consumer.LastReportedMark, &consumer.LastReportedAt, &consumer.EventTypes); err != nil {
 		return fmt.Errorf("%w: %s", ErrNotRegistered, consumerID)
 	}
 	parsed, err := id.Parse(principal)
