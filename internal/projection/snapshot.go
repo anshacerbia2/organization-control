@@ -198,6 +198,11 @@ func snapshotIn(ctx context.Context, tx db.Tx, req SnapshotRequest, size int, pa
 	if err := load(ctx, tx, req.ConsumerID, &consumer); err != nil {
 		return err
 	}
+	// A consumer reads only the snapshot of what it subscribes to (TDD-organization-control-002
+	// §Consumer Registry).
+	if !subscribesToAny(consumer.EventTypes, organizationSnapshotTypes) {
+		return fmt.Errorf("%w: %s subscribes to no Membership or Tenant event type", ErrNotSubscribed, req.ConsumerID)
+	}
 
 	if req.Cursor == "" {
 		if err := tx.QueryRow(ctx, markStatement).Scan(&page.HighWaterMark); err != nil {

@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.6.0
+  version: 1.7.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -270,7 +270,8 @@ progress against, which no sequence of correct operations produces.
 **A consumer subscribes to the event types it applies** (`ADR-GLB-018 §5.1`). Registration
 names them in `event_types`, and each must be one this registry offers:
 `projection.SubscribableEventTypes`: the eight Membership and Tenant types a projection's
-authority depends on, and `projection.repair.reconciled`, which a reconciliation publishes when it
+authority depends on, the four provider authority types (`TDD-organization-control-001`
+§Provider Authority Projection), and `projection.repair.reconciled`, which a reconciliation publishes when it
 finds the projection wrong. A consumer that does not subscribe to the repair never receives one, so
 its drift is corrected only by its next bootstrap. The subscription is recorded with foundation-platform's `outbox.Subscribe`,
 in `platform.subscription`, inside the registering transaction. From its commit, every event of
@@ -293,6 +294,13 @@ start, so those deliveries would otherwise stay owed and hold outbox retention f
 belong to. Abandoned deliveries are neither evidence nor debt. The tradeoff: a consumer retired by
 mistake loses its backlog and bootstraps from a snapshot when it is registered again, which is
 what the bootstrap contract already requires of a consumer whose model is older than its budget.
+
+**A consumer reads only the snapshot of what it subscribes to.** The Organization snapshot answers
+a consumer whose subscription names a Membership or Tenant type, and the provider authority
+snapshot one whose subscription names a provider type. Any other is refused with `403`. A
+subscription is the consumer's declared need, and a snapshot beyond it would hand over authority
+data no delivery would ever have carried to it (NIST SP 800-53 AC-6, `TDD-organization-control-001`
+[R6]).
 
 **Several consumers are active at once.** Up to v1.5.0 this registry refused a second active
 consumer (`consumer_single_active`), because the outbox could record one outcome per event. With

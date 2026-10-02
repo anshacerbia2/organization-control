@@ -30,9 +30,10 @@ var (
 	// ErrAlreadyRevoked means the grant was revoked before.
 	ErrAlreadyRevoked = errors.New("authority: the provider grant is already revoked")
 
-	// ErrLastGrant means the grant is the last active one. Revoking it would leave nobody able to
-	// grant again, and the bootstrap refuses a table that holds any grant.
-	ErrLastGrant = errors.New("authority: the last active provider grant cannot be revoked; grant another provider first")
+	// ErrLastGrant means the grant is the last active provider:organization-control grant. Revoking
+	// it would leave nobody able to grant again, and the bootstrap refuses a table that holds any
+	// grant. Grants of another scope confer no authority here, so the last of those may go.
+	ErrLastGrant = errors.New("authority: the last active provider:organization-control grant cannot be revoked; grant another provider first")
 )
 
 // The kinds of grant (ADR-ORG-002 §5.1, §5.2).
@@ -94,7 +95,7 @@ SELECT count(*) FROM inserted`
 
 // lockActiveStatement locks every active grant, so two revocations cannot both count the other as
 // the one that remains: the second waits for the first, then counts again.
-const lockActiveStatement = `SELECT grant_id::text FROM organization.provider_grant
+const lockActiveStatement = `SELECT grant_id::text, scope FROM organization.provider_grant
 WHERE revoked_at IS NULL
 FOR UPDATE`
 
@@ -127,13 +128,16 @@ func (a *Administration) List(ctx context.Context, reason string) ([]Record, err
 	return records, nil
 }
 
-// Grant gives the Principal a provider grant of the kind, eligible or emergency, recording the
-// calling provider as granted_by and the reason as the grant's.
-func (a *Administration) Grant(ctx context.Context, principal id.UUID, kind, reason string) (Record, error) {
+// Grant gives the Principal a provider grant for the scope, of the kind, eligible or emergency,
+// recording the calling provider as granted_by and the reason as the grant's. A grant of a published
+// scope publishes its event in the same transaction.
+func (a *Administration) Grant(ctx context.Context, principal id.UUID, grantScope, kind, reason string) (Record, error) {
 	scope, ok := db.ScopeFrom(ctx)
 	switch {
 	case !ok:
 		return Record{}, db.ErrNoScope
+	case !registeredScope(grantScope):
+		return Record{}, fmt.Errorf("%w: scope is %s or %s", ErrInvalid, Scope, ScopeIdentityControl)
 	case kind != KindEligible && kind != KindEmergency:
 		return Record{}, fmt.Errorf("%w: kind is eligible or emergency", ErrInvalid)
 	case principal.IsNil():
@@ -149,12 +153,15 @@ func (a *Administration) Grant(ctx context.Context, principal id.UUID, kind, rea
 	var record Record
 	err = db.WithProviderScope(ctx, a.pool, reason, func(ctx context.Context, tx db.Tx) error {
 		var inserted int
-		if err := tx.QueryRow(ctx, grantStatement, grantID.String(), principal.String(), Scope,
+		if err := tx.QueryRow(ctx, grantStatement, grantID.String(), principal.String(), grantScope,
 			scope.Actor().String(), strings.TrimSpace(reason), kind).Scan(&inserted); err != nil {
 			return err
 		}
 		if inserted == 0 {
 			return ErrAlreadyGranted
+		}
+		if err := publish(ctx, tx, grantID, EventGranted); err != nil {
+			return err
 		}
 		record, err = scanRecord(tx.QueryRow(ctx, oneStatement, grantID.String()))
 		return err
@@ -187,32 +194,40 @@ func (a *Administration) Revoke(ctx context.Context, grantID id.UUID, reason str
 		if err != nil {
 			return err
 		}
-		active := map[string]bool{}
+		active := map[string]string{}
+		governing := 0
 		for rows.Next() {
-			var held string
-			if err := rows.Scan(&held); err != nil {
+			var held, heldScope string
+			if err := rows.Scan(&held, &heldScope); err != nil {
 				rows.Close()
 				return err
 			}
-			active[held] = true
+			active[held] = heldScope
+			if heldScope == Scope {
+				governing++
+			}
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
 		}
 
-		if !active[grantID.String()] {
+		target, isActive := active[grantID.String()]
+		if !isActive {
 			// Not active: unknown, or revoked already. Read it to say which.
 			if _, err := scanRecord(tx.QueryRow(ctx, oneStatement, grantID.String())); err != nil {
 				return ErrGrantNotFound
 			}
 			return ErrAlreadyRevoked
 		}
-		if len(active) == 1 {
+		if target == Scope && governing == 1 {
 			return ErrLastGrant
 		}
 		if _, err := tx.Exec(ctx, revokeStatement, grantID.String(), scope.Actor().String(),
 			strings.TrimSpace(reason)); err != nil {
+			return err
+		}
+		if err := publish(ctx, tx, grantID, EventRevoked); err != nil {
 			return err
 		}
 		record, err = scanRecord(tx.QueryRow(ctx, oneStatement, grantID.String()))

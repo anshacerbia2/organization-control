@@ -133,12 +133,14 @@
     "_comment_authority": [
       "internal/authority reads the two records a caller's authority comes from -- provider grants",
       "and consumer registrations -- makes the first provider grant, and grants and revokes the rest",
-      "(ADR-ORG-001 5.11). It reaches internal/db for the pools and the Transactor type and nothing",
-      "else. internal/httpapi routes to its grant administration like any other service, and reads",
+      "(ADR-ORG-001 5.11). It reaches internal/db for the pools and the Transactor type, and",
+      "internal/system for the source of the provider grant events it publishes for the scopes",
+      "another service enforces (TDD-organization-control-001, Provider Authority Projection).",
+      "internal/httpapi routes to its grant administration like any other service, and reads",
       "the caller records through an interface the composition root fills, so authentication holds",
       "no statement."
     ],
-    "internal/authority": ["internal/db"],
+    "internal/authority": ["internal/db", "internal/system"],
 
     "_comment_config": [
       "internal/config reads the environment and has no internal edges. A configuration package",

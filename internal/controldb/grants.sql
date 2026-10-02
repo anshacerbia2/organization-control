@@ -27,6 +27,7 @@ BEGIN
               ('organization.external_reference'),
               ('organization.provider_grant'),
               ('organization.provider_activation'),
+              ('organization.provider_grant_event'),
               ('tenant.tenant'),
               ('tenant.provisioning_request'),
               ('tenant.tenant_event'),
@@ -196,6 +197,13 @@ GRANT SELECT, INSERT, UPDATE ON organization.organization TO organization_provid
 -- (ADR-ORG-001 §5.11). The revocation's FOR UPDATE lock needs the column privilege as well.
 GRANT SELECT, INSERT ON organization.provider_grant TO organization_provider_rt;
 GRANT UPDATE (revoked_at, revoked_by, revoke_reason) ON organization.provider_grant TO organization_provider_rt;
+
+-- organization.provider_grant.grant_version and organization.provider_grant_event -- provider only:
+-- each published transition of a provider:identity-control grant advances the version and records
+-- which version its event carries, in the transition's transaction (TDD-organization-control-001
+-- §Provider Authority Projection). The history is written once and never rewritten.
+GRANT UPDATE (grant_version) ON organization.provider_grant TO organization_provider_rt;
+GRANT INSERT ON organization.provider_grant_event TO organization_provider_rt;
 
 -- organization.provider_activation -- provider only: SELECT for the authority read every request
 -- makes, INSERT for a request, and UPDATE on the decision and end columns alone (ADR-ORG-002). Who
@@ -462,7 +470,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA projection
 -- performing both would make replay and "declare it delivered" the same act, and the evidence
 -- between them decorative.
 
-GRANT USAGE ON SCHEMA platform, projection, audit, membership, tenant TO organization_resolution_rt;
+GRANT USAGE ON SCHEMA platform, projection, audit, membership, tenant, organization TO organization_resolution_rt;
 
 -- Column-level UPDATE, not table-level.
 --
@@ -511,6 +519,9 @@ GRANT SELECT ON membership.membership_event TO organization_resolution_rt;
 -- And which Tenant, at which security version: the Tenant half of the same predicate.
 GRANT SELECT ON tenant.tenant_event TO organization_resolution_rt;
 
+-- And which provider grant, at which grant_version: the provider grant third of it.
+GRANT SELECT ON organization.provider_grant_event TO organization_resolution_rt;
+
 -- Nothing inherited, for the same reason as the dispatcher: a table added later must be granted
 -- deliberately rather than arrive in the hands of a role whose scope is four objects.
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
@@ -528,18 +539,27 @@ ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA tenant
 -- The consumer role
 -- ---------------------------------------------------------------------------------------------
 --
--- A registered projection consumer acting on its own records, through seven routes: its registry
--- row, progress, bootstrap, the snapshot, the frontier, and the two context checks. It ran as the
+-- A registered projection consumer acting on its own records, through eight routes: its registry
+-- row, progress, bootstrap, the Organization and provider authority snapshots, the frontier, and the
+-- two context checks. It ran as the
 -- provider role before this, and so could read and write every table the control plane can.
 -- Every grant below is one tools/grantcheck derives from those routes.
 
-GRANT USAGE ON SCHEMA membership, tenant, projection, platform TO organization_consumer_rt;
+GRANT USAGE ON SCHEMA membership, tenant, projection, platform, organization TO organization_consumer_rt;
 
 -- The snapshot's rows and the fresh check's answer. Read-only; rls.sql gives both the matching
 -- policy. No other business table: not an invitation, an offboarding, an Organization or a
 -- Workspace.
 GRANT SELECT ON membership.membership TO organization_consumer_rt;
 GRANT SELECT ON tenant.tenant TO organization_consumer_rt;
+
+-- The provider authority snapshot's rows, for a consumer subscribed to the provider grant events:
+-- what a grant confers, by column, and nothing of why it was made, by whom, or the requests behind
+-- an activation (TDD-organization-control-001 §Provider Authority Projection).
+GRANT SELECT (grant_id, principal_id, scope, kind, revoked_at, grant_version)
+    ON organization.provider_grant TO organization_consumer_rt;
+GRANT SELECT (activation_id, grant_id, decision, ended_at, ends_at)
+    ON organization.provider_activation TO organization_consumer_rt;
 
 -- Its own registry row: read, and four columns written. The snapshot mark (bootstrap), the
 -- reported position (progress), and the fresh-check meter. Column-level so it cannot change its

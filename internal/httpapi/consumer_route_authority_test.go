@@ -26,6 +26,7 @@ var consumerRoutes = map[string]bool{
 	"POST /v1/projections/consumers/{consumer_id}/progress":  true,
 	"POST /v1/projections/consumers/{consumer_id}/bootstrap": true,
 	"POST /v1/projections/snapshot":                          true,
+	"POST /v1/projections/provider-authority/snapshot":       true,
 	"GET /v1/projections/frontier":                           true,
 	"POST /v1/context/verify":                                true,
 	"POST /v1/context/switch-eligible":                       true,

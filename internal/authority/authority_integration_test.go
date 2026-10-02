@@ -109,10 +109,13 @@ func emptyGrants(t *testing.T, ctx context.Context, owner *fdb.Pool) {
 	}); err != nil {
 		t.Fatalf("save the grants: %v", err)
 	}
-	// Activations name their grant, so they go first; no test leaves one another test needs.
+	// Activations and published events name their grant, so they go first; no test leaves one another
+	// test needs.
+	exec(t, ctx, owner, `DELETE FROM organization.provider_grant_event`)
 	exec(t, ctx, owner, `DELETE FROM organization.provider_activation`)
 	exec(t, ctx, owner, `DELETE FROM organization.provider_grant`)
 	t.Cleanup(func() {
+		exec(t, context.Background(), owner, `DELETE FROM organization.provider_grant_event`)
 		exec(t, context.Background(), owner, `DELETE FROM organization.provider_activation`)
 		exec(t, context.Background(), owner, `DELETE FROM organization.provider_grant`)
 		for _, r := range saved {

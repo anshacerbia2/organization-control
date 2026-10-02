@@ -150,6 +150,8 @@ var mapping = []struct {
 
 	// Projection.
 	{projection.ErrNotRegistered, platform.Forbidden},
+	// Forbidden: the consumer is registered and its subscription does not reach this projection.
+	{projection.ErrNotSubscribed, platform.Forbidden},
 	{projection.ErrNoSnapshotMark, platform.PreconditionUnmet},
 	{projection.ErrMarkWentBackwards, platform.ValidationFailed},
 	{projection.ErrInvalid, platform.ValidationFailed},

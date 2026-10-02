@@ -9,8 +9,8 @@ package controldb
 //
 //   - before foundation-platform v0.2.3 a dead letter kept no aggregate_id or priority, so it cannot
 //     replay itself;
-//   - before membership.membership_event and tenant.tenant_event it has no recorded version, so it
-//     cannot be superseded;
+//   - before membership.membership_event, tenant.tenant_event and organization.provider_grant_event
+//     it has no recorded version, so it cannot be superseded;
 //   - a waiver is refused for an active consumer's incident.
 //
 // A row with all three gaps has no sanctioned closure and blocks its consumer forever. So does any
@@ -39,6 +39,7 @@ WHERE d.resolved_at IS NULL
        OR ((d.aggregate_id IS NULL OR d.priority IS NULL)
            AND NOT EXISTS (SELECT 1 FROM membership.membership_event m WHERE m.event_id = d.event_id)
            AND NOT EXISTS (SELECT 1 FROM tenant.tenant_event t WHERE t.event_id = d.event_id)
+           AND NOT EXISTS (SELECT 1 FROM organization.provider_grant_event g WHERE g.event_id = d.event_id)
            AND d.consumer IN (SELECT c.consumer_id FROM projection.consumer c WHERE c.retired_at IS NULL)))
 ORDER BY d.event_id`
 

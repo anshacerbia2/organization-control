@@ -24,7 +24,7 @@ import (
 	"github.com/anshacerbia2/organization-control/internal/db"
 )
 
-// AuthorityEventTypes are the published events a Membership projection's authority depends on.
+// AuthorityEventTypes are the published events a projection's authority depends on.
 //
 // The list exists because a dead-lettered delivery is not the same fact for every event type. A
 // dead-lettered Workspace rename is an operational annoyance; a dead-lettered Membership revocation is
@@ -37,12 +37,19 @@ import (
 // surely as one revocation does. The Tenant types are the ones the Tenant state machine publishes;
 // the consumer applies exactly these (foundation-reference, projection.tenant).
 //
-// It mirrors internal/membership's and internal/tenant's action-to-event-type tables, which this
-// package may not import: arch.json gives internal/projection edges to internal/db and
+// It mirrors internal/membership's, internal/tenant's and internal/authority's event types, which
+// this package may not import: arch.json gives internal/projection edges to internal/db and
 // internal/system only, because a read-only publisher with a path into a state machine is a mutation
 // path behind a snapshot. TestTheFrontierDebtCoversEveryAuthorityEvent in internal/httpapi -- which
-// imports all three -- keeps the copy honest.
-var AuthorityEventTypes = []string{
+// imports all four -- keeps the copy honest.
+var AuthorityEventTypes = append(append([]string(nil), organizationSnapshotTypes...), ProviderEventTypes...)
+
+// organizationSnapshotTypes are the Membership and Tenant types: the Organization projection's
+// authority, and the subscription that earns its snapshot. ProviderEventTypes, beside it, are the
+// provider grants for the scopes another service enforces (TDD-organization-control-001 §Provider
+// Authority Projection); a dead-lettered revocation there is provider authority that service still
+// honors, so they are debt too.
+var organizationSnapshotTypes = []string{
 	"com.scnehaux.organization.membership.lifecycle.granted",
 	"com.scnehaux.organization.membership.lifecycle.restored",
 	"com.scnehaux.organization.membership.security.suspended",

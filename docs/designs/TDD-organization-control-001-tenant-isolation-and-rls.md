@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.9.0
+  version: 1.10.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -150,12 +150,16 @@ in one statement, and reads which consumers subscribe (`ADR-GLB-018 §5.6`). Rea
 columns shows which consumers exist and what each receives. That is configuration, not authority
 data, and the role still cannot read the outbox it appends to.
 
-The consumer role holds what a consumer's seven routes need and nothing else:
+The consumer role holds what a consumer's eight routes need and nothing else:
 
 - `SELECT` on `membership.membership` and `tenant.tenant`, through a `SELECT` policy of its own
   on each, keyed on the cross-Tenant binding;
 - `SELECT` on `projection.consumer`, and `UPDATE` on four of its columns: `snapshot_mark`,
   `last_reported_mark`, `last_reported_at`, `verify_calls_since_report`;
+- `SELECT` on what a provider grant confers, by column: `grant_id`, `principal_id`, `scope`, `kind`,
+  `revoked_at` and `grant_version` of `organization.provider_grant`, and `activation_id`,
+  `grant_id`, `decision`, `ended_at` and `ends_at` of `organization.provider_activation`, for the
+  provider authority snapshot;
 - `SELECT` on `platform.outbox`, `platform.outbox_delivery` and `platform.dead_letter`, for
   the snapshot mark and the frontier: its own owed deliveries and its own dead letters;
 - `SELECT` on `consumer`, `event_types` and `retired_at` of `platform.subscription`, for the
@@ -317,9 +321,10 @@ first line of defence.
 across Tenants, so its scope binds the cross-Tenant setting. That scope opens only the consumer
 pool, which connects as `organization_consumer_rt` (§Roles).
 
-- A consumer may call only its own seven routes:
+- A consumer may call only its own eight routes:
   - its consumer record, progress, and bootstrap;
-  - the snapshot;
+  - the Organization snapshot and the provider authority snapshot, each only when it subscribes
+    to that projection's types;
   - the frontier;
   - the two context checks.
 - Each of those routes also checks that the consumer names itself. A provider calling the same
@@ -588,11 +593,10 @@ POST  /v1/provider-activations/{id}/end
 
 Each command takes `X-Administrative-Reason`.
 
-**Built here, and left for its own change.** This change builds activations for
-`provider:organization-control`. Grants for `provider:identity-control` and their projection to
-the Identity Control API (`ADR-ORG-002 §5.3`) follow. The 90-day emergency validation report
-(`ADR-ORG-002 §5.2`) needs the last use of each emergency grant, which the access records hold
-and nothing reads yet. It follows with the projection.
+**Built here, and left for its own change.** Activations are built for both registered scopes, and
+the projection of `provider:identity-control` is §Provider Authority Projection. The 90-day
+emergency validation report (`ADR-ORG-002 §5.2`) needs the last use of each emergency grant, which
+the access records hold and nothing reads yet. It follows on its own.
 
 | Ref | Source |
 | :-- | :-- |
@@ -607,6 +611,94 @@ emergency grant, which is reported. The emergency grants are standing authority:
 and still standing. A provider whose activation is in force acts alone for its duration, as
 Entra's activated administrator does. The duration bounds that, not a second approval on each
 action (`ADR-ORG-002` Alternative E).
+
+### Provider Authority Projection
+
+`ADR-ORG-002 §5.3` has the Identity Control API read `provider:identity-control` grants and
+activations from a local projection, as a projection consumer. This service publishes them.
+
+**Two scopes.** `provider_grant_scope_check` admits `provider:organization-control` and
+`provider:identity-control`. `POST /v1/provider-grants` requires `scope`: a grant that does not say
+what it grants is refused. Grants of either scope are made and revoked here, by a caller with
+`provider:organization-control` in force, because this service is the record of provider
+authority. The bootstrap grant is `provider:organization-control`. An approver holds a grant for
+the scope it approves, as before. In production, fewer than two unrevoked emergency grants for a
+scope are reported at startup, for each scope.
+
+**Only a scope enforced elsewhere is published.** This service enforces
+`provider:organization-control` from its own records on every request, so no consumer needs those
+grants, and publishing them would tell another service which Principals can administer this one.
+Least privilege applies to processes as well as to users: "allowing only authorized accesses for
+users (or processes acting on behalf of users) that are necessary to accomplish assigned
+organizational tasks" (NIST SP 800-53 AC-6 [R6]). `authority.PublishedScopes` lists the scopes
+whose transitions are published: `provider:identity-control` today.
+
+**Four events, each carrying the grant's whole state** (the Membership pattern,
+`TDD-organization-control-002` §Published Events):
+
+```text
+com.scnehaux.organization.provider.lifecycle.granted    a grant made                  standard lane
+com.scnehaux.organization.provider.lifecycle.activated  an activation approved,       standard lane
+                                                        or self-activated outside production
+com.scnehaux.organization.provider.security.ended       an activation ended early     priority lane
+com.scnehaux.organization.provider.security.revoked     a grant revoked               priority lane
+```
+
+```json
+{
+  "grant_id": "…", "principal_id": "…", "scope": "provider:identity-control",
+  "kind": "eligible", "grant_status": "active", "grant_version": 3,
+  "activation": { "activation_id": "…", "ends_at": "2026-10-02T18:00:00Z" }
+}
+```
+
+- **`grant_version`** starts at 1 and rises by one with each published transition of the grant or
+  its activation. A consumer applies an event only when its version is higher than the one it
+  holds, so delivery order never decides which state is newer. `grant_status` is `active` or
+  `revoked`.
+- **`activation`** is the activation in force, or `null`. A revoked grant carries `null`.
+- **What is not published.** A pending, denied or lapsed request confers nothing, so it publishes
+  nothing. An activation that reaches its `ends_at` publishes nothing either: the consumer
+  evaluates the end locally from the recorded instant, with no delay (`ADR-ORG-002 §5.3`, maximum
+  enforcement delay).
+- **The lanes.** An ended activation or a revoked grant is a withdrawal, so it travels in the
+  priority lane, as `ADR-ORG-002 §5.3` declares.
+- **Debt.** The four types are authority-bearing (`projection.AuthorityEventTypes`), so a consumer
+  owed one that dead-letters is refused for it (`TDD-organization-control-005`).
+- **History.** Each event writes a row beside it, in the publishing transaction, to
+  `organization.provider_grant_event (event_id, grant_id, grant_version, event_type, recorded_at)`,
+  with `UNIQUE (grant_id, grant_version)`. As `membership.membership_event` does for Memberships, it
+  lets an older provider event close as `SUPERSEDED` once the consumer applied a newer version of
+  the same grant (`TDD-organization-control-005`).
+
+**The snapshot.** `POST /v1/projections/provider-authority/snapshot` returns, under one mark, every
+unrevoked grant of a published scope with the activation in force, paged by `grant_id`. It uses the
+same mark, cursor and bootstrap contract as the Organization snapshot (`TDD-organization-control-002`
+§Bootstrap Contract).
+
+**A consumer reads only the snapshot of what it subscribes to.** The provider authority snapshot
+answers a consumer whose subscription names a provider type. The Organization snapshot answers one
+whose subscription names a Membership or Tenant type. Any other consumer gets `403`. foundation-reference
+therefore cannot read provider grants, and the Identity Control API cannot read Memberships.
+
+**The tradeoffs.**
+
+- **Expiry is evaluated on the consumer's clock.** No event announces an activation's natural end,
+  so the consumer compares `ends_at` with its own clock. A clock running behind extends authority by
+  the skew. The alternative is an event at every expiry, which needs a scheduler in this service and
+  still arrives late by the dispatcher's lag. NTP keeps the skew to well under the dispatcher's lag,
+  so the local comparison is both earlier and simpler.
+- **Every published transition is one more event.** That is four rows per activation cycle at most,
+  against an estate where activations are counted per provider per day.
+- **The Identity Control API sees grants, not the reasons for them.** Reasons, approvers and
+  requests stay here, in the record `ADR-ORG-002 §5.5` keeps. The projection carries what a
+  decision needs.
+- **A Principal ceasing to be an active person** ends its activations under `ADR-ORG-002 §5.1`. This
+  service does not yet learn of it. Until it does, the grant is revoked by hand.
+
+| Ref | Source |
+| :-- | :-- |
+| R6 | NIST SP 800-53 Rev. 5, *AC-6 Least Privilege*, <https://csrc.nist.gov/pubs/sp/800/53/r5/upd1/final>: "Employ the principle of least privilege, allowing only authorized accesses for users (or processes acting on behalf of users) that are necessary to accomplish assigned organizational tasks." |
 
 ### Grant and Policy Assertion
 
@@ -822,6 +914,20 @@ administrative connection is explicitly not accepted as evidence.
 - An emergency grant is in force without an activation, every request it authorizes logs the
   report, and fewer than two in production are reported.
 - A revoked grant ends its activation's authority at the next request.
+
+### Provider Authority Projection
+
+- A grant of `provider:identity-control`, its activation, an early end and its revocation each
+  publish one event in the transition's transaction, with the grant's whole state, a version one
+  higher than the last, and a history row. The withdrawals travel in the priority lane.
+- A `provider:organization-control` grant publishes nothing, and neither does a pending, denied or
+  lapsed request.
+- A grant without a scope, or with an unregistered one, is refused.
+- The provider authority snapshot returns unrevoked grants of published scopes, each with its
+  activation in force, under one mark. A consumer not subscribed to a provider type is refused it,
+  and a consumer not subscribed to a Membership or Tenant type is refused the Organization snapshot.
+- An older provider event closes as `SUPERSEDED` on a newer applied version of the same grant
+  (`TDD-organization-control-005`).
 
 ### Structural
 

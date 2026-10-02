@@ -356,12 +356,17 @@ func run() error {
 	}
 	// Fewer than two emergency grants in production is a lockout waiting for one absence: they are
 	// how a deployment that requires approval stays administrable (ADR-ORG-002 §5.2).
+	// Each scope is its own lockout: the Identity Control API's emergency grants are what keep it
+	// administrable through an Organization outage (ADR-ORG-002 §5.3).
 	if cfg.Production {
-		if count, err := records.EmergencyGrants(ctx); err != nil {
-			logger.Error("emergency grants could not be counted", slog.String("error", err.Error()))
-		} else if count < 2 {
-			logger.Warn("fewer than two emergency provider grants in production; grant another with kind emergency",
-				slog.Int("emergency_grants", count))
+		for _, scope := range authority.Scopes {
+			if count, err := records.EmergencyGrants(ctx, scope); err != nil {
+				logger.Error("emergency grants could not be counted",
+					slog.String("scope", scope), slog.String("error", err.Error()))
+			} else if count < 2 {
+				logger.Warn("fewer than two emergency provider grants in production; grant another with kind emergency",
+					slog.String("scope", scope), slog.Int("emergency_grants", count))
+			}
 		}
 	}
 	authenticationConfig := httpapi.AuthenticationConfig{
