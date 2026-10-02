@@ -43,23 +43,48 @@ func NewReader(tx db.Transactor) (*Reader, error) {
 	return &Reader{tx: tx}, nil
 }
 
-const providerGrantStatement = `SELECT EXISTS (
-    SELECT 1 FROM organization.provider_grant
-    WHERE principal_id = $1 AND scope = $2 AND revoked_at IS NULL)`
+// Standing is what the records say about a Principal's provider authority over this service
+// (ADR-ORG-002): whether it holds an unrevoked grant, and whether authority is in force, by an
+// emergency grant or by an approved activation that has not ended.
+type Standing struct {
+	// Holder is an unrevoked grant, eligible or emergency.
+	Holder bool
+	// InForce is authority now: an emergency grant, or an activation in force.
+	InForce bool
+	// Emergency is authority from an emergency grant, which every request reports.
+	Emergency bool
+}
 
-// ProviderGrant reports whether the Principal holds an active provider grant over this service. A
-// revoked grant confers nothing from the next request on.
-func (r *Reader) ProviderGrant(ctx context.Context, principal id.UUID) (bool, error) {
+// standingStatement is one row always: three booleans over the Principal's unrevoked grants and
+// their activations.
+const standingStatement = `SELECT
+    EXISTS (SELECT 1 FROM organization.provider_grant g
+            WHERE g.principal_id = $1 AND g.scope = $2 AND g.revoked_at IS NULL),
+    EXISTS (SELECT 1 FROM organization.provider_grant g
+            WHERE g.principal_id = $1 AND g.scope = $2 AND g.revoked_at IS NULL AND g.kind = 'emergency'),
+    EXISTS (SELECT 1 FROM organization.provider_activation a
+            JOIN organization.provider_grant g ON g.grant_id = a.grant_id
+            WHERE a.principal_id = $1 AND a.scope = $2 AND g.revoked_at IS NULL
+              AND a.decision = 'approved' AND a.ended_at IS NULL AND now() < a.ends_at)`
+
+// ProviderStanding reads the Principal's provider authority over this service. A revoked grant, an
+// activation past its end, and one ended early confer nothing from the next request on.
+func (r *Reader) ProviderStanding(ctx context.Context, principal id.UUID) (Standing, error) {
 	if principal.IsNil() {
-		return false, errors.New("authority: a principal is required")
+		return Standing{}, errors.New("authority: a principal is required")
 	}
-	var granted bool
+	var (
+		standing  Standing
+		activated bool
+	)
 	if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		return tx.QueryRow(ctx, providerGrantStatement, principal.String(), Scope).Scan(&granted)
+		return tx.QueryRow(ctx, standingStatement, principal.String(), Scope).
+			Scan(&standing.Holder, &standing.Emergency, &activated)
 	}); err != nil {
-		return false, fmt.Errorf("authority: read provider grant: %w", err)
+		return Standing{}, fmt.Errorf("authority: read provider standing: %w", err)
 	}
-	return granted, nil
+	standing.InForce = standing.Emergency || activated
+	return standing, nil
 }
 
 // consumerStatement is one row always: coalesce turns "none registered" into an empty name, so the
@@ -140,9 +165,11 @@ FROM organization.provider_grant
 ORDER BY granted_at
 LIMIT 2`
 
+// The bootstrap grant is an emergency grant: before a second provider exists, no one could approve
+// its activation (ADR-ORG-002 §5.2).
 const insertBootstrapStatement = `INSERT INTO organization.provider_grant
-    (grant_id, principal_id, scope, bootstrap_operator, reason)
-VALUES ($1, $2, $3, $4, $5)
+    (grant_id, principal_id, scope, bootstrap_operator, reason, kind)
+VALUES ($1, $2, $3, $4, $5, 'emergency')
 RETURNING granted_at`
 
 // Bootstrap makes the first provider grant, following ADR-ORG-001 §5.11.
@@ -222,4 +249,19 @@ func (g *Grants) Bootstrap(ctx context.Context, req Bootstrap) (Grant, error) {
 		return Grant{}, fmt.Errorf("authority: bootstrap: %w", err)
 	}
 	return grant, nil
+}
+
+const emergencyCountStatement = `SELECT count(*) FROM organization.provider_grant
+WHERE scope = $1 AND kind = 'emergency' AND revoked_at IS NULL`
+
+// EmergencyGrants counts the unrevoked emergency grants over this service. A production deployment
+// with fewer than two is reported (ADR-ORG-002 §5.2).
+func (r *Reader) EmergencyGrants(ctx context.Context) (int, error) {
+	var count int
+	if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx, emergencyCountStatement, Scope).Scan(&count)
+	}); err != nil {
+		return 0, fmt.Errorf("authority: count emergency grants: %w", err)
+	}
+	return count, nil
 }

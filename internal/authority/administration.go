@@ -35,11 +35,18 @@ var (
 	ErrLastGrant = errors.New("authority: the last active provider grant cannot be revoked; grant another provider first")
 )
 
+// The kinds of grant (ADR-ORG-002 §5.1, §5.2).
+const (
+	KindEligible  = "eligible"
+	KindEmergency = "emergency"
+)
+
 // Record is one provider grant, active or revoked.
 type Record struct {
 	ID                id.UUID
 	Principal         id.UUID
 	Scope             string
+	Kind              string
 	GrantedBy         *id.UUID
 	BootstrapOperator string
 	Reason            string
@@ -64,7 +71,7 @@ func NewAdministration(pool *db.ProviderPool) (*Administration, error) {
 	return &Administration{pool: pool, id: id.NewV7}, nil
 }
 
-const recordColumns = `SELECT grant_id::text, principal_id::text, scope, coalesce(granted_by::text, ''),
+const recordColumns = `SELECT grant_id::text, principal_id::text, scope, kind, coalesce(granted_by::text, ''),
        coalesce(bootstrap_operator, ''), reason, granted_at, revoked_at,
        coalesce(revoked_by::text, ''), coalesce(revoke_reason, '')
 FROM organization.provider_grant`
@@ -79,8 +86,8 @@ WHERE grant_id = $1`
 // unique index is the guard, against two concurrent grants as well; ON CONFLICT turns its refusal
 // into a count of zero, which this package can read without naming the driver's error type.
 const grantStatement = `WITH inserted AS (
-    INSERT INTO organization.provider_grant (grant_id, principal_id, scope, granted_by, reason)
-    VALUES ($1, $2, $3, $4, $5)
+    INSERT INTO organization.provider_grant (grant_id, principal_id, scope, granted_by, reason, kind)
+    VALUES ($1, $2, $3, $4, $5, $6)
     ON CONFLICT (principal_id, scope) WHERE revoked_at IS NULL DO NOTHING
     RETURNING grant_id)
 SELECT count(*) FROM inserted`
@@ -120,13 +127,15 @@ func (a *Administration) List(ctx context.Context, reason string) ([]Record, err
 	return records, nil
 }
 
-// Grant gives the Principal provider authority, recording the calling provider as granted_by and the
-// reason as the grant's.
-func (a *Administration) Grant(ctx context.Context, principal id.UUID, reason string) (Record, error) {
+// Grant gives the Principal a provider grant of the kind, eligible or emergency, recording the
+// calling provider as granted_by and the reason as the grant's.
+func (a *Administration) Grant(ctx context.Context, principal id.UUID, kind, reason string) (Record, error) {
 	scope, ok := db.ScopeFrom(ctx)
 	switch {
 	case !ok:
 		return Record{}, db.ErrNoScope
+	case kind != KindEligible && kind != KindEmergency:
+		return Record{}, fmt.Errorf("%w: kind is eligible or emergency", ErrInvalid)
 	case principal.IsNil():
 		return Record{}, fmt.Errorf("%w: a principal_id is required", ErrInvalid)
 	case strings.TrimSpace(reason) == "":
@@ -141,7 +150,7 @@ func (a *Administration) Grant(ctx context.Context, principal id.UUID, reason st
 	err = db.WithProviderScope(ctx, a.pool, reason, func(ctx context.Context, tx db.Tx) error {
 		var inserted int
 		if err := tx.QueryRow(ctx, grantStatement, grantID.String(), principal.String(), Scope,
-			scope.Actor().String(), strings.TrimSpace(reason)).Scan(&inserted); err != nil {
+			scope.Actor().String(), strings.TrimSpace(reason), kind).Scan(&inserted); err != nil {
 			return err
 		}
 		if inserted == 0 {
@@ -229,7 +238,7 @@ func scanRecord(row scanner) (Record, error) {
 		record                                   Record
 		grantID, principal, grantedBy, revokedBy string
 	)
-	if err := row.Scan(&grantID, &principal, &record.Scope, &grantedBy, &record.BootstrapOperator,
+	if err := row.Scan(&grantID, &principal, &record.Scope, &record.Kind, &grantedBy, &record.BootstrapOperator,
 		&record.Reason, &record.GrantedAt, &record.RevokedAt, &revokedBy, &record.RevokeReason); err != nil {
 		return Record{}, err
 	}

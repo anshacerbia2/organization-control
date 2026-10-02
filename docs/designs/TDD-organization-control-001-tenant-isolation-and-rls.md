@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.7.0
+  version: 1.8.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-01
+  last_reviewed: 2026-10-02
   parent_sad: SAD-004
 ---
 
@@ -337,7 +337,8 @@ token needs a `principal_id` that is a UUID and a `subject_type` of `human` or `
 | Caller | Claims | Record read for each request | Refused when |
 | :-- | :-- | :-- | :-- |
 | Tenant administrator | `tenant_id` | — | `tenant_id` is not a UUID |
-| Provider | `subject_type` `human`, `acr`, `auth_time`; no `tenant_id` | a provider grant for the `principal_id` | no grant, or `acr` or `auth_time` absent |
+| Provider | `subject_type` `human`, `acr`, `auth_time`; no `tenant_id` | provider authority in force for the `principal_id`: an emergency grant, or an approved activation of an eligible grant (§Provider Activation) | no grant, or `acr` or `auth_time` absent |
+| Eligible provider | as a provider | an eligible grant with no activation in force | reaches only `/v1/provider-activations`; every other route answers `403` before a transaction opens |
 | Projection consumer | `subject_type` `workload`, `workload_owner`; no `tenant_id` | an active consumer registered with the `principal_id` | none registered, or consumer authority not configured |
 
 ```text
@@ -350,7 +351,9 @@ authenticate(token):
     if type is human:
         require acr and auth_time
         require a provider grant for principal          -- read now
-        return Provider(principal)
+        if an emergency grant, or an activation in force:
+            return Provider(principal, emergency?)
+        return Eligible(principal)
     require workload_owner
     consumer := the active consumer registered with principal   -- read now
     return Consumer(principal, consumer)
@@ -467,6 +470,134 @@ requires it, and re-registering a consumer under a different `principal_id` is r
 `ORGANIZATION_CONSUMER_CLAIM` are gone. Startup refuses a deployment that still sets one, because
 such a deployment expects authority to come from where it no longer does, and a silently ignored
 setting would leave it believing so.
+
+### Provider Activation
+
+`ADR-ORG-002` makes a provider grant **eligible**. Authority comes from an **activation** of the
+grant, which lasts a bounded time and, in production, is approved by another provider. An
+**emergency grant** is standing. This is Entra Privileged Identity Management's eligible
+assignment with "Require approval to activate" [R1][R2], and Google Cloud Privileged Access
+Manager's entitlement and grant [R4].
+
+```sql
+ALTER TABLE organization.provider_grant
+    ADD COLUMN kind TEXT NOT NULL DEFAULT 'eligible'
+        CHECK (kind IN ('eligible', 'emergency'));
+-- the bootstrap grant is an emergency grant (ADR-ORG-002 §5.2)
+UPDATE organization.provider_grant SET kind = 'emergency' WHERE granted_by IS NULL;
+
+CREATE TABLE organization.provider_activation (
+    activation_id     UUID        PRIMARY KEY,
+    grant_id          UUID        NOT NULL REFERENCES organization.provider_grant(grant_id),
+    principal_id      UUID        NOT NULL,
+    scope             TEXT        NOT NULL,
+    reason            TEXT        NOT NULL CHECK (btrim(reason) <> ''),
+    duration_seconds  INTEGER     NOT NULL CHECK (duration_seconds > 0),
+    approval_required BOOLEAN     NOT NULL,
+    requested_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    decided_by        UUID,
+    decision          TEXT        CHECK (decision IN ('approved', 'denied', 'lapsed')),
+    decision_reason   TEXT,
+    decided_at        TIMESTAMPTZ,
+    ends_at           TIMESTAMPTZ,
+    ended_by          UUID,
+    end_reason        TEXT,
+    ended_at          TIMESTAMPTZ,
+    CONSTRAINT provider_activation_decision_check
+        CHECK ((decision IS NULL) = (decided_at IS NULL)
+           AND (decision IS NULL OR decision = 'lapsed' OR decided_by IS NOT NULL)),
+    CONSTRAINT provider_activation_window_check
+        CHECK ((decision = 'approved') = (ends_at IS NOT NULL)),
+    CONSTRAINT provider_activation_separation_check
+        CHECK (NOT approval_required OR decision IS DISTINCT FROM 'approved' OR decided_by <> principal_id),
+    CONSTRAINT provider_activation_end_check
+        CHECK ((ended_at IS NULL) = (ended_by IS NULL) AND (ended_at IS NULL) = (end_reason IS NULL))
+);
+CREATE UNIQUE INDEX provider_activation_pending
+    ON organization.provider_activation (grant_id) WHERE decision IS NULL;
+```
+
+`provider_activation_separation_check` is AC-5 in the database: an activation that required
+approval is never recorded approved by its own holder. Whether approval was required is fixed
+when the activation is requested, so the row states the rule it was held to. The provider role
+holds `SELECT` and `INSERT`, and `UPDATE` only on the decision and end columns. A grant's `kind`
+is fixed when the grant is made.
+
+```text
+in force for (principal, scope):
+    an unrevoked emergency grant
+    or an approved activation of an unrevoked grant, not ended, now < ends_at
+
+request(grant, duration, reason), by the grant's holder, eligible or not:
+    refuse an emergency grant: it needs no activation                          409
+    refuse a duration above ORGANIZATION_PROVIDER_ACTIVATION_MAX                 400
+    refuse while an activation of the grant is in force                          409
+    record a pending request older than 24 hours lapsed, then
+    refuse while another request for the grant is pending                        409
+    approval required: record it pending                                         201
+    approval optional (outside production, ORGANIZATION_PROVIDER_ACTIVATION_APPROVAL=optional):
+        record it approved by its holder, ending after the duration              201
+
+approve(activation, reason), by a holder of an unrevoked grant for the scope:
+    refuse the activation's own holder                                           403
+    refuse unless it is pending and requested within 24 hours                    409
+    record it approved, ending duration after now                                200
+deny(activation, reason): as approve, recorded denied                            200
+end(activation, reason), by its holder or a provider in force:
+    refuse unless it is in force                                                 409
+    record who ended it and why; it confers nothing from the next request        200
+```
+
+**The approver need not be in force.** An Entra approver "doesn't have to have any roles"
+[R2]. Requiring an approver to be active would mean an approval needs an approval first, and the
+first activation of the day would have none. An approver must hold a grant for the same scope,
+eligible or emergency, so approving stays a provider's.
+
+**An unapproved request lapses after 24 hours**, as Entra's does [R3]. The next request for the
+grant records it lapsed, with no decider.
+
+**Emergency grants** are made with `"kind": "emergency"` on `POST /v1/provider-grants`. Every
+request one authorizes logs at WARN: *a provider acted on an emergency grant*, with the
+`principal_id`, the method and the route, so that each use is alerted on and reviewed [R5]. In
+production, fewer than two unrevoked emergency grants are reported at startup.
+The bootstrap grant is an emergency grant, because before a second provider exists no one could
+approve its activation.
+
+**An eligible caller reaches only the activation routes.** Authentication resolves a grant holder
+with no authority in force to an eligible caller. Its scope is the provider scope, so the
+privileged-access record names it and its reason, but the API admits it to
+`/v1/provider-activations` alone. Every other route answers `403` before a transaction opens, and
+`requireProvider` refuses it on any route regardless.
+
+```text
+GET   /v1/provider-activations                    pending, in force, and the last 100, newest first
+POST  /v1/provider-activations                    {"grant_id": ..., "duration_seconds": ...}
+POST  /v1/provider-activations/{id}/approve
+POST  /v1/provider-activations/{id}/deny
+POST  /v1/provider-activations/{id}/end
+```
+
+Each command takes `X-Administrative-Reason`.
+
+**Built here, and left for its own change.** This change builds activations for
+`provider:organization-control`. Grants for `provider:identity-control` and their projection to
+the Identity Control API (`ADR-ORG-002 §5.3`) follow. The 90-day emergency validation report
+(`ADR-ORG-002 §5.2`) needs the last use of each emergency grant, which the access records hold
+and nothing reads yet. It follows with the projection.
+
+| Ref | Source |
+| :-- | :-- |
+| R1 | Microsoft, *What is Privileged Identity Management?*, <https://learn.microsoft.com/en-us/entra/id-governance/privileged-identity-management/pim-configure>, accessed 2026-10-02 |
+| R2 | Microsoft, *Configure Microsoft Entra role settings in PIM*, <https://learn.microsoft.com/en-us/entra/id-governance/privileged-identity-management/pim-how-to-change-default-settings>, accessed 2026-10-02 |
+| R3 | Microsoft, *Approve requests for Azure resource roles in PIM*, <https://learn.microsoft.com/en-us/entra/id-governance/privileged-identity-management/pim-resource-roles-approval-workflow>, accessed 2026-10-02 |
+| R4 | Google Cloud, *Privileged Access Manager overview*, <https://docs.cloud.google.com/iam/docs/pam-overview>, accessed 2026-10-02 |
+| R5 | Microsoft, *Manage emergency access admin accounts*, <https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/security-emergency-access>, accessed 2026-10-02 |
+
+**The tradeoff.** A provider waits for an approver before acting, and at night that may mean an
+emergency grant, which is reported. The emergency grants are standing authority: few, watched,
+and still standing. A provider whose activation is in force acts alone for its duration, as
+Entra's activated administrator does. The duration bounds that, not a second approval on each
+action (`ADR-ORG-002` Alternative E).
 
 ### Grant and Policy Assertion
 
@@ -600,6 +731,9 @@ because its statements live in foundation-platform and run in foundation-referen
 | `ORGANIZATION_RESOLUTION_DATABASE_URL` | none, required | A login role inheriting `organization_resolution_rt` (TDD-005) |
 | `ORGANIZATION_CONSUMER_DATABASE_URL` | none; set, it enables consumer authority | A login role inheriting `organization_consumer_rt` |
 | `DB_MAX_CONNS` | `20` | Each pool's ceiling |
+| `ORGANIZATION_ENVIRONMENT` | `production` | `production` or `non-production`. Production by default, so a deployment that forgets it gets the stricter rules |
+| `ORGANIZATION_PROVIDER_ACTIVATION_MAX` | `8h` | Longest activation a request may ask for; Entra allows 1 to 24 hours (§Provider Activation) |
+| `ORGANIZATION_PROVIDER_ACTIVATION_APPROVAL` | `required` | `required` or `optional`. `optional` lets a holder activate with a reason alone, and startup refuses it in production |
 
 Startup refuses any of these DSNs equal to another, because two pools on one credential run
 as one role and the separation exists only in the Go types. The consumer DSN has no fallback
@@ -664,6 +798,21 @@ administrative connection is explicitly not accepted as evidence.
 - Registering a consumer without `principal_id`, or under a different one than it holds, is
   refused; two consumers cannot share one.
 - Startup refuses each of the four removed settings.
+
+### Provider Activation
+
+- An eligible grant holder is refused on every route but `/v1/provider-activations`, before a
+  transaction opens; once an activation is approved it is a provider at its next request, and
+  after `ends_at`, or once ended, it is not.
+- An activation's holder cannot approve it, by the service and by the database; another grant
+  holder, in force or not, can. A denial, an approval of a lapsed request, a second pending
+  request and a request above the maximum are refused.
+- A request older than 24 hours lapses at the next request for the grant.
+- With approval optional, outside production, a holder activates with a reason alone; startup
+  refuses `optional` in production.
+- An emergency grant is in force without an activation, every request it authorizes logs the
+  report, and fewer than two in production are reported.
+- A revoked grant ends its activation's authority at the next request.
 
 ### Structural
 

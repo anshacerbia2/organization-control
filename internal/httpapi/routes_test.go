@@ -101,7 +101,9 @@ func testSurface(t *testing.T) Surface {
 	contexts, err := occontext.New(providerPool)
 	must(err, "context service")
 	providerGrants, err := authority.NewAdministration(providerPool)
-	must(err, "provider grant administration")
+	must(err, "provider grants")
+	providerActivations, err := authority.NewActivations(providerPool, authority.ActivationPolicy{Max: 8 * time.Hour, ApprovalRequired: true})
+	must(err, "provider activations")
 	// The raw transactor, as production wires it: the frontier reads outbox aggregates carrying no
 	// tenant column, so it takes no scope and writes no privileged-access record per poll.
 	frontier, err := projection.NewFrontierReader(transactor)
@@ -114,7 +116,7 @@ func testSurface(t *testing.T) Surface {
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 			Replayer: replayer, Resolver: resolver,
-			Frontier: frontier, ProviderGrants: providerGrants,
+			Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
 		},
 		Database: okProber{},
 	})
@@ -525,6 +527,7 @@ func testSurfaceServices(t *testing.T) Services {
 	resolver, _ := projection.NewResolver(resolutionPool)
 	contexts, _ := occontext.New(providerPool)
 	providerGrants, _ := authority.NewAdministration(providerPool)
+	providerActivations, _ := authority.NewActivations(providerPool, authority.ActivationPolicy{Max: 8 * time.Hour, ApprovalRequired: true})
 	// The raw transactor, as production wires it: the frontier reads outbox aggregates that carry no
 	// tenant column, so it takes no scope and writes no privileged-access record per poll.
 	frontier, _ := projection.NewFrontierReader(transactor)
@@ -535,7 +538,7 @@ func testSurfaceServices(t *testing.T) Services {
 		Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 		Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 		Replayer: replayer, Resolver: resolver,
-		Frontier: frontier, ProviderGrants: providerGrants,
+		Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
 	}
 }
 

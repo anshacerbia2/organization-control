@@ -19,6 +19,7 @@ type providerGrantView struct {
 	GrantID           string     `json:"grant_id"`
 	PrincipalID       string     `json:"principal_id"`
 	Scope             string     `json:"scope"`
+	Kind              string     `json:"kind"`
 	GrantedBy         *string    `json:"granted_by"`
 	BootstrapOperator string     `json:"bootstrap_operator,omitempty"`
 	Reason            string     `json:"reason"`
@@ -38,7 +39,7 @@ func viewProviderGrant(r authority.Record) providerGrantView {
 		return &text
 	}
 	return providerGrantView{
-		GrantID: r.ID.String(), PrincipalID: r.Principal.String(), Scope: r.Scope,
+		GrantID: r.ID.String(), PrincipalID: r.Principal.String(), Scope: r.Scope, Kind: r.Kind,
 		GrantedBy: optional(r.GrantedBy), BootstrapOperator: r.BootstrapOperator, Reason: r.Reason,
 		GrantedAt: r.GrantedAt, Active: r.RevokedAt == nil, RevokedAt: r.RevokedAt,
 		RevokedBy: optional(r.RevokedBy), RevokeReason: r.RevokeReason,
@@ -63,6 +64,9 @@ func (h *handlers) listProviderGrants(w http.ResponseWriter, r *http.Request) {
 
 type grantProviderRequest struct {
 	PrincipalID string `json:"principal_id"`
+
+	// Kind is eligible, the default, or emergency (ADR-ORG-002 §5.2).
+	Kind string `json:"kind"`
 }
 
 func (h *handlers) grantProvider(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +82,11 @@ func (h *handlers) grantProvider(w http.ResponseWriter, r *http.Request) {
 		platform.Problem(w, r, platform.ValidationFailed, "principal_id is not a valid identifier")
 		return
 	}
-	record, err := h.services.ProviderGrants.Grant(r.Context(), principal, reason(r))
+	kind := strings.TrimSpace(body.Kind)
+	if kind == "" {
+		kind = authority.KindEligible
+	}
+	record, err := h.services.ProviderGrants.Grant(r.Context(), principal, kind, reason(r))
 	if err != nil {
 		writeError(w, r, err)
 		return

@@ -102,8 +102,11 @@ ON CONFLICT DO NOTHING;
 -- the Principal that issuer names, the way `organization-control bootstrap-provider` would. Seeded
 -- here rather than by running the command for the reason the Tenants above are: the grant is setup,
 -- and the bootstrap has its own integration test in internal/authority.
-INSERT INTO organization.provider_grant (grant_id, principal_id, scope, bootstrap_operator, reason)
+--
+-- An emergency grant, as the bootstrap's is (ADR-ORG-002 §5.2): standing, so the dev issuer's provider
+-- token is a provider without an activation. Every request it makes is reported as emergency use.
+INSERT INTO organization.provider_grant (grant_id, principal_id, scope, bootstrap_operator, reason, kind)
 VALUES ('44444444-4444-4444-8444-44444444444a', '55555555-5555-4555-8555-55555555555a',
         'provider:organization-control', 'scripts/ci-fixture.sql',
-        'development and CI: the dev issuer''s provider')
+        'development and CI: the dev issuer''s provider', 'emergency')
 ON CONFLICT DO NOTHING;

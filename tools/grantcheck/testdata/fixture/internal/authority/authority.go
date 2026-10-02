@@ -10,9 +10,16 @@ import (
 
 type Reader struct{ tx db.Transactor }
 
-func (r *Reader) ProviderGrant(ctx context.Context) error {
+func (r *Reader) ProviderStanding(ctx context.Context) error {
 	return r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		_, err := tx.Exec(ctx, `SELECT EXISTS (SELECT 1 FROM organization.provider_grant WHERE principal_id = $1)`)
+		return err
+	})
+}
+
+func (r *Reader) EmergencyGrants(ctx context.Context) error {
+	return r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT count(*) FROM organization.provider_grant WHERE kind = 'emergency'`)
 		return err
 	})
 }

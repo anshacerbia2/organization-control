@@ -10,7 +10,14 @@ import (
 	platform "github.com/anshacerbia2/foundation-platform/httpapi"
 	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/verify"
+
+	"github.com/anshacerbia2/organization-control/internal/authority"
 )
+
+// activationRoute is whether a path is one an eligible caller may reach: the activation routes.
+func activationRoute(path string) bool {
+	return path == "/v1/provider-activations" || strings.HasPrefix(path, "/v1/provider-activations/")
+}
 
 // TokenVerifier is the one thing authentication needs from a token library.
 //
@@ -52,8 +59,10 @@ const (
 // the next request rather than when the token expires. An interface so this package reads no table:
 // internal/authority implements it on the provider connections.
 type CallerRecords interface {
-	// ProviderGrant reports whether the Principal holds a provider grant over this service.
-	ProviderGrant(ctx context.Context, principal id.UUID) (bool, error)
+	// ProviderStanding reads the Principal's provider authority over this service: whether it holds
+	// a grant, and whether authority is in force by an emergency grant or an approved activation
+	// (ADR-ORG-002).
+	ProviderStanding(ctx context.Context, principal id.UUID) (authority.Standing, error)
 
 	// ConsumerFor names the active projection consumer registered with the Principal, or "" when
 	// there is none.
@@ -64,6 +73,10 @@ type CallerRecords interface {
 type AuthenticationConfig struct {
 	// Records is where provider grants and consumer registrations are read. Required.
 	Records CallerRecords
+
+	// Logger reports every request an emergency grant authorizes (ADR-ORG-002 §5.2). Nil uses
+	// slog.Default.
+	Logger *slog.Logger
 
 	// Consumers is whether consumer authority exists: true when the consumer pool is configured.
 	// Without the pool no consumer route could be served, so a consumer token is refused instead
@@ -145,6 +158,21 @@ func Authenticate(verifier TokenVerifier, cfg AuthenticationConfig) (Middleware,
 			case err != nil:
 				platform.Problem(w, r, platform.Forbidden, err.Error())
 				return
+			case caller.Eligible && !activationRoute(r.URL.Path):
+				// Before a transaction opens: an eligible caller holds no authority in force, and the
+				// activation routes are how it gets some (TDD-organization-control-001 §Provider
+				// Activation).
+				platform.Problem(w, r, platform.Forbidden,
+					"The caller's provider grant has no activation in force; request one at /v1/provider-activations")
+				return
+			case caller.Emergency:
+				logger := cfg.Logger
+				if logger == nil {
+					logger = slog.Default()
+				}
+				logger.WarnContext(r.Context(), "a provider acted on an emergency grant",
+					slog.String("principal_id", caller.Subject.String()), slog.String("method", r.Method),
+					slog.String("route", r.URL.Path))
 			}
 
 			next.ServeHTTP(w, r.WithContext(WithCaller(r.Context(), caller)))
@@ -289,14 +317,17 @@ func authorize(ctx context.Context, p presented, cfg AuthenticationConfig) (Call
 		return Caller{Subject: p.principal, Consumer: consumer}, nil
 	}
 
-	granted, err := cfg.Records.ProviderGrant(ctx, p.principal)
+	standing, err := cfg.Records.ProviderStanding(ctx, p.principal)
 	if err != nil {
 		return Caller{}, errors.Join(errRecords, err)
 	}
-	if !granted {
+	if !standing.Holder {
 		return Caller{}, errors.New("the token carries no Tenant, and its principal_id holds no provider grant")
 	}
-	return Caller{Subject: p.principal, Provider: true}, nil
+	// A holder with no authority in force is eligible: it reaches the activation routes alone
+	// (ADR-ORG-002 §5.1, TDD-organization-control-001 §Provider Activation).
+	return Caller{Subject: p.principal, Provider: standing.InForce, Eligible: !standing.InForce,
+		Emergency: standing.Emergency}, nil
 }
 
 // ReportTokenType wraps a verifier for ORGANIZATION_TOKEN_TYPE=report. A token whose header typ is

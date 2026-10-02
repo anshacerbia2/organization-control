@@ -209,3 +209,34 @@ func TestTheTokenTypeIsReportedUnlessEnforcementIsAsked(t *testing.T) {
 		}
 	}
 }
+
+// Provider activation settings (ADR-ORG-002 §5.1, TDD-organization-control-001 §Configuration).
+func TestProviderActivationSettings(t *testing.T) {
+	required(t)
+	cfg, err := Load()
+	if err != nil || !cfg.Production || cfg.ProviderActivationMax != 8*time.Hour || !cfg.ProviderActivationApproval {
+		t.Fatalf("the defaults are production %v, max %s, approval %v, err %v",
+			cfg.Production, cfg.ProviderActivationMax, cfg.ProviderActivationApproval, err)
+	}
+
+	for _, c := range []struct {
+		environment, approval, max string
+		ok                         bool
+	}{
+		{"non-production", "optional", "", true},
+		{"production", "optional", "", false},
+		{"", "", "25h", false},
+		{"staging", "", "", false},
+		{"", "maybe", "", false},
+		{"", "", "1h", true},
+	} {
+		required(t)
+		t.Setenv("ORGANIZATION_ENVIRONMENT", c.environment)
+		t.Setenv("ORGANIZATION_PROVIDER_ACTIVATION_APPROVAL", c.approval)
+		t.Setenv("ORGANIZATION_PROVIDER_ACTIVATION_MAX", c.max)
+		_, err := Load()
+		if (err == nil) != c.ok {
+			t.Errorf("%+v: err %v", c, err)
+		}
+	}
+}

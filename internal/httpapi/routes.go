@@ -59,6 +59,9 @@ type Services struct {
 	// ProviderGrants grants and revokes provider authority (ADR-ORG-001 §5.11).
 	ProviderGrants *authority.Administration
 
+	// ProviderActivations requests, decides and ends provider activations (ADR-ORG-002).
+	ProviderActivations *authority.Activations
+
 	// Consumer serves a registered consumer acting as itself, as organization_consumer_rt. Nil only
 	// when consumer authority is not configured, in which case authentication admits no consumer
 	// caller for it to serve.
@@ -223,6 +226,13 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/provider-grants", h.grantProvider)
 	api.HandleFunc("POST /v1/provider-grants/{grant_id}/revoke", h.revokeProvider)
 
+	// The routes an eligible caller reaches, and the only ones (ADR-ORG-002).
+	api.HandleFunc("GET /v1/provider-activations", h.listProviderActivations)
+	api.HandleFunc("POST /v1/provider-activations", h.requestProviderActivation)
+	api.HandleFunc("POST /v1/provider-activations/{activation_id}/approve", h.approveProviderActivation)
+	api.HandleFunc("POST /v1/provider-activations/{activation_id}/deny", h.denyProviderActivation)
+	api.HandleFunc("POST /v1/provider-activations/{activation_id}/end", h.endProviderActivation)
+
 	api.HandleFunc("POST /v1/projections/consumers", h.registerConsumer)
 	api.HandleFunc("GET /v1/projections/consumers/{consumer_id}", h.getConsumer)
 	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/retire", h.retireConsumer)
@@ -280,6 +290,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the dead-letter resolver is required")
 	case s.Contexts == nil:
 		return errors.New("httpapi: the context service is required")
+	case s.ProviderActivations == nil:
+		return errors.New("httpapi: the provider activation service is required")
 	case s.ProviderGrants == nil:
 		return errors.New("httpapi: the provider grant administration is required")
 	case s.Consumer != nil && (s.Consumer.Access == nil || s.Consumer.Checks == nil || s.Consumer.Frontier == nil):

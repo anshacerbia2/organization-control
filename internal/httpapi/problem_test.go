@@ -120,13 +120,23 @@ var registry = map[string]error{
 
 	"context.ErrInvalid": context.ErrInvalid,
 
-	"authority.ErrInvalid":        authority.ErrInvalid,
-	"authority.ErrGrantNotFound":  authority.ErrGrantNotFound,
-	"authority.ErrAlreadyGranted": authority.ErrAlreadyGranted,
-	"authority.ErrAlreadyRevoked": authority.ErrAlreadyRevoked,
-	"authority.ErrLastGrant":      authority.ErrLastGrant,
-	"context.ErrNotRegistered":    context.ErrNotRegistered,
-	"context.ErrRequestRequired":  context.ErrRequestRequired,
+	"authority.ErrInvalid":              authority.ErrInvalid,
+	"authority.ErrGrantNotFound":        authority.ErrGrantNotFound,
+	"authority.ErrAlreadyGranted":       authority.ErrAlreadyGranted,
+	"authority.ErrAlreadyRevoked":       authority.ErrAlreadyRevoked,
+	"authority.ErrLastGrant":            authority.ErrLastGrant,
+	"authority.ErrActivationInvalid":    authority.ErrActivationInvalid,
+	"authority.ErrActivationTooLong":    authority.ErrActivationTooLong,
+	"authority.ErrEmergencyGrant":       authority.ErrEmergencyGrant,
+	"authority.ErrNotHolder":            authority.ErrNotHolder,
+	"authority.ErrActivationInForce":    authority.ErrActivationInForce,
+	"authority.ErrActivationPending":    authority.ErrActivationPending,
+	"authority.ErrActivationNotFound":   authority.ErrActivationNotFound,
+	"authority.ErrActivationDecided":    authority.ErrActivationDecided,
+	"authority.ErrSelfApproval":         authority.ErrSelfApproval,
+	"authority.ErrActivationNotInForce": authority.ErrActivationNotInForce,
+	"context.ErrNotRegistered":          context.ErrNotRegistered,
+	"context.ErrRequestRequired":        context.ErrRequestRequired,
 }
 
 // sentinelsInSource reads every exported `Err*` declared under internal/, by package.
