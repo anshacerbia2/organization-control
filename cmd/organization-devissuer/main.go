@@ -62,7 +62,8 @@ const (
 	// token and the failure reads as a permissions bug.
 	issuer = "http://127.0.0.1:8098"
 
-	audience = "organization-control"
+	// audience is this service's resource registration, never a client (STD-IAM-002 §3.1).
+	audience = "organization-control-api"
 
 	// referenceAudience is foundation-reference's own registered identifier. A delivery token is
 	// audience-bound to the consumer, not to this service: a token the consumer accepts must not

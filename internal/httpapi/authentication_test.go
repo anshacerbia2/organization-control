@@ -34,7 +34,7 @@ import (
 
 const (
 	testIssuer   = "https://issuer.test/realms/scnehaux"
-	testAudience = "organization-control"
+	testAudience = "organization-control-api"
 	testKeyID    = "test-key"
 )
 

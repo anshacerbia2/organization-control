@@ -33,7 +33,7 @@ func required(t *testing.T) {
 	t.Setenv("ORGANIZATION_PROVIDER_DATABASE_URL", "postgres://organization_provider_rt@localhost/control")
 	t.Setenv("ORGANIZATION_RESOLUTION_DATABASE_URL", "postgres://organization_resolution_rt@localhost/control")
 	t.Setenv("ORGANIZATION_TOKEN_ISSUER", "https://issuer.example")
-	t.Setenv("ORGANIZATION_TOKEN_AUDIENCE", "organization-control")
+	t.Setenv("ORGANIZATION_TOKEN_AUDIENCE", "organization-control-api")
 	t.Setenv("ORGANIZATION_JWKS_URL", "https://issuer.example/jwks")
 }
 
@@ -266,7 +266,7 @@ func TestADeliveryTargetRequiresTheDispatchCredentialAndTheWorkloadClient(t *tes
 	}
 
 	t.Setenv("ORGANIZATION_DISPATCH_DATABASE_URL", "postgres://organization_dispatch_app@localhost/control")
-	t.Setenv("ORGANIZATION_WORKLOAD_CLIENT_ID", "organization-control")
+	t.Setenv("ORGANIZATION_WORKLOAD_CLIENT_ID", "organization-control-workload")
 	t.Setenv("ORGANIZATION_WORKLOAD_KEY_FILE", "/run/secrets/workload.pem")
 	t.Setenv("ORGANIZATION_WORKLOAD_TOKEN_URL", "http://kernel:8080/realms/scnehaux/protocol/openid-connect/token")
 	cfg, err := Load()
