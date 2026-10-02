@@ -215,7 +215,7 @@ misconfigured process start and fail later.
 | `ORGANIZATION_TENANT_DATABASE_URL` | yes | Connects as `organization_app` → `organization_rt` |
 | `ORGANIZATION_PROVIDER_DATABASE_URL` | yes | Connects as `organization_provider_app` → `organization_provider_rt` |
 | `ORGANIZATION_TOKEN_ISSUER` | yes | Compared for exact equality |
-| `ORGANIZATION_TOKEN_AUDIENCE` | yes | This resource's registered identifier |
+| `ORGANIZATION_TOKEN_AUDIENCE` | yes | This resource's registered identifier, `organization-control-api`: a keyless resource registration, never a client that authenticates (STD-IAM-002 §3.1) |
 | `ORGANIZATION_JWKS_URL` | yes | Key source. Never read from a token |
 | `ORGANIZATION_CONSUMER_DATABASE_URL` | no | Connects as `organization_consumer_app` → `organization_consumer_rt`. Set, it enables consumer authority |
 | `ORGANIZATION_DELIVERY_TARGETS` | no | `consumer=https://acceptance-url` pairs, comma-separated. Each gets a dispatcher in this process once it is a registered consumer (ADR-GLB-018 §5.4) |

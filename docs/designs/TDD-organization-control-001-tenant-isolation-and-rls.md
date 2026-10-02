@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.11.0
+  version: 1.12.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -347,6 +347,13 @@ A caller is one of three, decided from the token's standard claims and this serv
 records, never from a role in the token (`ADR-ORG-001 §5.11`, `STD-IAM-002 §3.1.1`). Every
 token needs a `principal_id` that is a UUID and a `subject_type` of `human` or `workload`; the
 `principal_id` is the actor every event and every evidence row names, and `sub` is not read.
+
+**`aud` names `organization-control-api`**, this service's keyless `resource` registration in the
+Identity Control API (`privileged`, lifetime class `L0`), registered by a provider through
+`POST /v1/registrations`. It is never a client that authenticates, this service's own workload
+client `organization-control-workload` included: STD-IAM-002 §3.1 forbids one in `aud`, because
+the kernel lets a client named there exchange the token sent to it. Each caller reaches this API
+because its registration's audience names the resource.
 
 | Caller | Claims | Record read for each request | Refused when |
 | :-- | :-- | :-- | :-- |
