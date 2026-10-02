@@ -240,3 +240,66 @@ func TestProviderActivationSettings(t *testing.T) {
 		}
 	}
 }
+
+// No target, no dispatcher, and nothing a dispatcher needs is required.
+func TestADeploymentWithoutDeliveryTargetsNeedsNoDispatchCredential(t *testing.T) {
+	required(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Delivery.Targets) != 0 || cfg.Delivery.Timeout != 5*time.Second || cfg.Delivery.RetryInterval != time.Minute {
+		t.Errorf("delivery reads as %+v", cfg.Delivery)
+	}
+}
+
+// A named target needs the dispatch credential and the workload client, and each problem is named.
+func TestADeliveryTargetRequiresTheDispatchCredentialAndTheWorkloadClient(t *testing.T) {
+	required(t)
+	t.Setenv("ORGANIZATION_DELIVERY_TARGETS", "identity-control=https://identity-control.internal/v1/deliveries")
+	_, err := Load()
+	for _, name := range []string{"ORGANIZATION_DISPATCH_DATABASE_URL", "ORGANIZATION_WORKLOAD_CLIENT_ID",
+		"ORGANIZATION_WORKLOAD_KEY_FILE", "ORGANIZATION_WORKLOAD_TOKEN_URL"} {
+		if err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("Load does not name %s as required: %v", name, err)
+		}
+	}
+
+	t.Setenv("ORGANIZATION_DISPATCH_DATABASE_URL", "postgres://organization_dispatch_app@localhost/control")
+	t.Setenv("ORGANIZATION_WORKLOAD_CLIENT_ID", "organization-control")
+	t.Setenv("ORGANIZATION_WORKLOAD_KEY_FILE", "/run/secrets/workload.pem")
+	t.Setenv("ORGANIZATION_WORKLOAD_TOKEN_URL", "http://kernel:8080/realms/scnehaux/protocol/openid-connect/token")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Delivery.Targets) != 1 || cfg.Delivery.Targets[0].Consumer != "identity-control" ||
+		cfg.Delivery.Targets[0].Endpoint != "https://identity-control.internal/v1/deliveries" {
+		t.Errorf("targets read as %+v", cfg.Delivery.Targets)
+	}
+}
+
+func TestAMalformedDeliveryTargetIsRefused(t *testing.T) {
+	for _, raw := range []string{
+		"identity-control",
+		"=https://x",
+		"identity-control=/relative",
+		"identity-control=ftp://x",
+		"a=https://x,a=https://y",
+	} {
+		required(t)
+		t.Setenv("ORGANIZATION_DELIVERY_TARGETS", raw)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ORGANIZATION_DELIVERY_TARGETS") {
+			t.Errorf("%q answered %v", raw, err)
+		}
+	}
+}
+
+// The dispatchers deliver with the dispatch role's privileges and no other pool's.
+func TestADispatchCredentialSharedWithAnotherPoolIsRefused(t *testing.T) {
+	required(t)
+	t.Setenv("ORGANIZATION_DISPATCH_DATABASE_URL", "postgres://organization_provider_rt@localhost/control")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ORGANIZATION_DISPATCH_DATABASE_URL") {
+		t.Errorf("a dispatch DSN equal to the provider DSN answered %v", err)
+	}
+}

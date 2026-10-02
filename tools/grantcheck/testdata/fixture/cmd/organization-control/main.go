@@ -6,6 +6,7 @@ import (
 	"github.com/anshacerbia2/organization-control/internal/access"
 	"github.com/anshacerbia2/organization-control/internal/authority"
 	"github.com/anshacerbia2/organization-control/internal/db"
+	"github.com/anshacerbia2/organization-control/internal/delivery"
 	"github.com/anshacerbia2/organization-control/internal/projection"
 )
 
@@ -22,4 +23,7 @@ func main() {
 	_ = records.EmergencyGrants(context.Background())
 	_ = records.ConsumerFor(context.Background())
 	_ = grants.Bootstrap(context.Background())
+
+	// The dispatchers' registration check, on the dispatch pool: out of the tool's scope.
+	_ = delivery.Run(context.Background(), nil)
 }

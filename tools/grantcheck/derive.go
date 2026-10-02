@@ -94,6 +94,24 @@ var boundaries = map[string][]string{
 	"(*" + module + "/internal/authority.Grants).Bootstrap": {providerRole},
 }
 
+// outOfScope run as a role this tool does not verify, with the reason. Their statements are neither
+// attributed nor reported. A function listed here must exist, or the table is stale.
+var outOfScope = map[string]string{
+	// internal/delivery runs on the dispatch pool, as organization_dispatch_rt (ADR-GLB-018 §5.4).
+	// The dispatcher's own statements are foundation-platform's; this is the registration check it
+	// makes before starting. dispatch_role_integration_test.go measures that role's privileges.
+	module + "/internal/delivery.checkRegistered": "organization_dispatch_rt",
+}
+
+func outsideScope(fn *ssa.Function) bool {
+	for f := fn; f != nil; f = f.Parent() {
+		if _, ok := outOfScope[f.String()]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // Statement is one SQL constant and where it was reached.
 type Statement struct {
 	SQL   string
@@ -145,6 +163,11 @@ func derive(dir string, patterns ...string) (*Derivation, error) {
 	for name := range boundaries {
 		if byName[name] == nil {
 			d.problem("boundary %s is declared but does not exist; this tool's table is stale", name)
+		}
+	}
+	for name := range outOfScope {
+		if byName[name] == nil {
+			d.problem("out-of-scope function %s is declared but does not exist; this tool's table is stale", name)
 		}
 	}
 
@@ -199,7 +222,7 @@ func derive(dir string, patterns ...string) (*Derivation, error) {
 
 	// SQL no root reaches, and raw transactions nobody declared.
 	for fn := range all {
-		if !ownedByModule(fn) {
+		if !ownedByModule(fn) || outsideScope(fn) {
 			continue
 		}
 		if len(reached[fn]) == 0 {

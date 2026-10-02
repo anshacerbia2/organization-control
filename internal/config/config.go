@@ -9,6 +9,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -100,10 +101,63 @@ type Config struct {
 	// default: an activation waits for another holder's approval. optional is refused in production.
 	ProviderActivationApproval bool
 
+	// Delivery is the consumers this service runs a dispatcher for, and what those dispatchers
+	// need (ADR-GLB-018 §5.4, TDD-organization-control-005 §Technical Context). Empty Targets runs
+	// none.
+	Delivery Delivery
+
 	// OTLPEndpoint is the OpenTelemetry Collector's OTLP/HTTP base URL. A deployment sets it; unset,
 	// the process exports nothing and says so at startup, and the absent-telemetry alert fires
 	// (TDD-foundation-platform-002 §Configuration).
 	OTLPEndpoint string
+}
+
+// DeliveryTarget is one consumer's acceptance API.
+type DeliveryTarget struct {
+	Consumer string
+	Endpoint string
+}
+
+// Delivery configures the in-process dispatchers.
+type Delivery struct {
+	Targets []DeliveryTarget
+
+	// DispatchDSN connects as a login role inheriting organization_dispatch_rt.
+	DispatchDSN string
+
+	// The workload client the dispatchers authenticate as, with private_key_jwt.
+	WorkloadClientID string
+	WorkloadKeyFile  string
+	WorkloadTokenURL string
+
+	Timeout       time.Duration
+	RetryInterval time.Duration
+}
+
+// parseTargets reads consumer=url pairs separated by commas.
+func parseTargets(raw string) ([]DeliveryTarget, error) {
+	var targets []DeliveryTarget
+	seen := map[string]bool{}
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		consumer, endpoint, ok := strings.Cut(pair, "=")
+		consumer, endpoint = strings.TrimSpace(consumer), strings.TrimSpace(endpoint)
+		parsed, err := url.Parse(endpoint)
+		switch {
+		case !ok || consumer == "" || endpoint == "":
+			return nil, fmt.Errorf("ORGANIZATION_DELIVERY_TARGETS entry %q is not consumer=url", pair)
+		case err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http"):
+			return nil, fmt.Errorf("ORGANIZATION_DELIVERY_TARGETS entry for %s is not an absolute http(s) URL", consumer)
+		case seen[consumer]:
+			return nil, fmt.Errorf("ORGANIZATION_DELIVERY_TARGETS names %s twice; a consumer has one acceptance API", consumer)
+		}
+		seen[consumer] = true
+		targets = append(targets, DeliveryTarget{Consumer: consumer, Endpoint: endpoint})
+	}
+	return targets, nil
 }
 
 // Load reads the environment and reports every problem at once.
@@ -258,6 +312,42 @@ func Load() (Config, error) {
 		}
 	default:
 		problems = append(problems, fmt.Errorf("ORGANIZATION_PROVIDER_ACTIVATION_APPROVAL is %q; it is required or optional", approval))
+	}
+
+	// The in-process dispatchers (ADR-GLB-018 §5.4). Nothing is required while no target is named:
+	// a deployment that delivers to no consumer needs no dispatch credential and no workload key.
+	targets, err := parseTargets(os.Getenv("ORGANIZATION_DELIVERY_TARGETS"))
+	if err != nil {
+		problems = append(problems, err)
+	}
+	cfg.Delivery = Delivery{
+		Targets:          targets,
+		DispatchDSN:      strings.TrimSpace(os.Getenv("ORGANIZATION_DISPATCH_DATABASE_URL")),
+		WorkloadClientID: strings.TrimSpace(os.Getenv("ORGANIZATION_WORKLOAD_CLIENT_ID")),
+		WorkloadKeyFile:  strings.TrimSpace(os.Getenv("ORGANIZATION_WORKLOAD_KEY_FILE")),
+		WorkloadTokenURL: strings.TrimSpace(os.Getenv("ORGANIZATION_WORKLOAD_TOKEN_URL")),
+		Timeout:          durationOr("ORGANIZATION_DELIVERY_TIMEOUT", 5*time.Second, &problems),
+		RetryInterval:    durationOr("ORGANIZATION_DELIVERY_RETRY_INTERVAL", time.Minute, &problems),
+	}
+	if len(targets) > 0 {
+		for name, value := range map[string]string{
+			"ORGANIZATION_DISPATCH_DATABASE_URL": cfg.Delivery.DispatchDSN,
+			"ORGANIZATION_WORKLOAD_CLIENT_ID":    cfg.Delivery.WorkloadClientID,
+			"ORGANIZATION_WORKLOAD_KEY_FILE":     cfg.Delivery.WorkloadKeyFile,
+			"ORGANIZATION_WORKLOAD_TOKEN_URL":    cfg.Delivery.WorkloadTokenURL,
+		} {
+			if value == "" {
+				problems = append(problems, fmt.Errorf("%s is required while ORGANIZATION_DELIVERY_TARGETS names a consumer", name))
+			}
+		}
+	}
+	// The dispatch credential is its own, for the reason the resolution one is: a dispatcher on
+	// another pool's role would deliver with that role's privileges.
+	if dsn := cfg.Delivery.DispatchDSN; dsn != "" &&
+		(dsn == cfg.TenantDSN || dsn == cfg.ProviderDSN || dsn == cfg.ResolutionDSN || dsn == cfg.ConsumerDSN) {
+		problems = append(problems, errors.New(
+			"ORGANIZATION_DISPATCH_DATABASE_URL matches another pool's DSN, so the dispatchers would deliver "+
+				"with that pool's privileges rather than the dispatch role's"))
 	}
 
 	if len(problems) > 0 {

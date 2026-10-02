@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 2.1.0
+  version: 2.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -88,8 +88,26 @@ snapshot taken after the event.
 
 Membership security events reach the consumer through `platform.outbox` and a dispatcher that
 delivers over HTTP: the Direct Durable Delivery profile of ADR-GLB-016. One dispatcher runs per
-consumer and claims that consumer's deliveries alone (`ADR-GLB-018 §5.4`). foundation-reference's
-runs in `foundation-reference`, because ADR-ORG-001 §5.4 forbids outbound HTTP from this service.
+consumer and claims that consumer's deliveries alone (`ADR-GLB-018 §5.4`).
+
+**This service runs its consumers' dispatchers** (`ADR-GLB-018 §5.4`, Organization Control SAD
+§4.5). Each consumer named in `ORGANIZATION_DELIVERY_TARGETS` gets one dispatcher in this process.
+It runs on the dispatch role's own credential, posts to that consumer's acceptance API with
+foundation-platform's `outbox/httpdelivery`, and authenticates as this service's workload with an
+access token from `clientauth`. No consumer holds a credential to this database, and no shared
+secret authenticates the delivery (`STD-IAM-001 §3`).
+
+- **A target waits for its registration.** A dispatcher starts only once its consumer is an active
+  registered consumer, which it checks on the dispatch role. Until then, and after any failure of
+  the dispatcher itself, it logs the reason and checks again after
+  `ORGANIZATION_DELIVERY_RETRY_INTERVAL`. A consumer is often registered after this service is
+  deployed, and a misconfigured target must not stop the control plane from serving.
+- **The outbound calls are these two and no others.** The consumers' acceptance APIs, and the
+  kernel's token endpoint for the workload token. The `net/http` denial in `arch.json` and
+  `internal/httpapi`'s outbound walk still hold for every package of this repository: the clients
+  are foundation-platform's, built in `internal/delivery`.
+- **foundation-reference's dispatcher** still runs in `foundation-reference`, for the reference
+  consumer and its system proof, until it moves here (`ADR-GLB-018` Alternative G).
 
 Security events travel in the priority lane. The dispatcher dead-letters one only when the
 consumer refuses it permanently (`400`, `409`, `422`), which makes it poison. An unreachable
@@ -111,6 +129,7 @@ repository applies that schema and owns the grants on it, which is why the privi
 | Component | Responsibility |
 | :-- | :-- |
 | `outbox.Dispatcher` (foundation-platform) | Claims, delivers, decides retry, release, or dead-letter, and writes the delivery receipt. Verifies its database contract before starting any worker and refuses to start when it is unmet. |
+| `internal/delivery` | Runs one dispatcher per configured consumer in this process, once that consumer is registered, with `outbox/httpdelivery` as its publisher and a `clientauth` workload token as its credential. |
 | `dispatch.HTTPPublisher` (foundation-reference) | Delivers one envelope. Classifies `400`/`409`/`422` as poison and everything else as unavailable. Takes the evidence class from the consumer's reply rather than from its own judgement. |
 | Delivery intake (foundation-reference) | Applies the event, then emits the application receipt on exactly the paths where the assertion holds. |
 | `projection.FrontierReader` | Reports publication facts and unresolved security debt. Computes no verdict. |
@@ -590,6 +609,10 @@ to declare authority delivered without evidence, the one thing this design refus
 
 | Setting | Effect |
 | :-- | :-- |
+| `ORGANIZATION_DELIVERY_TARGETS` | The consumers this service delivers to, as `consumer=https://acceptance-url` pairs separated by commas. Empty runs no dispatcher. Each name must be a registered consumer, and its dispatcher waits until it is. |
+| `ORGANIZATION_DISPATCH_DATABASE_URL` | Required with targets. A login role inheriting `organization_dispatch_rt`, as its own pool. Refused when it equals another pool's DSN. |
+| `ORGANIZATION_WORKLOAD_CLIENT_ID`, `ORGANIZATION_WORKLOAD_KEY_FILE`, `ORGANIZATION_WORKLOAD_TOKEN_URL` | Required with targets. This service's workload client in the kernel, its private key file (RSA, at least 3072 bits), and the token endpoint at the address this process reaches. The assertion's audience is `ORGANIZATION_TOKEN_ISSUER`. |
+| `ORGANIZATION_DELIVERY_TIMEOUT`, `ORGANIZATION_DELIVERY_RETRY_INTERVAL` | One publication's bound (default `5s`), and how long a target waits before checking its registration again or restarting its dispatcher (default `1m`). |
 | `ORGANIZATION_RESOLUTION_DATABASE_URL` | Required, with no fallback. The credential of a login role that inherits `organization_resolution_rt`, opened as its own pool of two connections. Refused at startup when it equals the provider or tenant DSN: a resolution credential shared with another pool would give that pool the power to close incidents. |
 | `DISPATCH_CONSUMER_NAME` (foundation-reference) | The consumer's name, not its endpoint. Each consumer runs its own dispatcher under its own name, and that dispatcher claims only the deliveries owed to that name. Delivery receipts are keyed by it, and the resolution predicate asks whether a specific consumer holds a specific event. An endpoint cannot answer that, because an endpoint moves and the identity does not. The dispatch role may read `consumer_id` and `retired_at` of `projection.consumer`, so the dispatcher can refuse to start when this name is not an active registered consumer. Without that check, a mismatch produced receipts no resolution reads, found only when an incident could not be closed. |
 | `REFERENCE_CONSUMER_NAME` (foundation-reference) | The consumer's own identity for its inbox guard. It must equal the above and the name registered with this service. |
@@ -640,6 +663,10 @@ test red, not assumed to.
 | A superseded delivery carries no application receipt | `foundation-reference/internal/httpapi/receipt_test.go`; CI mutation |
 | Applied evidence cannot be claimed without the consumer's marker | `foundation-platform/outbox/receipt_integration_test.go`; CI mutation |
 | A dispatcher whose database contract is unmet refuses to start | `foundation-platform/outbox/preflight_integration_test.go` |
+| The in-process dispatcher waits for its consumer's registration, never starts on a failed check, restarts after it stops, and one target's failure stops no other | `internal/delivery/delivery_test.go` |
+| A delivery target needs the dispatch credential and the workload client, a malformed target is refused, and a dispatch DSN shared with another pool is refused | `internal/config/config_test.go` |
+| The dispatch role can run the registration check the dispatcher makes | `internal/controldb/dispatch_role_integration_test.go` `TestTheDispatchRoleCanCheckItsOwnRegistration` |
+| A delivery authenticates with the workload token, a 401 drops it, and a delivery is never sent without one | `foundation-platform/outbox/httpdelivery/publisher_test.go` |
 | A dead letter retains enough to replay itself | `foundation-platform/outbox/replay_integration_test.go`; CI mutation |
 | `dead_lettered_at` names the transition, not the transaction start | `foundation-platform/outbox/temporal_integration_test.go`; CI mutation |
 
