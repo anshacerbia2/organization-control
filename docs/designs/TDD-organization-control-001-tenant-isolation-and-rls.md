@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.12.0
+  version: 1.13.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -438,6 +438,9 @@ POST  /v1/provider-grants/{grant_id}/revoke
 
 Each is a provider route: it needs a provider caller and `X-Administrative-Reason`, and runs in
 the provider scope, so the access record names the actor and the reason before the work runs.
+The reason is visible US-ASCII on every route: a value holding any other octet is refused with
+`400` before a handler reads it (STD-GLB-001 §Request Header Values, RFC 9110 §5.5), because such
+octets carry no encoding the access record could rely on.
 The reason is also the grant's or the revocation's own. A grant names the calling provider as
 `granted_by`; a revocation names it as `revoked_by`.
 
