@@ -54,9 +54,13 @@ var AuthorityEventTypes = []string{
 }
 
 // SubscribableEventTypes are the types a projection consumer may subscribe to at registration: the
-// authority a projection carries. A type outside it is refused, so a misspelt type is an answer at
-// registration rather than a subscription nothing ever matches.
-var SubscribableEventTypes = AuthorityEventTypes
+// authority a projection carries, and the repair a reconciliation publishes when it finds the
+// projection wrong (ReconciledEventType). A type outside it is refused, so a misspelt type is an
+// answer at registration rather than a subscription nothing ever matches.
+//
+// The repair is subscribable and is not authority debt: a dead-lettered repair leaves the drift it
+// was correcting, which the next sweep finds and publishes again.
+var SubscribableEventTypes = append(append([]string(nil), AuthorityEventTypes...), ReconciledEventType)
 
 // Frontier is the answer, as facts.
 type Frontier struct {

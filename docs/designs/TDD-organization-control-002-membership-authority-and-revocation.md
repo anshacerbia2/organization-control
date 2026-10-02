@@ -269,8 +269,10 @@ progress against, which no sequence of correct operations produces.
 
 **A consumer subscribes to the event types it applies** (`ADR-GLB-018 §5.1`). Registration
 names them in `event_types`, and each must be one this registry offers:
-`projection.SubscribableEventTypes`, the eight Membership and Tenant types a projection's
-authority depends on. The subscription is recorded with foundation-platform's `outbox.Subscribe`,
+`projection.SubscribableEventTypes`: the eight Membership and Tenant types a projection's
+authority depends on, and `projection.repair.reconciled`, which a reconciliation publishes when it
+finds the projection wrong. A consumer that does not subscribe to the repair never receives one, so
+its drift is corrected only by its next bootstrap. The subscription is recorded with foundation-platform's `outbox.Subscribe`,
 in `platform.subscription`, inside the registering transaction. From its commit, every event of
 those types owes the consumer a delivery of its own, with its own attempts, receipt and dead
 letter. A type it does not subscribe to is never delivered to it, so it cannot be refused there as
