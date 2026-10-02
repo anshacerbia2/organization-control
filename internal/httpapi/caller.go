@@ -43,7 +43,19 @@ type Caller struct {
 	// A boolean rather than a role list because this package makes no authorization decision: it
 	// asks which isolation scope applies. Whether this caller holds provider authority at all was
 	// decided before the value was set.
+	//
+	// It is authority in force: an emergency grant, or an approved activation of an eligible grant
+	// that has not ended (ADR-ORG-002).
 	Provider bool
+
+	// Eligible is a provider grant holder with no authority in force. It resolves to the provider
+	// scope, so the access record names it, and reaches the activation routes alone; every other
+	// route refuses it before a transaction opens, and requireProvider refuses it on any.
+	Eligible bool
+
+	// Emergency is authority from an emergency grant. Every request it authorizes is reported
+	// (ADR-ORG-002 §5.2).
+	Emergency bool
 }
 
 type callerKey struct{}
@@ -138,7 +150,7 @@ func resolve(caller Caller, correlation id.UUID) (db.Scope, error) {
 		return db.ConsumerScope(caller.Subject, correlation)
 	}
 
-	if caller.Provider {
+	if caller.Provider || caller.Eligible {
 		// A provider caller carrying a Tenant is refused rather than narrowed to it. The two
 		// readings — cross-Tenant authority, or authority over that one Tenant — differ in the
 		// permissive direction, and picking one silently means the caller and the service disagree

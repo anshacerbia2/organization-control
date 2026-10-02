@@ -84,8 +84,11 @@ var boundaries = map[string][]string{
 	// projection.NewSignalsReader(providerConns), read by the enforcement gauges on each collection.
 	"(*" + module + "/internal/projection.SignalsReader).Read": {providerRole},
 	// authority.NewReader(providerConns), the caller records authentication reads for each request.
-	"(*" + module + "/internal/authority.Reader).ProviderGrant": {providerRole},
-	"(*" + module + "/internal/authority.Reader).ConsumerFor":   {providerRole},
+	"(*" + module + "/internal/authority.Reader).ProviderStanding": {providerRole},
+	// Read once at startup, to report a production deployment holding fewer than two emergency
+	// grants (ADR-ORG-002 §5.2).
+	"(*" + module + "/internal/authority.Reader).EmergencyGrants": {providerRole},
+	"(*" + module + "/internal/authority.Reader).ConsumerFor":     {providerRole},
 	// authority.NewGrants(conns) in cmd/organization-control/bootstrap.go, on
 	// ORGANIZATION_PROVIDER_DATABASE_URL: the bootstrap that makes the first provider grant.
 	"(*" + module + "/internal/authority.Grants).Bootstrap": {providerRole},

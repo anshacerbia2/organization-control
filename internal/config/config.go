@@ -89,6 +89,17 @@ type Config struct {
 
 	LogLevel string
 
+	// Production is ORGANIZATION_ENVIRONMENT=production, the default.
+	Production bool
+
+	// ProviderActivationMax is ORGANIZATION_PROVIDER_ACTIVATION_MAX, the longest provider
+	// activation a request may ask for (ADR-ORG-002 §5.1).
+	ProviderActivationMax time.Duration
+
+	// ProviderActivationApproval is ORGANIZATION_PROVIDER_ACTIVATION_APPROVAL=required, the
+	// default: an activation waits for another holder's approval. optional is refused in production.
+	ProviderActivationApproval bool
+
 	// OTLPEndpoint is the OpenTelemetry Collector's OTLP/HTTP base URL. A deployment sets it; unset,
 	// the process exports nothing and says so at startup, and the absent-telemetry alert fires
 	// (TDD-foundation-platform-002 §Configuration).
@@ -221,6 +232,32 @@ func Load() (Config, error) {
 				"ORGANIZATION_PROVISIONING_TIMEOUT (%s), so a request would stay `requested` well past "+
 				"the age at which its outcome is meant to be declared unknown",
 			cfg.ProvisioningReconcileInterval, cfg.ProvisioningTimeout))
+	}
+
+	switch environment := stringOr("ORGANIZATION_ENVIRONMENT", "production"); environment {
+	case "production":
+		cfg.Production = true
+	case "non-production":
+	default:
+		problems = append(problems, fmt.Errorf("ORGANIZATION_ENVIRONMENT is %q; it is production or non-production", environment))
+	}
+	cfg.ProviderActivationMax = durationOr("ORGANIZATION_PROVIDER_ACTIVATION_MAX", 8*time.Hour, &problems)
+	if cfg.ProviderActivationMax > 24*time.Hour {
+		problems = append(problems, errors.New(
+			"ORGANIZATION_PROVIDER_ACTIVATION_MAX exceeds 24h, the longest activation Entra PIM allows (ADR-ORG-002 §5.1)"))
+	}
+	switch approval := stringOr("ORGANIZATION_PROVIDER_ACTIVATION_APPROVAL", "required"); approval {
+	case "required":
+		cfg.ProviderActivationApproval = true
+	case "optional":
+		// Outside production only: in production an activation is approved by another provider
+		// (ADR-ORG-002 §5.1), and a setting that removed that would be the control turned off.
+		if cfg.Production {
+			problems = append(problems, errors.New(
+				"ORGANIZATION_PROVIDER_ACTIVATION_APPROVAL=optional is refused in production"))
+		}
+	default:
+		problems = append(problems, fmt.Errorf("ORGANIZATION_PROVIDER_ACTIVATION_APPROVAL is %q; it is required or optional", approval))
 	}
 
 	if len(problems) > 0 {

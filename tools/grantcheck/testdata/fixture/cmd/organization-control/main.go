@@ -18,7 +18,8 @@ func main() {
 
 	// The caller records and the bootstrap, as the real composition root builds them.
 	records, grants := &authority.Reader{}, &authority.Grants{}
-	_ = records.ProviderGrant(context.Background())
+	_ = records.ProviderStanding(context.Background())
+	_ = records.EmergencyGrants(context.Background())
 	_ = records.ConsumerFor(context.Background())
 	_ = grants.Bootstrap(context.Background())
 }

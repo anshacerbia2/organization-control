@@ -193,6 +193,16 @@ var mapping = []struct {
 	// StateTransitionRefused: the request is well formed, and the estate refuses it until another
 	// provider holds a grant. The refusal says so.
 	{authority.ErrLastGrant, platform.StateTransitionRefused},
+	{authority.ErrActivationInvalid, platform.ValidationFailed},
+	{authority.ErrActivationTooLong, platform.ValidationFailed},
+	{authority.ErrEmergencyGrant, platform.StateTransitionRefused},
+	{authority.ErrNotHolder, platform.Forbidden},
+	{authority.ErrActivationInForce, platform.StateTransitionRefused},
+	{authority.ErrActivationPending, platform.StateTransitionRefused},
+	{authority.ErrActivationNotFound, platform.NotFound},
+	{authority.ErrActivationDecided, platform.StateTransitionRefused},
+	{authority.ErrSelfApproval, platform.Forbidden},
+	{authority.ErrActivationNotInForce, platform.StateTransitionRefused},
 	{context.ErrNotRegistered, platform.Forbidden},
 	{context.ErrRequestRequired, platform.ValidationFailed},
 }

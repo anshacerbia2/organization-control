@@ -82,15 +82,15 @@ func newID(t *testing.T) id.UUID {
 func emptyGrants(t *testing.T, ctx context.Context, owner *fdb.Pool) {
 	t.Helper()
 	type row struct {
-		grantID, principal, scope, reason string
-		grantedBy, operator               *string
-		grantedAt                         time.Time
-		revokedAt                         *time.Time
-		revokedBy, revokeReason           *string
+		grantID, principal, scope, reason, kind string
+		grantedBy, operator                     *string
+		grantedAt                               time.Time
+		revokedAt                               *time.Time
+		revokedBy, revokeReason                 *string
 	}
 	var saved []row
 	if err := owner.InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT grant_id::text, principal_id::text, scope, reason,
+		rows, err := tx.Query(ctx, `SELECT grant_id::text, principal_id::text, scope, reason, kind,
 		    granted_by::text, bootstrap_operator, granted_at, revoked_at, revoked_by::text, revoke_reason
 		    FROM organization.provider_grant`)
 		if err != nil {
@@ -99,7 +99,7 @@ func emptyGrants(t *testing.T, ctx context.Context, owner *fdb.Pool) {
 		defer rows.Close()
 		for rows.Next() {
 			var r row
-			if err := rows.Scan(&r.grantID, &r.principal, &r.scope, &r.reason, &r.grantedBy, &r.operator, &r.grantedAt,
+			if err := rows.Scan(&r.grantID, &r.principal, &r.scope, &r.reason, &r.kind, &r.grantedBy, &r.operator, &r.grantedAt,
 				&r.revokedAt, &r.revokedBy, &r.revokeReason); err != nil {
 				return err
 			}
@@ -109,15 +109,18 @@ func emptyGrants(t *testing.T, ctx context.Context, owner *fdb.Pool) {
 	}); err != nil {
 		t.Fatalf("save the grants: %v", err)
 	}
+	// Activations name their grant, so they go first; no test leaves one another test needs.
+	exec(t, ctx, owner, `DELETE FROM organization.provider_activation`)
 	exec(t, ctx, owner, `DELETE FROM organization.provider_grant`)
 	t.Cleanup(func() {
+		exec(t, context.Background(), owner, `DELETE FROM organization.provider_activation`)
 		exec(t, context.Background(), owner, `DELETE FROM organization.provider_grant`)
 		for _, r := range saved {
 			exec(t, context.Background(), owner, `INSERT INTO organization.provider_grant
-			    (grant_id, principal_id, scope, reason, granted_by, bootstrap_operator, granted_at,
+			    (grant_id, principal_id, scope, reason, kind, granted_by, bootstrap_operator, granted_at,
 			     revoked_at, revoked_by, revoke_reason)
-			    VALUES ($1, $2, $3, $4, $5::uuid, $6, $7, $8, $9::uuid, $10)`,
-				r.grantID, r.principal, r.scope, r.reason, r.grantedBy, r.operator, r.grantedAt,
+			    VALUES ($1, $2, $3, $4, $5, $6::uuid, $7, $8, $9, $10::uuid, $11)`,
+				r.grantID, r.principal, r.scope, r.reason, r.kind, r.grantedBy, r.operator, r.grantedAt,
 				r.revokedAt, r.revokedBy, r.revokeReason)
 		}
 	})
@@ -140,10 +143,11 @@ func TestTheBootstrapMakesTheFirstGrantOnce(t *testing.T) {
 	if err != nil || grant.Existing || grant.Principal != first || grant.Scope != Scope {
 		t.Fatalf("the first bootstrap answered %+v, %v", grant, err)
 	}
-	if granted, err := records.ProviderGrant(ctx, first); err != nil || !granted {
-		t.Errorf("the bootstrapped Principal reads as granted=%t, %v", granted, err)
+	// The bootstrap grant is an emergency grant: in force without an activation (ADR-ORG-002 §5.2).
+	if standing, err := records.ProviderStanding(ctx, first); err != nil || !standing.Holder || !standing.InForce || !standing.Emergency {
+		t.Errorf("the bootstrapped Principal reads as %+v, %v", standing, err)
 	}
-	if granted, err := records.ProviderGrant(ctx, other); err != nil || granted {
+	if granted, err := holderOf(ctx, records, other); err != nil || granted {
 		t.Errorf("another Principal reads as granted=%t, %v", granted, err)
 	}
 
@@ -244,4 +248,10 @@ func TestAConsumerIsFoundByItsPrincipalWhileActive(t *testing.T) {
 	if found, err := records.ConsumerFor(ctx, workload); err != nil || found != "" {
 		t.Errorf("a retired consumer reads as %q, %v; retiring it ends its authority", found, err)
 	}
+}
+
+// holderOf reports whether the Principal holds an unrevoked grant, of either kind.
+func holderOf(ctx context.Context, records *Reader, principal id.UUID) (bool, error) {
+	standing, err := records.ProviderStanding(ctx, principal)
+	return standing.Holder, err
 }

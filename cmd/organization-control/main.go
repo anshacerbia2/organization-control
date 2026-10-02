@@ -271,6 +271,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("provider grant administration: %w", err)
 	}
+	providerActivations, err := authority.NewActivations(providerPool, authority.ActivationPolicy{
+		Max: cfg.ProviderActivationMax, ApprovalRequired: cfg.ProviderActivationApproval})
+	if err != nil {
+		return fmt.Errorf("provider activations: %w", err)
+	}
 
 	// A registered consumer's own routes, on its own connections and its own role. Built only when
 	// the consumer credential is configured, which is what enables consumer authority: without the
@@ -320,9 +325,10 @@ func run() error {
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 			Replayer: replayer, Resolver: resolver,
-			ProviderGrants: providerGrants,
-			Frontier:       frontier,
-			Consumer:       consumerServices,
+			ProviderGrants:      providerGrants,
+			ProviderActivations: providerActivations,
+			Frontier:            frontier,
+			Consumer:            consumerServices,
 		},
 		Database:         tenantConns,
 		Telemetry:        telemetry,
@@ -348,8 +354,19 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("caller records: %w", err)
 	}
+	// Fewer than two emergency grants in production is a lockout waiting for one absence: they are
+	// how a deployment that requires approval stays administrable (ADR-ORG-002 §5.2).
+	if cfg.Production {
+		if count, err := records.EmergencyGrants(ctx); err != nil {
+			logger.Error("emergency grants could not be counted", slog.String("error", err.Error()))
+		} else if count < 2 {
+			logger.Warn("fewer than two emergency provider grants in production; grant another with kind emergency",
+				slog.Int("emergency_grants", count))
+		}
+	}
 	authenticationConfig := httpapi.AuthenticationConfig{
 		Records:   records,
+		Logger:    logger,
 		Consumers: consumerServices != nil,
 	}
 

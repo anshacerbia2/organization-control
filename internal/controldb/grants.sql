@@ -26,6 +26,7 @@ BEGIN
               ('organization.organization'),
               ('organization.external_reference'),
               ('organization.provider_grant'),
+              ('organization.provider_activation'),
               ('tenant.tenant'),
               ('tenant.provisioning_request'),
               ('tenant.tenant_event'),
@@ -193,6 +194,13 @@ GRANT SELECT, INSERT, UPDATE ON organization.organization TO organization_provid
 -- (ADR-ORG-001 §5.11). The revocation's FOR UPDATE lock needs the column privilege as well.
 GRANT SELECT, INSERT ON organization.provider_grant TO organization_provider_rt;
 GRANT UPDATE (revoked_at, revoked_by, revoke_reason) ON organization.provider_grant TO organization_provider_rt;
+
+-- organization.provider_activation -- provider only: SELECT for the authority read every request
+-- makes, INSERT for a request, and UPDATE on the decision and end columns alone (ADR-ORG-002). Who
+-- asked, for which grant, for how long and why is never rewritten, and nothing deletes one.
+GRANT SELECT, INSERT ON organization.provider_activation TO organization_provider_rt;
+GRANT UPDATE (decided_by, decision, decision_reason, decided_at, ends_at, ended_by, end_reason, ended_at)
+    ON organization.provider_activation TO organization_provider_rt;
 
 -- projection.consumer -- provider only: the consumer registry, progress reports, the snapshot
 -- mark, and the fresh check's metering. The resolver reads it through its own role, below.

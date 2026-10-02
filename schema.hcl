@@ -228,6 +228,13 @@ table "provider_grant" {
     null = true
     type = text
   }
+  // eligible: authority only while an approved activation lasts; emergency: standing, few, watched
+  // (ADR-ORG-002 §5.1, §5.2). Fixed when the grant is made.
+  column "kind" {
+    null    = false
+    type    = text
+    default = "eligible"
+  }
 
   primary_key {
     columns = [column.grant_id]
@@ -262,6 +269,129 @@ table "provider_grant" {
   }
   check "provider_grant_revocation_check" {
     expr = "((revoked_at IS NULL) = (revoked_by IS NULL)) AND ((revoked_at IS NULL) = (revoke_reason IS NULL)) AND ((revoke_reason IS NULL) OR (btrim(revoke_reason) <> ''))"
+  }
+  check "provider_grant_kind_check" {
+    expr = "kind IN ('eligible', 'emergency')"
+  }
+}
+
+table "provider_activation" {
+  schema  = schema.organization
+  comment = "An activation of an eligible provider grant: requested, decided, and ended. ADR-ORG-002."
+
+  column "activation_id" {
+    null = false
+    type = uuid
+  }
+  column "grant_id" {
+    null = false
+    type = uuid
+  }
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+  column "scope" {
+    null = false
+    type = text
+  }
+  column "reason" {
+    null = false
+    type = text
+  }
+  column "duration_seconds" {
+    null = false
+    type = integer
+  }
+  // Fixed when requested, from the deployment's setting, so the row states the rule it was held to.
+  column "approval_required" {
+    null = false
+    type = boolean
+  }
+  column "requested_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "decided_by" {
+    null = true
+    type = uuid
+  }
+  column "decision" {
+    null = true
+    type = text
+  }
+  column "decision_reason" {
+    null = true
+    type = text
+  }
+  column "decided_at" {
+    null = true
+    type = timestamptz
+  }
+  column "ends_at" {
+    null = true
+    type = timestamptz
+  }
+  column "ended_by" {
+    null = true
+    type = uuid
+  }
+  column "end_reason" {
+    null = true
+    type = text
+  }
+  column "ended_at" {
+    null = true
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.activation_id]
+  }
+
+  foreign_key "provider_activation_grant_id_fkey" {
+    columns     = [column.grant_id]
+    ref_columns = [table.provider_grant.column.grant_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  // One pending request per grant.
+  index "provider_activation_pending" {
+    unique  = true
+    columns = [column.grant_id]
+    where   = "decision IS NULL"
+  }
+
+  // The per-request read of an activation in force, by Principal and scope.
+  index "provider_activation_principal" {
+    columns = [column.principal_id, column.scope]
+    where   = "decision = 'approved' AND ended_at IS NULL"
+  }
+
+  check "provider_activation_reason_check" {
+    expr = "btrim(reason) <> ''"
+  }
+  check "provider_activation_duration_check" {
+    expr = "duration_seconds > 0"
+  }
+  check "provider_activation_decision_value_check" {
+    expr = "decision IN ('approved', 'denied', 'lapsed')"
+  }
+  check "provider_activation_decision_check" {
+    expr = "((decision IS NULL) = (decided_at IS NULL)) AND ((decision IS NULL) OR (decision = 'lapsed') OR (decided_by IS NOT NULL))"
+  }
+  check "provider_activation_window_check" {
+    expr = "(decision = 'approved') = (ends_at IS NOT NULL)"
+  }
+  // NIST AC-5 in the database: an activation that required approval is never recorded approved by
+  // its own holder.
+  check "provider_activation_separation_check" {
+    expr = "(NOT approval_required) OR (decision IS DISTINCT FROM 'approved') OR (decided_by <> principal_id)"
+  }
+  check "provider_activation_end_check" {
+    expr = "((ended_at IS NULL) = (ended_by IS NULL)) AND ((ended_at IS NULL) = (end_reason IS NULL))"
   }
 }
 

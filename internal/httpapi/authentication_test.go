@@ -18,6 +18,8 @@ import (
 
 	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/verify"
+
+	"github.com/anshacerbia2/organization-control/internal/authority"
 )
 
 // The tests below sign real tokens and verify them through a real verifier.
@@ -36,17 +38,28 @@ const (
 	testKeyID    = "test-key"
 )
 
-// fakeRecords answers the two record reads from maps.
+// fakeRecords answers the two record reads from maps. A provider in providers is in force; one in
+// eligible holds a grant with no activation; one in emergency is in force by an emergency grant.
 type fakeRecords struct {
 	providers map[id.UUID]bool
+	eligible  map[id.UUID]bool
+	emergency map[id.UUID]bool
 	consumers map[id.UUID]string
 	err       error
 	reads     int
 }
 
-func (f *fakeRecords) ProviderGrant(_ context.Context, principal id.UUID) (bool, error) {
+func (f *fakeRecords) ProviderStanding(_ context.Context, principal id.UUID) (authority.Standing, error) {
 	f.reads++
-	return f.providers[principal], f.err
+	switch {
+	case f.emergency[principal]:
+		return authority.Standing{Holder: true, InForce: true, Emergency: true}, f.err
+	case f.providers[principal]:
+		return authority.Standing{Holder: true, InForce: true}, f.err
+	case f.eligible[principal]:
+		return authority.Standing{Holder: true}, f.err
+	}
+	return authority.Standing{}, f.err
 }
 
 func (f *fakeRecords) ConsumerFor(_ context.Context, principal id.UUID) (string, error) {
@@ -483,5 +496,74 @@ func TestEnforceModeRefusesATokenNotTypedAtJWT(t *testing.T) {
 	}
 	if _, err := strict.Verify(s.signTyped(t, "at+jwt", claims)); err != nil {
 		t.Errorf("an at+jwt token was refused: %v", err)
+	}
+}
+
+// authenticatedAt is authenticated at a chosen path, for the routes an eligible caller may reach.
+func authenticatedAt(t *testing.T, s signer, cfg AuthenticationConfig, token, path string) (Caller, bool, *httptest.ResponseRecorder) {
+	t.Helper()
+	middleware, err := Authenticate(s.verifier(t), cfg)
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	var (
+		seen   Caller
+		called bool
+	)
+	handler := middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen, called = CallerFrom(r.Context())
+	}))
+	request := httptest.NewRequest(http.MethodPost, path, nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return seen, called, recorder
+}
+
+// An eligible grant holder reaches the activation routes and nothing else (ADR-ORG-002 §5.1).
+func TestAnEligibleHolderReachesOnlyTheActivationRoutes(t *testing.T) {
+	s := newSigner(t)
+	holder := id.MustParse("01a0f64a-c533-7000-a956-c3f095484a10")
+	records := testRecords()
+	records.eligible = map[id.UUID]bool{holder: true}
+	cfg := AuthenticationConfig{Records: records, Consumers: true}
+	token := s.sign(t, providerClaims(holder))
+
+	for _, path := range []string{"/v1/provider-activations", "/v1/provider-activations/" + holder.String() + "/approve"} {
+		caller, called, recorder := authenticatedAt(t, s, cfg, token, path)
+		if !called || !caller.Eligible || caller.Provider {
+			t.Errorf("%s: an eligible holder resolved to %+v (called %t, status %d)", path, caller, called, recorder.Code)
+		}
+	}
+	for _, path := range []string{"/v1/provider-grants", "/v1/tenants", "/v1/provider-activationsx", "/v1/memberships"} {
+		if _, called, recorder := authenticatedAt(t, s, cfg, token, path); called || recorder.Code != http.StatusForbidden {
+			t.Errorf("%s: an eligible holder reached the handler (called %t, status %d), want 403", path, called, recorder.Code)
+		}
+	}
+}
+
+// Every request an emergency grant authorizes is reported (ADR-ORG-002 §5.2).
+func TestAnEmergencyGrantsEveryRequestIsReported(t *testing.T) {
+	s := newSigner(t)
+	breakGlass := id.MustParse("01a0f64a-c533-7000-a956-c3f095484a11")
+	records := testRecords()
+	records.emergency = map[id.UUID]bool{breakGlass: true}
+	var logs bytes.Buffer
+	cfg := AuthenticationConfig{Records: records, Consumers: true,
+		Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))}
+
+	caller, called, _ := authenticated(t, s, cfg, s.sign(t, providerClaims(breakGlass)))
+	if !called || !caller.Provider || !caller.Emergency {
+		t.Fatalf("an emergency grant resolved to %+v", caller)
+	}
+	for _, want := range []string{"a provider acted on an emergency grant", "principal_id=" + breakGlass.String(), "route=/v1/memberships"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("the report lacks %q: %s", want, logs.String())
+		}
+	}
+
+	logs.Reset()
+	if _, _, _ = authenticated(t, s, cfg, s.sign(t, providerClaims(testProvider))); strings.Contains(logs.String(), "emergency") {
+		t.Errorf("an activated provider was reported as emergency: %s", logs.String())
 	}
 }
