@@ -17,6 +17,7 @@ package httpapi
 import (
 	"testing"
 
+	"github.com/anshacerbia2/organization-control/internal/authority"
 	"github.com/anshacerbia2/organization-control/internal/membership"
 	"github.com/anshacerbia2/organization-control/internal/projection"
 	"github.com/anshacerbia2/organization-control/internal/tenant"
@@ -63,13 +64,39 @@ func TestTheFrontierDebtCoversEveryAuthorityEvent(t *testing.T) {
 		}
 	}
 
+	// Every provider grant event: a dead-lettered revocation is provider authority the service
+	// that enforces it still honors (TDD-organization-control-001 §Provider Authority Projection).
+	for _, eventType := range authority.EventTypes {
+		published[string(eventType)] = true
+		if !counted[string(eventType)] {
+			t.Errorf("internal/authority publishes %q and the frontier does not count its dead letters", eventType)
+		}
+	}
+
 	// And the other direction. An event type listed here that nothing publishes is not harmless: it
 	// is a line that looks like coverage, and it hides that the transition it was written for was
 	// renamed rather than removed.
 	for _, eventType := range projection.AuthorityEventTypes {
 		if !published[eventType] {
-			t.Errorf("the frontier counts dead letters for %q and no Membership or Tenant action "+
-				"publishes it", eventType)
+			t.Errorf("the frontier counts dead letters for %q and no Membership, Tenant or provider "+
+				"grant transition publishes it", eventType)
 		}
+	}
+}
+
+// The projection copies two more lists from internal/authority: the provider event types, which earn
+// the provider authority snapshot, and the published scopes, which are what that snapshot returns.
+func TestTheProviderProjectionCopiesMatchAuthority(t *testing.T) {
+	if len(projection.ProviderEventTypes) != len(authority.EventTypes) {
+		t.Fatalf("projection.ProviderEventTypes has %d types and authority publishes %d",
+			len(projection.ProviderEventTypes), len(authority.EventTypes))
+	}
+	for i, eventType := range authority.EventTypes {
+		if projection.ProviderEventTypes[i] != string(eventType) {
+			t.Errorf("projection.ProviderEventTypes[%d] = %q, authority publishes %q", i, projection.ProviderEventTypes[i], eventType)
+		}
+	}
+	if got, want := projection.ProviderSnapshotScopes(), authority.PublishedScopes; len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("the provider authority snapshot returns scopes %v, and authority publishes %v", got, want)
 	}
 }

@@ -269,6 +269,9 @@ func (a *Activations) Request(ctx context.Context, grantID id.UUID, duration tim
 				DecisionApproved, strings.TrimSpace(reason)); err != nil {
 				return err
 			}
+			if err := publish(ctx, tx, grantID, EventActivated); err != nil {
+				return err
+			}
 		}
 		activation, err = readActivation(ctx, tx, activationID)
 		return err
@@ -323,6 +326,11 @@ func (a *Activations) Decide(ctx context.Context, activationID id.UUID, decision
 		if tag.RowsAffected() != 1 {
 			return ErrActivationDecided
 		}
+		if decision == DecisionApproved {
+			if err := publish(ctx, tx, current.Grant, EventActivated); err != nil {
+				return err
+			}
+		}
 		activation, err = readActivation(ctx, tx, activationID)
 		return err
 	})
@@ -362,6 +370,9 @@ func (a *Activations) End(ctx context.Context, activationID id.UUID, providerInF
 		}
 		if tag.RowsAffected() != 1 {
 			return ErrActivationNotInForce
+		}
+		if err := publish(ctx, tx, current.Grant, EventEnded); err != nil {
+			return err
 		}
 		activation, err = readActivation(ctx, tx, activationID)
 		return err

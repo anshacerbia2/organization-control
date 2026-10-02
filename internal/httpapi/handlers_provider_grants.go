@@ -65,6 +65,11 @@ func (h *handlers) listProviderGrants(w http.ResponseWriter, r *http.Request) {
 type grantProviderRequest struct {
 	PrincipalID string `json:"principal_id"`
 
+	// Scope is provider:organization-control or provider:identity-control. Required, with no
+	// default: a grant that does not say what it grants is refused (TDD-organization-control-001
+	// §Provider Authority Projection).
+	Scope string `json:"scope"`
+
 	// Kind is eligible, the default, or emergency (ADR-ORG-002 §5.2).
 	Kind string `json:"kind"`
 }
@@ -86,7 +91,7 @@ func (h *handlers) grantProvider(w http.ResponseWriter, r *http.Request) {
 	if kind == "" {
 		kind = authority.KindEligible
 	}
-	record, err := h.services.ProviderGrants.Grant(r.Context(), principal, kind, reason(r))
+	record, err := h.services.ProviderGrants.Grant(r.Context(), principal, strings.TrimSpace(body.Scope), kind, reason(r))
 	if err != nil {
 		writeError(w, r, err)
 		return

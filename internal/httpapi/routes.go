@@ -239,6 +239,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/progress", h.recordProgress)
 	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/bootstrap", h.bootstrapConsumer)
 	api.HandleFunc("POST /v1/projections/snapshot", h.snapshot)
+	// The provider authority projection, for a consumer subscribed to the provider grant events
+	// (TDD-organization-control-001 §Provider Authority Projection).
+	api.HandleFunc("POST /v1/projections/provider-authority/snapshot", h.providerSnapshot)
 	api.HandleFunc("GET /v1/projections/frontier", h.frontier)
 	api.HandleFunc("POST /v1/projections/reconcile", h.reconcile)
 

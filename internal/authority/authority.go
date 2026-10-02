@@ -26,8 +26,8 @@ import (
 	"github.com/anshacerbia2/organization-control/internal/db"
 )
 
-// Scope is the one registered provider scope this service checks (STD-IAM-002 §3.1.1). The table's
-// check constraint admits it and nothing else.
+// Scope is the provider scope this service checks on its own routes (STD-IAM-002 §3.1.1). Grants
+// of the other registered scopes (Scopes) are recorded here and enforced by the service they name.
 const Scope = "provider:organization-control"
 
 // Reader reads provider grants and consumer registrations.
@@ -47,7 +47,9 @@ func NewReader(tx db.Transactor) (*Reader, error) {
 // (ADR-ORG-002): whether it holds an unrevoked grant, and whether authority is in force, by an
 // emergency grant or by an approved activation that has not ended.
 type Standing struct {
-	// Holder is an unrevoked grant, eligible or emergency.
+	// Holder is an unrevoked grant of any registered scope, eligible or emergency. A holder with no
+	// authority in force here reaches the activation routes alone, which is where a grant of any
+	// scope is activated (TDD-organization-control-001 §Provider Authority Projection).
 	Holder bool
 	// InForce is authority now: an emergency grant, or an activation in force.
 	InForce bool
@@ -59,7 +61,7 @@ type Standing struct {
 // their activations.
 const standingStatement = `SELECT
     EXISTS (SELECT 1 FROM organization.provider_grant g
-            WHERE g.principal_id = $1 AND g.scope = $2 AND g.revoked_at IS NULL),
+            WHERE g.principal_id = $1 AND g.revoked_at IS NULL),
     EXISTS (SELECT 1 FROM organization.provider_grant g
             WHERE g.principal_id = $1 AND g.scope = $2 AND g.revoked_at IS NULL AND g.kind = 'emergency'),
     EXISTS (SELECT 1 FROM organization.provider_activation a
@@ -254,12 +256,12 @@ func (g *Grants) Bootstrap(ctx context.Context, req Bootstrap) (Grant, error) {
 const emergencyCountStatement = `SELECT count(*) FROM organization.provider_grant
 WHERE scope = $1 AND kind = 'emergency' AND revoked_at IS NULL`
 
-// EmergencyGrants counts the unrevoked emergency grants over this service. A production deployment
-// with fewer than two is reported (ADR-ORG-002 §5.2).
-func (r *Reader) EmergencyGrants(ctx context.Context) (int, error) {
+// EmergencyGrants counts the unrevoked emergency grants for the scope. A production deployment with
+// fewer than two for a scope is reported (ADR-ORG-002 §5.2).
+func (r *Reader) EmergencyGrants(ctx context.Context, scope string) (int, error) {
 	var count int
 	if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		return tx.QueryRow(ctx, emergencyCountStatement, Scope).Scan(&count)
+		return tx.QueryRow(ctx, emergencyCountStatement, scope).Scan(&count)
 	}); err != nil {
 		return 0, fmt.Errorf("authority: count emergency grants: %w", err)
 	}

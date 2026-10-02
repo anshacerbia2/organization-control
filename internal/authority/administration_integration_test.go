@@ -61,14 +61,14 @@ func TestAProviderGrantsAndRevokesAnother(t *testing.T) {
 	admin, records, ctx, first := administration(t)
 	second := newID(t)
 
-	granted, err := admin.Grant(ctx, second, KindEligible, "a second operator")
+	granted, err := admin.Grant(ctx, second, Scope, KindEligible, "a second operator")
 	if err != nil || granted.Principal != second || granted.GrantedBy == nil || *granted.GrantedBy != first {
 		t.Fatalf("the grant answered %+v, %v; want granted_by the calling provider", granted, err)
 	}
 	if ok, err := holderOf(ctx, records, second); err != nil || !ok {
 		t.Errorf("the granted Principal reads as granted=%t, %v", ok, err)
 	}
-	if _, err := admin.Grant(ctx, second, KindEligible, "again"); !errors.Is(err, ErrAlreadyGranted) {
+	if _, err := admin.Grant(ctx, second, Scope, KindEligible, "again"); !errors.Is(err, ErrAlreadyGranted) {
 		t.Errorf("a second active grant answered %v, want ErrAlreadyGranted", err)
 	}
 
@@ -88,7 +88,7 @@ func TestAProviderGrantsAndRevokesAnother(t *testing.T) {
 	}
 
 	// Granted again, as a new row beside the revoked one, which stays listed.
-	again, err := admin.Grant(ctx, second, KindEligible, "back")
+	again, err := admin.Grant(ctx, second, Scope, KindEligible, "back")
 	if err != nil || again.ID == granted.ID {
 		t.Fatalf("granting again answered %+v, %v; want a new grant", again, err)
 	}
@@ -123,7 +123,7 @@ func TestTheLastActiveGrantIsNotRevoked(t *testing.T) {
 // provider remains.
 func TestConcurrentRevocationsLeaveAProvider(t *testing.T) {
 	admin, _, ctx, _ := administration(t)
-	second, err := admin.Grant(ctx, newID(t), KindEligible, "a second operator")
+	second, err := admin.Grant(ctx, newID(t), Scope, KindEligible, "a second operator")
 	if err != nil {
 		t.Fatal(err)
 	}

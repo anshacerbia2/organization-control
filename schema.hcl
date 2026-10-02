@@ -188,7 +188,9 @@ table "provider_grant" {
     null = false
     type = uuid
   }
-  // The registered provider scope. Today the one this service checks (STD-IAM-002 §3.1.1).
+  // A registered provider scope (STD-IAM-002 §3.1.1): this service's own, or the Identity Control
+  // API's, whose grants this service records and publishes (TDD-organization-control-001 §Provider
+  // Authority Projection).
   column "scope" {
     null = false
     type = text
@@ -236,6 +238,15 @@ table "provider_grant" {
     default = "eligible"
   }
 
+  // The version of the last published transition of the grant or its activation. Published
+  // scopes only: an event carries it, and a consumer applies an event only when its version is
+  // higher than the one it holds. 0 until the first event.
+  column "grant_version" {
+    null    = false
+    type    = bigint
+    default = 0
+  }
+
   primary_key {
     columns = [column.grant_id]
   }
@@ -259,7 +270,7 @@ table "provider_grant" {
   }
 
   check "provider_grant_scope_check" {
-    expr = "scope IN ('provider:organization-control')"
+    expr = "scope IN ('provider:organization-control', 'provider:identity-control')"
   }
   check "provider_grant_reason_check" {
     expr = "btrim(reason) <> ''"
@@ -272,6 +283,50 @@ table "provider_grant" {
   }
   check "provider_grant_kind_check" {
     expr = "kind IN ('eligible', 'emergency')"
+  }
+}
+
+// Which version each published provider grant event carries, written in the publishing transaction.
+// The SUPERSEDED resolution predicate reads it (TDD-organization-control-005). Provider-only, by
+// grant, like the grant itself.
+table "provider_grant_event" {
+  schema  = schema.organization
+  comment = "Grant version carried by each published provider grant event. Immutable."
+
+  column "event_id" {
+    null = false
+    type = uuid
+  }
+  column "grant_id" {
+    null = false
+    type = uuid
+  }
+  column "grant_version" {
+    null = false
+    type = bigint
+  }
+  column "event_type" {
+    null = false
+    type = text
+  }
+  column "recorded_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.event_id]
+  }
+
+  foreign_key "provider_grant_event_grant_fk" {
+    columns     = [column.grant_id]
+    ref_columns = [table.provider_grant.column.grant_id]
+  }
+
+  // One event per version: every published transition advances the version once.
+  unique "provider_grant_event_version_unique" {
+    columns = [column.grant_id, column.grant_version]
   }
 }
 

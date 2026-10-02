@@ -105,6 +105,12 @@ func TestTheConsumerCannotActAsTheControlPlane(t *testing.T) {
 		"append to the outbox":          `INSERT INTO platform.outbox (event_type) VALUES ('x')`,
 		"write the audit trail":         `INSERT INTO audit.privileged_access (access_id) VALUES (gen_random_uuid())`,
 		"read Membership history":       `SELECT 1 FROM membership.membership_event`,
+		// The provider authority snapshot reads what a grant confers, by column; why it was made,
+		// who made it, and the requests behind an activation stay with the record.
+		"read why a provider grant was made": `SELECT reason, granted_by FROM organization.provider_grant`,
+		"read an activation's reason":        `SELECT reason, decided_by FROM organization.provider_activation`,
+		"grant provider authority":           `INSERT INTO organization.provider_grant (grant_id) VALUES (gen_random_uuid())`,
+		"read provider grant history":        `SELECT 1 FROM organization.provider_grant_event`,
 	} {
 		if err := asConsumer(t, true, statement); err == nil {
 			t.Errorf("the consumer role can %s", what)

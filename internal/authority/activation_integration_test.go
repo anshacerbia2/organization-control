@@ -32,7 +32,7 @@ func activations(t *testing.T, approval bool) (*Activations, *Administration, *R
 func TestAnEligibleGrantConfersAuthorityOnlyWhileAnApprovedActivationLasts(t *testing.T) {
 	service, admin, records, asFirst, first := activations(t, true)
 	second := newID(t)
-	grant, err := admin.Grant(asFirst, second, KindEligible, "orders on-call")
+	grant, err := admin.Grant(asFirst, second, Scope, KindEligible, "orders on-call")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestAnEligibleGrantConfersAuthorityOnlyWhileAnApprovedActivationLasts(t *te
 func TestTheDatabaseRefusesASelfApprovedActivation(t *testing.T) {
 	service, admin, _, asFirst, _ := activations(t, true)
 	second := newID(t)
-	grant, err := admin.Grant(asFirst, second, KindEligible, "on-call")
+	grant, err := admin.Grant(asFirst, second, Scope, KindEligible, "on-call")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestTheDatabaseRefusesASelfApprovedActivation(t *testing.T) {
 func TestARevokedGrantEndsItsActivationsAuthority(t *testing.T) {
 	service, admin, records, asFirst, _ := activations(t, true)
 	second := newID(t)
-	grant, err := admin.Grant(asFirst, second, KindEligible, "on-call")
+	grant, err := admin.Grant(asFirst, second, Scope, KindEligible, "on-call")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestARevokedGrantEndsItsActivationsAuthority(t *testing.T) {
 func TestARequestIsRefusedWhenItBreaksARule(t *testing.T) {
 	service, admin, _, asFirst, first := activations(t, true)
 	second, stranger := newID(t), newID(t)
-	grant, err := admin.Grant(asFirst, second, KindEligible, "on-call")
+	grant, err := admin.Grant(asFirst, second, Scope, KindEligible, "on-call")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestARequestIsRefusedWhenItBreaksARule(t *testing.T) {
 func TestAPendingRequestLapsesAfterADay(t *testing.T) {
 	service, admin, _, asFirst, _ := activations(t, true)
 	second := newID(t)
-	grant, err := admin.Grant(asFirst, second, KindEligible, "on-call")
+	grant, err := admin.Grant(asFirst, second, Scope, KindEligible, "on-call")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestAPendingRequestLapsesAfterADay(t *testing.T) {
 func TestWithApprovalOptionalAHolderActivatesWithAReason(t *testing.T) {
 	service, admin, records, asFirst, _ := activations(t, false)
 	second := newID(t)
-	grant, err := admin.Grant(asFirst, second, KindEligible, "dev")
+	grant, err := admin.Grant(asFirst, second, Scope, KindEligible, "dev")
 	if err != nil {
 		t.Fatal(err)
 	}

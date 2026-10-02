@@ -24,6 +24,9 @@ package projection
 // missed. Without this reason such an incident could never close: replaying produces no applied
 // evidence, and the consumer is correct with no sanctioned way to say so.
 //
+// A provider grant event is superseded the same way: it carries the grant's whole state and its
+// grant_version (TDD-organization-control-001 §Provider Authority Projection).
+//
 // A Tenant event is superseded the same way. It carries the Tenant's complete status and its
 // tenant_security_version, and the consumer applies it only when that version is higher than the one
 // it holds, so tenant.tenant_event plays the part membership.membership_event plays below.
@@ -121,8 +124,9 @@ const otherReceipts = `SELECT coalesce(string_agg(DISTINCT consumer || ' (' || e
 // One row always, NULL when absent: this package may not name the driver, so "no rows" is not an
 // error it can recognise.
 //
-// Two histories, one per aggregate whose events carry complete state and a version the consumer
-// orders by: the Membership's membership_version and the Tenant's tenant_security_version. An event
+// Three histories, one per aggregate whose events carry complete state and a version the consumer
+// orders by: the Membership's membership_version, the Tenant's tenant_security_version, and the
+// provider grant's grant_version (organization.provider_grant_event). An event
 // is in at most one of them. Written as constants rather than assembled from a table of names, so
 // tools/grantcheck can read every statement this package runs.
 const failedMembershipVersion = `SELECT h.membership_id::text, h.membership_version
@@ -132,6 +136,12 @@ const failedMembershipVersion = `SELECT h.membership_id::text, h.membership_vers
 const failedTenantVersion = `SELECT h.tenant_id::text, h.tenant_security_version
   FROM (SELECT 1) one
   LEFT JOIN tenant.tenant_event h ON h.event_id = $1`
+
+// failedProviderGrantVersion is the provider grant, at which grant_version, a provider grant event
+// concerned (TDD-organization-control-001 §Provider Authority Projection).
+const failedProviderGrantVersion = `SELECT h.grant_id::text, h.grant_version
+  FROM (SELECT 1) one
+  LEFT JOIN organization.provider_grant_event h ON h.event_id = $1`
 
 // The superseding queries find the lowest newer version of the same aggregate the dead letter's
 // consumer applied. The lowest, so the reference names the first event that made the failed one moot.
@@ -159,6 +169,19 @@ const supersedingTenant = `SELECT s.event_id::text, s.tenant_security_version, s
            AND h.tenant_id = $2::uuid
            AND h.tenant_security_version > $3
          ORDER BY h.tenant_security_version
+         LIMIT 1) s ON TRUE`
+
+const supersedingProviderGrant = `SELECT s.event_id::text, s.grant_version, s.event_type
+  FROM (SELECT 1) one
+  LEFT JOIN LATERAL (
+        SELECT r.event_id, h.grant_version, h.event_type
+          FROM platform.delivery_receipt r
+          JOIN organization.provider_grant_event h ON h.event_id = r.event_id
+         WHERE r.consumer = $1
+           AND r.evidence = 'consumer_applied'
+           AND h.grant_id = $2::uuid
+           AND h.grant_version > $3
+         ORDER BY h.grant_version
          LIMIT 1) s ON TRUE`
 
 const closeDeadLetter = `UPDATE platform.dead_letter
@@ -238,8 +261,14 @@ func supersededEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer
 		}
 	}
 	if aggregateID == nil || version == nil {
-		return "", "", fmt.Errorf("%w: %s has no Membership or Tenant version on record; it carries "+
-			"neither aggregate's state, or it was published before the history existed, so replay it instead",
+		aggregate, superseding = "provider grant", supersedingProviderGrant
+		if err := tx.QueryRow(ctx, failedProviderGrantVersion, eventID.String()).Scan(&aggregateID, &version); err != nil {
+			return "", "", fmt.Errorf("projection: reading the version %s carried: %w", eventID, err)
+		}
+	}
+	if aggregateID == nil || version == nil {
+		return "", "", fmt.Errorf("%w: %s has no Membership, Tenant or provider grant version on record; it "+
+			"carries none of their state, or it was published before the history existed, so replay it instead",
 			ErrNotSuperseded, eventID)
 	}
 

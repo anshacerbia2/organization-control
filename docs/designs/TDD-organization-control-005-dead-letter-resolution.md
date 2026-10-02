@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 2.0.0
+  version: 2.1.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -22,7 +22,9 @@ scope still cannot recover from.
 An authority-bearing dead letter is a Membership or Tenant event the dispatcher abandoned
 after the consumer refused it permanently. Tenant events count because the authority refuses
 every member of a Tenant that is not active, so a dead-lettered Tenant suspension withdraws
-every member at once. `projection.AuthorityEventTypes` lists the eight types. While one is unresolved, the publication
+every member at once. Provider grant events count too: a dead-lettered revocation of a
+`provider:identity-control` grant is provider authority the Identity Control API still honors.
+`projection.AuthorityEventTypes` lists the twelve types. While one is unresolved, the publication
 frontier reports security debt and every projection-backed enforcement check refuses. So
 resolving one is the act that returns service, and resolving one wrongly is the act that
 returns service to a consumer holding a revocation it never received.
@@ -173,6 +175,22 @@ Every published Tenant event increments `tenant_security_version`, so the versio
 event within its Tenant. The same rules hold: written in the publishing transaction, fixed at
 publication, and no backfill.
 
+`organization.provider_grant_event` does the same for provider grant events, keyed on the grant's
+`grant_version` (`TDD-organization-control-001` §Provider Authority Projection):
+
+```
+event_id        uuid, primary key                  the published event
+grant_id        uuid, FK provider_grant            the aggregate
+grant_version   bigint                             the version the event carries
+event_type      text
+recorded_at     timestamptz
+UNIQUE (grant_id, grant_version)
+```
+
+Every published transition of a grant or its activation increments `grant_version`, and each event
+carries the grant's whole state, so a newer applied version supersedes an older one by the same
+proof. A revocation is terminal: nothing supersedes it but itself.
+
 `platform.delivery_receipt` is keyed `(event_id, consumer)` and carries an `evidence` column
 constrained to `consumer_applied` or `transport_accepted`. It is the root of trust for
 resolution: a row asserting that this event reached this consumer. The first receipt wins
@@ -195,6 +213,11 @@ platform.dead_letter        organization_dispatch_rt     INSERT, SELECT
                             organization_resolution_rt   SELECT, and UPDATE on the four resolution columns
                                                          and the four waiver columns only
                             organization_rt              none
+
+organization.provider_grant_event
+                            organization_provider_rt     INSERT   (written when publishing)
+                            organization_resolution_rt   SELECT   (the SUPERSEDED predicate)
+                            no runtime role              UPDATE, DELETE, TRUNCATE
 
 tenant.tenant_event         organization_provider_rt     INSERT   (written when publishing)
                             organization_resolution_rt   SELECT   (the SUPERSEDED predicate)
@@ -354,7 +377,8 @@ membership.membership_event holds E.event_id for the same M, with version W > V
 
 The reference names the lowest such `E`.
 
-A Tenant event is superseded the same way. `tenant.tenant_event` holds `X.event_id` with Tenant
+A provider grant event is superseded the same way, with `organization.provider_grant_event` and
+`grant_version` in place of the Tenant's. A Tenant event is superseded the same way. `tenant.tenant_event` holds `X.event_id` with Tenant
 `T` and security version `V`, and `E` is an applied event for the same `T` with
 `tenant_security_version W > V`. Tenant events carry the Tenant's complete status and its
 security version, and the consumer orders them by that version, so the same proof holds.

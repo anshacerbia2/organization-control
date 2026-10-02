@@ -1,4 +1,4 @@
-h1:Tmxdb7Q60ZW/swkiVGS9Zv6dOlerGSaGS0qKeV8LdFc=
+h1:1wOeRWl5tzv0j2uhKFbZlRFpf8xrOpiyABMaAOwN2do=
 20260821202322_baseline_organization_schema.sql h1:iLX771m6Nv6GkIXeIDTQcEmWAMlMd3Rod+l1e3GiydA=
 20260826071822_add_projection_snapshot_mark.sql h1:NEpR7ckeg3Cr3hLh0H8f6hUBkBanqkPuwiIIEoezmMQ=
 20260827143343_add_verify_rate_signal.sql h1:IoZCJOcErFuME9vNN+FzIr9elyLD+viqIkIu5V56ayA=
@@ -11,3 +11,4 @@ h1:Tmxdb7Q60ZW/swkiVGS9Zv6dOlerGSaGS0qKeV8LdFc=
 20261001150000_add_provider_grant_revocation.sql h1:vq2mEedup4B/2tLxd8ROByp2RrCPaZrSS9fNCmzw/II=
 20261002100000_add_provider_activation.sql h1:TzWLMheISl2n6TKg1y5XODGwre4Xa13NEc00odD5o/E=
 20261002120000_drop_consumer_single_active.sql h1:lO03Ui4yGFG7Z6c9dR0lITLegQtwPm8d7WPCYu6xXnE=
+20261002140000_add_provider_grant_publication.sql h1:k5tT+8OAa40fjLuacNeujNvAaRVAG1wIvr3fG9GOG5Q=

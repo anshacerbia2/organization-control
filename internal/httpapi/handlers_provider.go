@@ -822,6 +822,43 @@ func (h *handlers) snapshot(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusOK, page)
 }
 
+// providerSnapshot serves the provider authority snapshot, to the consumer it names or to a
+// provider, under the same rules and the same page contract as the Organization snapshot.
+func (h *handlers) providerSnapshot(w http.ResponseWriter, r *http.Request) {
+	body, ok := decode[snapshotRequest](w, r)
+	if !ok {
+		return
+	}
+	scope, _, ok := requireConsumerSelfOrProvider(w, r, body.ConsumerID)
+	if !ok {
+		return
+	}
+	own, ok := h.consumerServices(w, r, scope)
+	if !ok {
+		return
+	}
+	req := projection.SnapshotRequest{
+		ConsumerID: body.ConsumerID,
+		PageSize:   body.PageSize,
+		Cursor:     body.Cursor,
+		Mark:       body.Mark,
+	}
+	var (
+		page projection.ProviderPage
+		err  error
+	)
+	if own != nil {
+		page, err = own.Access.ProviderSnapshot(r.Context(), req)
+	} else {
+		page, err = h.services.Publisher.ProviderSnapshot(r.Context(), req)
+	}
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond(w, http.StatusOK, page)
+}
+
 type reconcileRequest struct {
 	ConsumerID string                   `json:"consumer_id"`
 	Mark       int64                    `json:"mark"`
