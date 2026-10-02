@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.10.0
+  version: 1.11.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -820,8 +820,13 @@ The run fails on an unused grant the file does not list, and on a line that is n
 unused grant. A grant appearing without a statement that needs it is revoked, not listed.
 
 The tool runs only against a database whose name ends in `_test`, owned by a role able to
-revoke: `make grantcheck` locally and the CI database. The dispatch role is out of scope,
-because its statements live in foundation-platform and run in foundation-reference.
+revoke: `make grantcheck` locally and the CI database. The dispatch role is out of scope: its
+statements live in foundation-platform's dispatcher, which this service runs in `internal/delivery`
+on the dispatch pool and foundation-reference runs in its own, and
+`dispatch_role_integration_test.go` measures them against the role instead. The one statement this
+repository runs on the dispatch pool, the registration check in `internal/delivery`, is listed in
+grantcheck's `outOfScope` table for the same reason. A listed function that no longer exists
+fails the run.
 
 ## Configuration
 

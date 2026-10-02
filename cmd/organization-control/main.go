@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/anshacerbia2/foundation-platform/clientauth"
 	fdb "github.com/anshacerbia2/foundation-platform/db"
 	fhttp "github.com/anshacerbia2/foundation-platform/httpapi"
 	"github.com/anshacerbia2/foundation-platform/observability"
@@ -43,6 +44,7 @@ import (
 	"github.com/anshacerbia2/organization-control/internal/config"
 	occontext "github.com/anshacerbia2/organization-control/internal/context"
 	"github.com/anshacerbia2/organization-control/internal/db"
+	"github.com/anshacerbia2/organization-control/internal/delivery"
 	"github.com/anshacerbia2/organization-control/internal/httpapi"
 	"github.com/anshacerbia2/organization-control/internal/invitation"
 	"github.com/anshacerbia2/organization-control/internal/membership"
@@ -457,6 +459,56 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("http server: %w", err)
 	}
+
+	// This service's consumers' dispatchers (ADR-GLB-018 §5.4), each waiting for its consumer's
+	// registration. Started before the listener so a delivery backlog drains while the HTTP surface
+	// comes up, and stopped by the same signal.
+	deliveryDone := make(chan struct{})
+	if targets := cfg.Delivery.Targets; len(targets) > 0 {
+		dispatchConns, err := fdb.Open(ctx, fdb.Config{
+			Name: "organization-control-dispatch", DSN: cfg.Delivery.DispatchDSN,
+			MaxConns: int32(2*len(targets) + 2),
+		})
+		if err != nil {
+			return fmt.Errorf("dispatch database: %w", err)
+		}
+		defer dispatchConns.Close()
+		key, err := clientauth.LoadKey(cfg.Delivery.WorkloadKeyFile)
+		if err != nil {
+			return fmt.Errorf("workload key: %w", err)
+		}
+		tokens, err := clientauth.NewTokens(clientauth.Config{
+			TokenURL: cfg.Delivery.WorkloadTokenURL, Audience: cfg.TokenIssuer,
+			ClientID: cfg.Delivery.WorkloadClientID, Key: key,
+		})
+		if err != nil {
+			return fmt.Errorf("workload token source: %w", err)
+		}
+		deliveryTargets := make([]delivery.Target, len(targets))
+		for i, target := range targets {
+			deliveryTargets[i] = delivery.Target{Consumer: target.Consumer, Endpoint: target.Endpoint}
+		}
+		go func() {
+			defer close(deliveryDone)
+			_ = delivery.Run(ctx, delivery.Config{
+				Targets: deliveryTargets, Pool: dispatchConns, Tokens: tokens,
+				Timeout: cfg.Delivery.Timeout, RetryInterval: cfg.Delivery.RetryInterval,
+				Telemetry: telemetry, Logger: logger,
+			})
+		}()
+	} else {
+		close(deliveryDone)
+		logger.Info("no delivery targets are configured; this process runs no dispatcher")
+	}
+	// The dispatchers stop on the signal and release their leases; wait for them, bounded, so a
+	// lease is released rather than left to expire.
+	defer func() {
+		select {
+		case <-deliveryDone:
+		case <-time.After(cfg.HTTPShutdownGrace):
+			logger.Warn("the dispatchers did not stop within the shutdown grace")
+		}
+	}()
 
 	// Bind here rather than inside the goroutine, so "listening" is logged after the port is
 	// actually held. ListenAndServe binds and serves in one call, so the log line preceded the bind

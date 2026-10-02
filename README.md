@@ -218,6 +218,10 @@ misconfigured process start and fail later.
 | `ORGANIZATION_TOKEN_AUDIENCE` | yes | This resource's registered identifier |
 | `ORGANIZATION_JWKS_URL` | yes | Key source. Never read from a token |
 | `ORGANIZATION_CONSUMER_DATABASE_URL` | no | Connects as `organization_consumer_app` → `organization_consumer_rt`. Set, it enables consumer authority |
+| `ORGANIZATION_DELIVERY_TARGETS` | no | `consumer=https://acceptance-url` pairs, comma-separated. Each gets a dispatcher in this process once it is a registered consumer (ADR-GLB-018 §5.4) |
+| `ORGANIZATION_DISPATCH_DATABASE_URL` | with targets | Connects as `organization_dispatch_app` → `organization_dispatch_rt` |
+| `ORGANIZATION_WORKLOAD_CLIENT_ID`, `ORGANIZATION_WORKLOAD_KEY_FILE`, `ORGANIZATION_WORKLOAD_TOKEN_URL` | with targets | This service's workload client, its RSA key (at least 3072 bits), and the kernel token endpoint. Deliveries carry its access token, never a shared secret |
+| `ORGANIZATION_DELIVERY_TIMEOUT`, `ORGANIZATION_DELIVERY_RETRY_INTERVAL` | no | `5s` and `1m`: one publication's bound, and how long a target waits before checking its registration again |
 | `ORGANIZATION_LISTEN_ADDRESS` | no | Defaults to `:8080` |
 | `ORGANIZATION_TOKEN_MAX_SKEW` | no | 30s; capped at 60s by STD-IAM-002 §3.5 |
 | `ORGANIZATION_TOKEN_TYPE` | no | `report` (default) accepts a token whose header `typ` is not `at+jwt` and logs it with its `azp`; `enforce` refuses it with 401 (STD-IAM-002 §3.5 step 5, RFC 9068 §4). The dev issuer types its tokens `at+jwt` |

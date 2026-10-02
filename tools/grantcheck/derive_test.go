@@ -139,3 +139,19 @@ func TestSequenceCallsNameTheSequenceAndTheAcceptedPrivileges(t *testing.T) {
 		t.Error("a statement with no sequence call reported one")
 	}
 }
+
+// A function listed out of scope runs as a role this tool does not verify: its statements are
+// attributed to no verified role, and its raw transaction is not reported.
+func TestAnOutOfScopeFunctionIsNeitherAttributedNorReported(t *testing.T) {
+	d := fixtureDerivation(t)
+	for _, role := range Roles {
+		if holds(d, role, "consumer_id = $1 AND retired_at IS NULL") {
+			t.Errorf("the dispatch pool's registration check is attributed to %s", role)
+		}
+	}
+	for _, problem := range d.Problems {
+		if strings.Contains(problem, "internal/delivery") {
+			t.Errorf("the out-of-scope function is reported: %s", problem)
+		}
+	}
+}
