@@ -107,7 +107,7 @@ func receipt(t *testing.T, f *fixture, eventID id.UUID, consumer, evidence strin
 func incident(t *testing.T, f *fixture) (id.UUID, string) {
 	t.Helper()
 	consumer := f.register(t)
-	eventID, _ := abandoned(t, f, outbox.PriorityHigh, true)
+	eventID, _ := abandoned(t, f, consumer, outbox.PriorityHigh, true)
 	return eventID, consumer
 }
 
@@ -151,7 +151,7 @@ func TestAClosureRecordsItselfInsideTheTransactionThatMadeIt(t *testing.T) {
 
 	r, sink := resolver(t, f)
 	before := sink.calls
-	resolution, err := r.Resolve(f.ctx, eventID)
+	resolution, err := r.Resolve(f.ctx, eventID, consumer)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestAKeyedResolutionClaimsItsKeyAndARetryIsAnsweredFromIt(t *testing.T) {
 
 	r, _ := resolver(t, f)
 	first := db.WithClaim(f.ctx, claim)
-	if _, err := r.Resolve(first, eventID); err != nil {
+	if _, err := r.Resolve(first, eventID, consumer); err != nil {
 		t.Fatalf("a resolution carrying an idempotency key failed: %v", err)
 	}
 	if !db.ClaimMade(first) {
@@ -215,7 +215,7 @@ func TestAKeyedResolutionClaimsItsKeyAndARetryIsAnsweredFromIt(t *testing.T) {
 		t.Fatalf("completing the claim: %v", err)
 	}
 
-	_, err = r.Resolve(db.WithClaim(f.ctx, claim), eventID)
+	_, err = r.Resolve(db.WithClaim(f.ctx, claim), eventID, consumer)
 	var replayed *db.Replayed
 	if !errors.As(err, &replayed) {
 		t.Fatalf("a retry with the same key returned %v, want the stored response replayed", err)
@@ -233,11 +233,11 @@ func TestAKeyedResolutionClaimsItsKeyAndARetryIsAnsweredFromIt(t *testing.T) {
 // table would distinguish it from a true one.
 func TestARefusedClosureLeavesNoAccountOfAClosure(t *testing.T) {
 	f := newFixture(t)
-	eventID, _ := incident(t, f)
+	eventID, consumer := incident(t, f)
 
 	r, sink := resolver(t, f)
 	before := sink.calls
-	if _, err := r.Resolve(f.ctx, eventID); !errors.Is(err, ErrNoAppliedEvidence) {
+	if _, err := r.Resolve(f.ctx, eventID, consumer); !errors.Is(err, ErrNoAppliedEvidence) {
 		t.Fatalf("Resolve returned %v, want ErrNoAppliedEvidence", err)
 	}
 
@@ -277,7 +277,7 @@ func TestAnIncidentClosesOnAppliedEvidence(t *testing.T) {
 	}
 
 	r, _ := resolver(t, f)
-	resolution, err := r.Resolve(f.ctx, eventID)
+	resolution, err := r.Resolve(f.ctx, eventID, consumer)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -331,11 +331,11 @@ func TestAnIncidentClosesOnAppliedEvidence(t *testing.T) {
 // abandoned. The refusal has to leave the incident exactly as it found it.
 func TestAnIncidentWithNoEvidenceStaysOpen(t *testing.T) {
 	f := newFixture(t)
-	eventID, _ := incident(t, f)
+	eventID, consumer := incident(t, f)
 
 	r, sink := resolver(t, f)
 	before := sink.calls
-	_, err := r.Resolve(f.ctx, eventID)
+	_, err := r.Resolve(f.ctx, eventID, consumer)
 	if !errors.Is(err, ErrNoAppliedEvidence) {
 		t.Fatalf("Resolve returned %v, want ErrNoAppliedEvidence", err)
 	}
@@ -374,7 +374,7 @@ func TestAReceiptUnderAnotherConsumerNameResolvesNothing(t *testing.T) {
 	receipt(t, f, eventID, consumer+"-typo", "consumer_applied")
 
 	r, _ := resolver(t, f)
-	_, err := r.Resolve(f.ctx, eventID)
+	_, err := r.Resolve(f.ctx, eventID, consumer)
 	if !errors.Is(err, ErrNoAppliedEvidence) {
 		t.Fatalf("Resolve returned %v, want ErrNoAppliedEvidence", err)
 	}
@@ -399,7 +399,7 @@ func TestTransportAcceptanceIsNotResolutionEvidence(t *testing.T) {
 	receipt(t, f, eventID, consumer, "transport_accepted")
 
 	r, _ := resolver(t, f)
-	if _, err := r.Resolve(f.ctx, eventID); !errors.Is(err, ErrNoAppliedEvidence) {
+	if _, err := r.Resolve(f.ctx, eventID, consumer); !errors.Is(err, ErrNoAppliedEvidence) {
 		t.Fatalf("Resolve returned %v, want ErrNoAppliedEvidence; a transport acknowledgement was "+
 			"accepted as proof the consumer applied the event", err)
 	}
@@ -411,12 +411,12 @@ func TestResolvingAClosedIncidentIsRefused(t *testing.T) {
 	receipt(t, f, eventID, consumer, "consumer_applied")
 
 	r, _ := resolver(t, f)
-	if _, err := r.Resolve(f.ctx, eventID); err != nil {
+	if _, err := r.Resolve(f.ctx, eventID, consumer); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	// The second one is not idempotent-and-fine: it would overwrite resolved_by and
 	// resolution_reference, and the record of who closed the incident is the point of the columns.
-	if _, err := r.Resolve(f.ctx, eventID); !errors.Is(err, ErrAlreadyResolved) {
+	if _, err := r.Resolve(f.ctx, eventID, consumer); !errors.Is(err, ErrAlreadyResolved) {
 		t.Fatalf("the second Resolve returned %v, want ErrAlreadyResolved", err)
 	}
 }
@@ -425,49 +425,74 @@ func TestResolvingAnUnknownEventIsRefused(t *testing.T) {
 	f := newFixture(t)
 	r, _ := resolver(t, f)
 
-	if _, err := r.Resolve(f.ctx, mustID(t)); !errors.Is(err, ErrDeadLetterNotFound) {
+	if _, err := r.Resolve(f.ctx, mustID(t), f.register(t)); !errors.Is(err, ErrDeadLetterNotFound) {
 		t.Fatalf("Resolve returned %v, want ErrDeadLetterNotFound", err)
 	}
 }
 
-// Nothing registered to enforce means the predicate has no subject.
-//
-// Resolving against whichever consumer happens to hold a row would close an incident on evidence
-// about a consumer that is enforcing nothing -- which is the same as closing it on no evidence,
-// with a paper trail that looks convincing.
-func TestTheResolverRefusesWhenNothingIsRegisteredToEnforce(t *testing.T) {
+// A dead letter is addressed by (event_id, consumer) (ADR-GLB-018 §5.3). A consumer with no dead
+// letter for the event is refused, and the refusal says which consumer has one, so a mistyped name
+// reads as what it is.
+func TestAnIncidentIsAddressedByItsConsumer(t *testing.T) {
 	f := newFixture(t)
-	eventID, _ := abandoned(t, f, outbox.PriorityHigh, true)
+	eventID, consumer := incident(t, f)
+	other := f.register(t)
+	receipt(t, f, eventID, other, "consumer_applied")
 
-	// Deliberate rather than assumed: another case's leftovers would otherwise decide whether
-	// this one is testing anything. Retired and restored, because the rows belong to the shared
-	// database rather than to this test.
-	var active []string
+	r, _ := resolver(t, f)
+	_, err := r.Resolve(f.ctx, eventID, other)
+	if !errors.Is(err, ErrDeadLetterNotFound) || !strings.Contains(err.Error(), consumer) {
+		t.Fatalf("resolving at a consumer with no dead letter answered %v, want ErrDeadLetterNotFound naming %s", err, consumer)
+	}
+	if _, err := r.Resolve(f.ctx, eventID, " "); !errors.Is(err, ErrInvalid) {
+		t.Errorf("resolving with no consumer answered %v, want ErrInvalid", err)
+	}
+}
+
+// One event, refused by two consumers: two incidents. Each closes on its own consumer's evidence, and
+// closing one leaves the other open.
+func TestOneConsumersClosureLeavesAnothersIncidentOpen(t *testing.T) {
+	f := newFixture(t)
+	first := f.register(t)
+	eventID, _ := abandoned(t, f, first, outbox.PriorityHigh, true)
+	second := f.register(t)
+	f.exec(t, `INSERT INTO platform.dead_letter
+		    (event_id, event_type, envelope, payload, aggregate_id, priority,
+		     failure_class, failure_detail, attempts, first_failed_at, consumer)
+		SELECT event_id, event_type, envelope, payload, aggregate_id, priority,
+		       failure_class, failure_detail, attempts, first_failed_at, $2
+		  FROM platform.dead_letter WHERE event_id = $1::uuid AND consumer = $3`,
+		eventID.String(), second, first)
+	receipt(t, f, eventID, first, "consumer_applied")
+
+	r, _ := resolver(t, f)
+	if _, err := r.Resolve(f.ctx, eventID, second); !errors.Is(err, ErrNoAppliedEvidence) {
+		t.Fatalf("%s's incident closed on %s's receipt: %v", second, first, err)
+	}
+	if _, err := r.Resolve(f.ctx, eventID, first); err != nil {
+		t.Fatalf("closing %s's incident: %v", first, err)
+	}
+	open := map[string]bool{}
 	if err := f.setup.InTx(f.ctx, func(ctx context.Context, tx fdb.Tx) error {
-		rows, err := tx.Query(ctx,
-			`UPDATE projection.consumer SET retired_at = now() WHERE retired_at IS NULL RETURNING consumer_id`)
+		rows, err := tx.Query(ctx, `SELECT consumer, resolved_at IS NULL FROM platform.dead_letter WHERE event_id = $1`, eventID.String())
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+			var consumer string
+			var stillOpen bool
+			if err := rows.Scan(&consumer, &stillOpen); err != nil {
 				return err
 			}
-			active = append(active, id)
+			open[consumer] = stillOpen
 		}
 		return rows.Err()
 	}); err != nil {
-		t.Fatalf("retiring the active consumers: %v", err)
+		t.Fatalf("reading the incidents: %v", err)
 	}
-	t.Cleanup(func() {
-		f.exec(t, `UPDATE projection.consumer SET retired_at = NULL WHERE consumer_id = ANY ($1::text[])`, active)
-	})
-
-	r, _ := resolver(t, f)
-	if _, err := r.Resolve(f.ctx, eventID); !errors.Is(err, ErrNoActiveConsumer) {
-		t.Fatalf("Resolve returned %v, want ErrNoActiveConsumer", err)
+	if open[first] || !open[second] {
+		t.Errorf("incidents read open=%v; want %s closed and %s still open", open, first, second)
 	}
 }
 
@@ -478,7 +503,7 @@ func TestTheResolverRefusesWhenNothingIsRegisteredToEnforce(t *testing.T) {
 // that could edit them could close an incident by making it look like a different one.
 func TestTheResolutionRoleCannotRewriteTheIncident(t *testing.T) {
 	f := newFixture(t)
-	eventID, _ := abandoned(t, f, outbox.PriorityHigh, true)
+	eventID, _ := abandoned(t, f, f.register(t), outbox.PriorityHigh, true)
 	pool, _ := resolutionPool(t, f)
 
 	for _, attempt := range []struct {

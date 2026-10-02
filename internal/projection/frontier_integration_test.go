@@ -30,27 +30,35 @@ func frontierReader(t *testing.T) (*FrontierReader, *fdb.Pool, context.Context) 
 	return reader, f.setup, f.ctx
 }
 
-// insertOutboxRow writes one row directly, because what is under test is how the frontier reads the
-// outbox rather than how a domain service writes to it.
+// frontierConsumer is whom insertOutboxRow's deliveries are owed to.
+const frontierConsumer = "frontier-suite"
+
+// insertOutboxRow writes one event and its delivery to consumer directly, because what is under test
+// is how the frontier reads the outbox rather than how a domain service writes to it.
 //
 // The age is an interval the database subtracts from its own clock, rather than a timestamp this
 // process computes. A test that dated its rows from the Go clock and then asserted on an age the
 // database measures would be asserting that the two clocks agree — which is the assumption the reader
 // was corrected to stop making, and it has no place in the case that checks the correction.
-func insertOutboxRow(t *testing.T, ctx context.Context, pool *fdb.Pool, published bool, age time.Duration) int64 {
+func insertOutboxRow(t *testing.T, ctx context.Context, pool *fdb.Pool, consumer string, published bool, age time.Duration) int64 {
 	t.Helper()
 
 	var sequence int64
 	if err := pool.InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
 		return tx.QueryRow(ctx, `
-			INSERT INTO platform.outbox
-			    (event_id, aggregate_id, event_type, payload, envelope, priority, published, published_at, created_at)
-			VALUES (gen_random_uuid(), gen_random_uuid(),
-			        'com.scnehaux.organization.membership.security.revoked',
-			        '{}'::jsonb, '{"specversion":"1.0"}'::jsonb, 0, $1,
-			        CASE WHEN $1 THEN clock_timestamp() ELSE NULL END,
-			        clock_timestamp() - $2::interval)
-			RETURNING sequence`, published, age.String()).Scan(&sequence)
+			WITH e AS (
+			    INSERT INTO platform.outbox
+			        (event_id, aggregate_id, event_type, payload, envelope, priority, created_at)
+			    VALUES (gen_random_uuid(), gen_random_uuid(),
+			            'com.scnehaux.organization.membership.security.revoked',
+			            '{}'::jsonb, '{"specversion":"1.0"}'::jsonb, 0, clock_timestamp() - $2::interval)
+			    RETURNING created_at, event_id, sequence, event_type, priority)
+			INSERT INTO platform.outbox_delivery
+			    (created_at, event_id, consumer, sequence, event_type, priority, published, published_at)
+			SELECT created_at, event_id, $3, sequence, event_type, priority, $1,
+			       CASE WHEN $1 THEN clock_timestamp() ELSE NULL END
+			  FROM e
+			RETURNING sequence`, published, age.String(), consumer).Scan(&sequence)
 	}); err != nil {
 		t.Fatalf("inserting an outbox row: %v", err)
 	}
@@ -61,7 +69,7 @@ func TestTheFrontierReportsTheOldestOwedDelivery(t *testing.T) {
 	reader, pool, ctx := frontierReader(t)
 
 	// Old and unpublished: this is the row a consumer's freshness depends on.
-	owed := insertOutboxRow(t, ctx, pool, false, 90*time.Second)
+	owed := insertOutboxRow(t, ctx, pool, frontierConsumer, false, 90*time.Second)
 
 	frontier, err := reader.Frontier(ctx)
 	if err != nil {
@@ -101,9 +109,10 @@ func clearDeadLetters(t *testing.T, ctx context.Context, pool *fdb.Pool) {
 	}
 }
 
-// insertDeadLetter writes one dead letter as the dispatcher leaves it: the outbox row marked published
-// with its error recorded, and the incident recorded in platform.dead_letter.
-func insertDeadLetter(t *testing.T, ctx context.Context, pool *fdb.Pool,
+// insertDeadLetter writes one dead letter as the dispatcher leaves it: the consumer's delivery marked
+// published with its error recorded, and the incident recorded in platform.dead_letter under the
+// consumer's name.
+func insertDeadLetter(t *testing.T, ctx context.Context, pool *fdb.Pool, consumer,
 	eventType string, age time.Duration, resolved bool) int64 {
 	t.Helper()
 
@@ -113,14 +122,19 @@ func insertDeadLetter(t *testing.T, ctx context.Context, pool *fdb.Pool,
 		// the agreement between two clocks. See frontier_clock_test.go.
 		var eventID string
 		if err := tx.QueryRow(ctx, `
-			INSERT INTO platform.outbox
-			    (event_id, aggregate_id, event_type, payload, envelope, priority, published, published_at,
-			     created_at, attempts, first_failed_at, failure_class, last_error)
-			VALUES (gen_random_uuid(), gen_random_uuid(), $1,
-			        '{}'::jsonb, '{"specversion":"1.0"}'::jsonb, 0, TRUE, NULL,
-			        clock_timestamp() - $2::interval, 3, clock_timestamp() - $2::interval,
-			        'poison', 'refused')
-			RETURNING event_id, sequence`, eventType, age.String()).Scan(&eventID, &sequence); err != nil {
+			WITH e AS (
+			    INSERT INTO platform.outbox
+			        (event_id, aggregate_id, event_type, payload, envelope, priority, created_at)
+			    VALUES (gen_random_uuid(), gen_random_uuid(), $1,
+			            '{}'::jsonb, '{"specversion":"1.0"}'::jsonb, 0, clock_timestamp() - $2::interval)
+			    RETURNING created_at, event_id, sequence, event_type, priority)
+			INSERT INTO platform.outbox_delivery
+			    (created_at, event_id, consumer, sequence, event_type, priority, published, published_at,
+			     attempts, first_failed_at, failure_class, last_error)
+			SELECT created_at, event_id, $3, sequence, event_type, priority, TRUE, NULL,
+			       3, clock_timestamp() - $2::interval, 'poison', 'refused'
+			  FROM e
+			RETURNING event_id::text, sequence`, eventType, age.String(), consumer).Scan(&eventID, &sequence); err != nil {
 			return err
 		}
 		// The resolution columns move together with resolved_at, because platform migration 0006
@@ -131,7 +145,7 @@ func insertDeadLetter(t *testing.T, ctx context.Context, pool *fdb.Pool,
 			    (event_id, event_type, envelope, payload, consumer, failure_class, failure_detail,
 			     attempts, first_failed_at, dead_lettered_at,
 			     resolved_at, resolution_type, resolved_by, resolution_reference)
-			VALUES ($1::uuid, $2, '{"specversion":"1.0"}'::jsonb, '{}'::jsonb, 'foundation-reference',
+			VALUES ($1::uuid, $2, '{"specversion":"1.0"}'::jsonb, '{}'::jsonb, $6,
 			        'poison', 'the consumer refused the envelope', 3,
 			        clock_timestamp() - $3::interval, clock_timestamp() - $3::interval,
 			        CASE WHEN $4 THEN clock_timestamp() ELSE NULL END,
@@ -141,7 +155,7 @@ func insertDeadLetter(t *testing.T, ctx context.Context, pool *fdb.Pool,
 			        -- and the text side of a concatenation, and PostgreSQL refuses the statement rather
 			        -- than guessing (SQLSTATE 42P08).
 			        CASE WHEN $4 THEN 'platform.delivery_receipt:' || $5::text ELSE NULL END)`,
-			eventID, eventType, age.String(), resolved, eventID)
+			eventID, eventType, age.String(), resolved, eventID, consumer)
 		return err
 	}); err != nil {
 		t.Fatalf("inserting a dead letter: %v", err)
@@ -165,7 +179,7 @@ func TestADeadLetteredRowIsNotOwedForeverAndIsStillReported(t *testing.T) {
 	reader, pool, ctx := frontierReader(t)
 	clearDeadLetters(t, ctx, pool)
 
-	sequence := insertDeadLetter(t, ctx, pool,
+	sequence := insertDeadLetter(t, ctx, pool, "foundation-reference",
 		"com.scnehaux.organization.membership.security.revoked", 48*time.Hour, false)
 
 	frontier, err := reader.Frontier(ctx)
@@ -201,7 +215,7 @@ func TestAResolvedDeadLetterIsNotDebt(t *testing.T) {
 	reader, pool, ctx := frontierReader(t)
 	clearDeadLetters(t, ctx, pool)
 
-	insertDeadLetter(t, ctx, pool,
+	insertDeadLetter(t, ctx, pool, "foundation-reference",
 		"com.scnehaux.organization.membership.security.revoked", time.Hour, true)
 
 	frontier, err := reader.Frontier(ctx)
@@ -224,7 +238,7 @@ func TestADeadLetterCarryingNoMembershipAuthorityIsNotDebt(t *testing.T) {
 	reader, pool, ctx := frontierReader(t)
 	clearDeadLetters(t, ctx, pool)
 
-	insertDeadLetter(t, ctx, pool,
+	insertDeadLetter(t, ctx, pool, "foundation-reference",
 		"com.scnehaux.organization.workspace.lifecycle.archived", time.Hour, false)
 
 	frontier, err := reader.Frontier(ctx)
@@ -246,7 +260,7 @@ func TestADeadLetterCarryingNoMembershipAuthorityIsNotDebt(t *testing.T) {
 // and unacceptable for a payroll one.
 func TestTheFrontierReportsNoVerdict(t *testing.T) {
 	reader, pool, ctx := frontierReader(t)
-	insertOutboxRow(t, ctx, pool, false, time.Minute)
+	insertOutboxRow(t, ctx, pool, frontierConsumer, false, time.Minute)
 
 	frontier, err := reader.Frontier(ctx)
 	if err != nil {
@@ -341,4 +355,45 @@ func TestAnotherConsumersDebtDoesNotRefuseThisOne(t *testing.T) {
 		t.Errorf("consumer-b is refused for a delivery only consumer-a refused: %d dead letters counted",
 			frontier.SecurityDeadLettered)
 	}
+}
+
+// Each event owes each subscribed consumer a delivery of its own (ADR-GLB-018 §5.2). A consumer that
+// is current is not reported behind because another one is, and the estate counts both.
+func TestEachConsumersFrontierCountsItsOwnDeliveries(t *testing.T) {
+	reader, pool, ctx := frontierReader(t)
+	behind, current := "frontier-behind-"+newSuffix(t), "frontier-current-"+newSuffix(t)
+	owed := insertOutboxRow(t, ctx, pool, behind, false, 2*time.Minute)
+	insertOutboxRow(t, ctx, pool, current, true, 2*time.Minute)
+	t.Cleanup(func() {
+		_ = pool.InTx(context.Background(), func(ctx context.Context, tx fdb.Tx) error {
+			_, err := tx.Exec(ctx, `DELETE FROM platform.outbox_delivery WHERE consumer = ANY ($1::text[])`,
+				[]string{behind, current})
+			return err
+		})
+	})
+
+	for _, c := range []struct {
+		consumer string
+		owed     bool
+	}{
+		{behind, true},
+		{current, false},
+		{"", true},
+	} {
+		frontier, err := reader.FrontierFor(ctx, c.consumer)
+		if err != nil {
+			t.Fatalf("FrontierFor(%q): %v", c.consumer, err)
+		}
+		if frontier.Unpublished != c.owed {
+			t.Errorf("FrontierFor(%q) reports owed=%v, want %v", c.consumer, frontier.Unpublished, c.owed)
+		}
+		if c.owed && frontier.OldestUnpublishedMark > owed {
+			t.Errorf("FrontierFor(%q) reports the oldest owed mark %d, and %d is owed", c.consumer, frontier.OldestUnpublishedMark, owed)
+		}
+	}
+}
+
+func newSuffix(t *testing.T) string {
+	t.Helper()
+	return mustID(t).String()
 }

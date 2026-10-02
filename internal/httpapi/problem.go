@@ -150,10 +150,6 @@ var mapping = []struct {
 
 	// Projection.
 	{projection.ErrNotRegistered, platform.Forbidden},
-	// StateTransitionRefused rather than ValidationFailed: the request is well formed and the
-	// estate is in a state that refuses it. The caller's move is to retire the consumer holding
-	// the slot, not to correct a field -- and the refusal names which consumer that is.
-	{projection.ErrSingleConsumer, platform.StateTransitionRefused},
 	{projection.ErrNoSnapshotMark, platform.PreconditionUnmet},
 	{projection.ErrMarkWentBackwards, platform.ValidationFailed},
 	{projection.ErrInvalid, platform.ValidationFailed},
@@ -170,10 +166,13 @@ var mapping = []struct {
 	// PreconditionUnmet rather than ValidationFailed: the request is correct and the stored row
 	// cannot satisfy it. Nothing the caller sends changes that, which is what separates the two.
 	{projection.ErrUnreplayable, platform.PreconditionUnmet},
+	// PreconditionUnmet: the request is correct and the estate does not satisfy it. The consumer
+	// no longer subscribes to the type, so nothing would deliver a replay; the caller's move is to
+	// waive a retired consumer's incident, not to correct a field.
+	{projection.ErrConsumerNotSubscribed, platform.PreconditionUnmet},
 	// PreconditionUnmet for both: the request is correct and the estate does not yet satisfy it.
-	// The caller's move is to replay the event, or to register the consumer whose receipt would
-	// count -- not to correct a field, which is what ValidationFailed would tell them.
-	{projection.ErrNoActiveConsumer, platform.PreconditionUnmet},
+	// The caller's move is to replay the event to that consumer, or to wait for its newer event to
+	// be applied -- not to correct a field, which is what ValidationFailed would tell them.
 	{projection.ErrNoAppliedEvidence, platform.PreconditionUnmet},
 	{projection.ErrNotSuperseded, platform.PreconditionUnmet},
 	// A waiver the rules forbid: the request is well formed and the estate refuses it, and the

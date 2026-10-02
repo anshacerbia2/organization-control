@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.5.0
+  version: 1.6.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-01
+  last_reviewed: 2026-10-02
   parent_sad: SAD-004
 ---
 
@@ -267,6 +267,37 @@ what it changed. A re-bootstrap may move the mark forward and never backward: a 
 would claim the consumer rebuilt from an older instant than one it has already reported
 progress against, which no sequence of correct operations produces.
 
+**A consumer subscribes to the event types it applies** (`ADR-GLB-018 §5.1`). Registration
+names them in `event_types`, and each must be one this registry offers:
+`projection.SubscribableEventTypes`, the eight Membership and Tenant types a projection's
+authority depends on. The subscription is recorded with foundation-platform's `outbox.Subscribe`,
+in `platform.subscription`, inside the registering transaction. From its commit, every event of
+those types owes the consumer a delivery of its own, with its own attempts, receipt and dead
+letter. A type it does not subscribe to is never delivered to it, so it cannot be refused there as
+unknown and park as poison.
+
+- **Re-registering with the same types** changes the declared terms only.
+- **Re-registering with other types** replaces the subscription and clears `snapshot_mark` and the
+  reported position. Events of a newly added type that committed before the change were never
+  delivered, so the consumer bootstraps again before a progress report is accepted. As Google's
+  subscription filter "is an immutable property of a subscription" (`ADR-GLB-018` [R2]), a change
+  is a replacement and not an edit.
+- **Reviving a retired consumer** subscribes it again and clears the same columns, because nothing
+  was delivered to it while it was retired.
+
+**Retiring a consumer retires its subscription and abandons what it was owed**, in one transaction
+(`outbox.Unsubscribe`, then `outbox.Abandon`, `ADR-GLB-018 §5.5`). Its dispatcher refuses to
+start, so those deliveries would otherwise stay owed and hold outbox retention for every day they
+belong to. Abandoned deliveries are neither evidence nor debt. The tradeoff: a consumer retired by
+mistake loses its backlog and bootstraps from a snapshot when it is registered again, which is
+what the bootstrap contract already requires of a consumer whose model is older than its budget.
+
+**Several consumers are active at once.** Up to v1.5.0 this registry refused a second active
+consumer (`consumer_single_active`), because the outbox could record one outcome per event. With
+per-consumer delivery (foundation-platform v0.3.0) that limit is gone, and so is the index. Each
+consumer declares its own budget and stale behavior, and its frontier, debt and dead letters are
+its own (`TDD-organization-control-005`).
+
 **A consumer is the workload Principal it was registered with.** `principal_id` is how a
 consumer's token is recognized (`ADR-ORG-001 §5.11`, `TDD-organization-control-001` §Caller
 Authority): a workload token is a consumer's when an active row carries its `principal_id`.
@@ -415,10 +446,13 @@ grant.
 
 ### Bootstrap Contract
 
-1. Register the consumer, declaring `max_accepted_age` and `stale_behavior`.
-2. Open its durable broker subscription and buffer Organization events without applying
-   them. This happens before the snapshot request, so no event can fall into a
-   snapshot-to-subscribe gap.
+1. Register the consumer, declaring `max_accepted_age`, `stale_behavior` and `event_types`.
+2. The registration is the subscription. From its commit, every event of those types owes the
+   consumer a delivery, so the consumer accepts deliveries and buffers them without applying.
+   The registration commits before the snapshot is requested, and an append and a subscription
+   are ordered by foundation-platform's subscription lock, so every event either committed
+   before the subscription and is in the snapshot, or owes the consumer a delivery. No event can
+   fall into a snapshot-to-subscribe gap.
 3. Request a versioned snapshot. The endpoint reads authority and
    `MAX(platform.outbox.sequence)` in one repeatable-read database snapshot and returns
    that value as `high_water_mark`.

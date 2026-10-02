@@ -22,7 +22,7 @@ func TestAResolutionNamingAnUnsupportedReasonIsRefused(t *testing.T) {
 	caller := providerCaller(t)
 	handler := mounted(t, &caller)
 	headers := map[string]string{ReasonHeader: "an incident review"}
-	path := "/v1/dead-letters/" + mustID(t).String() + "/resolve"
+	path := "/v1/dead-letters/" + mustID(t).String() + "/consumers/foundation-reference/resolve"
 
 	for _, body := range []string{
 		`{"resolution_type":"WAIVED"}`,
@@ -47,7 +47,7 @@ func TestAResolutionIsProviderScoped(t *testing.T) {
 
 	caller := tenantCaller(t)
 	handler := mounted(t, &caller)
-	path := "/v1/dead-letters/" + mustID(t).String() + "/resolve"
+	path := "/v1/dead-letters/" + mustID(t).String() + "/consumers/foundation-reference/resolve"
 
 	recorder := post(t, handler, path, `{"resolution_type":"SUPERSEDED"}`,
 		map[string]string{ReasonHeader: "an incident review"})
@@ -65,7 +65,7 @@ func TestAMalformedWaiverIsRefusedBeforeTheDatabase(t *testing.T) {
 	caller := providerCaller(t)
 	handler := mounted(t, &caller)
 	headers := map[string]string{ReasonHeader: "an incident review"}
-	path := "/v1/dead-letters/" + mustID(t).String() + "/waive"
+	path := "/v1/dead-letters/" + mustID(t).String() + "/consumers/foundation-reference/waive"
 
 	for _, body := range []string{
 		``,
@@ -87,7 +87,7 @@ func TestAWaiverIsProviderScoped(t *testing.T) {
 
 	caller := tenantCaller(t)
 	handler := mounted(t, &caller)
-	path := "/v1/dead-letters/" + mustID(t).String() + "/waive"
+	path := "/v1/dead-letters/" + mustID(t).String() + "/consumers/foundation-reference/waive"
 
 	recorder := post(t, handler, path, `{"reason":"x","expires_at":"2030-01-01T00:00:00Z"}`,
 		map[string]string{ReasonHeader: "an incident review"})

@@ -17,6 +17,12 @@ package projection
 //
 // # Why the same event_id
 //
+// # Why to one consumer
+//
+// A dead letter is one consumer's refusal (ADR-GLB-018 §5.3), keyed (event_id, consumer). The
+// replay is owed to that consumer alone (outbox.To): every other subscriber already received the
+// event, or has its own dead letter for it, and is not sent it again.
+//
 // The consumer deduplicates on (event_id, consumer). Replaying under a fresh identifier would
 // deliver a second event the consumer has never seen, which applies rather than deduplicates --
 // indistinguishable at the consumer from the original having arrived twice, and it produces a
@@ -32,6 +38,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	fevent "github.com/anshacerbia2/foundation-platform/event"
 	"github.com/anshacerbia2/foundation-platform/id"
@@ -41,8 +48,14 @@ import (
 )
 
 var (
-	// ErrDeadLetterNotFound means no dead letter carries that event identifier.
-	ErrDeadLetterNotFound = errors.New("projection: no dead letter for that event")
+	// ErrDeadLetterNotFound means no dead letter carries that event identifier for that consumer.
+	// The message lists the consumers that do have one, so a mistyped name reads as what it is.
+	ErrDeadLetterNotFound = errors.New("projection: no dead letter for that event and consumer")
+
+	// ErrConsumerNotSubscribed refuses a replay to a consumer that no longer subscribes to the
+	// event's type: it was retired, or resubscribed without that type. Nothing would deliver the
+	// replay. A retired consumer's incident is waived instead (TDD-organization-control-005 §WAIVED).
+	ErrConsumerNotSubscribed = errors.New("projection: the consumer no longer subscribes to that event type")
 
 	// ErrAlreadyResolved refuses a replay of an incident that is closed.
 	//
@@ -66,6 +79,7 @@ var (
 // Replay is what a replay produced.
 type Replay struct {
 	EventID   id.UUID
+	Consumer  string
 	EventType string
 
 	// Position is the stream position of the new outbox row. It differs from the original's:
@@ -102,7 +116,40 @@ func NewReplayer(pool *db.ProviderPool) (*Replayer, error) {
 // provider role holds no UPDATE on platform.dead_letter, and every replay answered "not found" for
 // a permission error. A refusal naming the wrong cause sends an operator to look for a row that is
 // sitting right there.
-const deadLetterExists = `SELECT EXISTS (SELECT 1 FROM platform.dead_letter WHERE event_id = $1)`
+const deadLetterExists = `SELECT EXISTS (SELECT 1 FROM platform.dead_letter WHERE event_id = $1 AND consumer = $2)`
+
+// deadLetterConsumers names the consumers that do have a dead letter for the event, for the
+// refusal when the one asked for does not.
+const deadLetterConsumers = `SELECT coalesce(string_agg(coalesce(consumer, '(none)'), ', ' ORDER BY consumer), '')
+  FROM platform.dead_letter
+ WHERE event_id = $1`
+
+// requireDeadLetter refuses unless (eventID, consumer) names a dead letter. It runs as whichever
+// role the caller's transaction is, each of which reads platform.dead_letter.
+func requireDeadLetter(ctx context.Context, tx db.Tx, eventID id.UUID, consumer string) error {
+	var exists bool
+	if err := tx.QueryRow(ctx, deadLetterExists, eventID.String(), consumer).Scan(&exists); err != nil {
+		return fmt.Errorf("projection: reading the dead letter for %s at %s: %w", eventID, consumer, err)
+	}
+	if exists {
+		return nil
+	}
+	var others string
+	if err := tx.QueryRow(ctx, deadLetterConsumers, eventID.String()).Scan(&others); err != nil {
+		return fmt.Errorf("projection: reading the dead letters for %s: %w", eventID, err)
+	}
+	if others == "" {
+		return fmt.Errorf("%w: %s has no dead letter at any consumer", ErrDeadLetterNotFound, eventID)
+	}
+	return fmt.Errorf("%w: %s has no dead letter at %q; it has one at %s", ErrDeadLetterNotFound, eventID, consumer, others)
+}
+
+func requireConsumerName(consumer string) error {
+	if strings.TrimSpace(consumer) == "" {
+		return fmt.Errorf("%w: the consumer whose dead letter this is is required", ErrInvalid)
+	}
+	return nil
+}
 
 // selectDeadLetter reads everything a replay needs, and nothing else.
 //
@@ -115,19 +162,23 @@ const deadLetterExists = `SELECT EXISTS (SELECT 1 FROM platform.dead_letter WHER
 // produces a receipt: a wasted delivery rather than a wrong state.
 const selectDeadLetter = `SELECT event_type, envelope, aggregate_id::text, priority, resolved_at IS NOT NULL
   FROM platform.dead_letter
- WHERE event_id = $1`
+ WHERE event_id = $1 AND consumer = $2`
 
-// Replay puts the event back into the outbox under its original identifier.
+// Replay puts the event back into the outbox under its original identifier, owed to the consumer
+// that refused it and to no other.
 //
 // The dead-letter row is left untouched. Resolution is a separate act, performed by a separate
 // role, against evidence this replay may produce.
-func (r *Replayer) Replay(ctx context.Context, eventID id.UUID) (Replay, error) {
+func (r *Replayer) Replay(ctx context.Context, eventID id.UUID, consumer string) (Replay, error) {
 	if eventID.IsNil() {
 		return Replay{}, fmt.Errorf("%w: an event identifier is required", ErrInvalid)
 	}
+	if err := requireConsumerName(consumer); err != nil {
+		return Replay{}, err
+	}
 
 	var out Replay
-	err := db.WithProviderScope(ctx, r.pool, "replay dead-lettered event "+eventID.String(),
+	err := db.WithProviderScope(ctx, r.pool, "replay dead-lettered event "+eventID.String()+" to "+consumer,
 		func(ctx context.Context, tx db.Tx) error {
 			var (
 				eventType   string
@@ -137,17 +188,13 @@ func (r *Replayer) Replay(ctx context.Context, eventID id.UUID) (Replay, error) 
 				resolved    bool
 			)
 
-			var exists bool
-			if err := tx.QueryRow(ctx, deadLetterExists, eventID.String()).Scan(&exists); err != nil {
-				return fmt.Errorf("projection: reading the dead letter for %s: %w", eventID, err)
-			}
-			if !exists {
-				return fmt.Errorf("%w: %s", ErrDeadLetterNotFound, eventID)
+			if err := requireDeadLetter(ctx, tx, eventID, consumer); err != nil {
+				return err
 			}
 
 			// Absence is already ruled out, so anything failing here is a fault and is reported as
 			// one rather than as a missing row.
-			if err := tx.QueryRow(ctx, selectDeadLetter, eventID.String()).Scan(
+			if err := tx.QueryRow(ctx, selectDeadLetter, eventID.String(), consumer).Scan(
 				&eventType, &envelopeRaw, &aggregateID, &priority, &resolved); err != nil {
 				return fmt.Errorf("projection: reading the dead letter for %s: %w", eventID, err)
 			}
@@ -183,12 +230,16 @@ func (r *Replayer) Replay(ctx context.Context, eventID id.UUID) (Replay, error) 
 			// queue behind lifecycle traffic, which is the delay the reserved lane exists to
 			// prevent -- and the incident being replayed is evidence that this event already took
 			// longer than it should have.
-			var opts []outbox.Option
+			opts := []outbox.Option{outbox.To(consumer)}
 			if *priority == outbox.PriorityHigh {
 				opts = append(opts, outbox.Priority())
 			}
 
 			if err := outbox.Append(ctx, tx, aggregate, envelope, opts...); err != nil {
+				if errors.Is(err, outbox.ErrNotSubscribed) {
+					return fmt.Errorf("%w: %q does not subscribe to %s; if it was retired, waive the "+
+						"incident instead", ErrConsumerNotSubscribed, consumer, eventType)
+				}
 				return fmt.Errorf("projection: re-appending %s: %w", eventID, err)
 			}
 
@@ -202,6 +253,7 @@ func (r *Replayer) Replay(ctx context.Context, eventID id.UUID) (Replay, error) 
 			}
 
 			out.EventID = eventID
+			out.Consumer = consumer
 			out.EventType = eventType
 			return nil
 		})

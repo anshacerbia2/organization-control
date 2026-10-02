@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 1.6.0
+  version: 2.0.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-09-17
-  last_reviewed: 2026-09-27
+  last_reviewed: 2026-10-02
   parent_sad: SAD-004
 ---
 
@@ -36,8 +36,8 @@ suite against the real roles.
 Two resolution reasons are in scope:
 
 ```
-REPLAYED      the active consumer applied this event
-SUPERSEDED    the active consumer applied a newer event for the same Membership or Tenant
+REPLAYED      the dead letter's consumer applied this event
+SUPERSEDED    the dead letter's consumer applied a newer event for the same Membership or Tenant
 ```
 
 A waiver is also in scope, and it is not a third resolution reason:
@@ -61,12 +61,17 @@ generation replacement buys over a rebuild: serving from the old generation whil
 builds.
 
 `SUPERSEDED` rests on the same evidence as `REPLAYED`: a `consumer_applied` receipt from the
-active consumer. What differs is which event the receipt is for. The domain proof that lets a
+consumer whose delivery the dead letter records. What differs is which event the receipt is for. The domain proof that lets a
 newer event close the failed one's effect is in **Algorithms / Logic**.
 
-The enforcement scope is also one producer and one projection consumer. `projection.consumer`
-refuses a second active registration, and the database enforces it through a partial unique
-index rather than through the registry alone.
+**A dead letter is one consumer's** (`ADR-GLB-018 §5.3`). Since foundation-platform v0.3.0
+each event owes each subscribed consumer a delivery of its own, and a dead letter is keyed
+`(event_id, consumer)`. Several consumers are active at once, and every act below names the
+incident by both halves of that key: one consumer's refusal is replayed to that consumer, closed
+on that consumer's evidence, or waived for that consumer, and no other consumer's incident for the
+same event is touched. Up to v1.6.0 this design scoped enforcement to one projection consumer, and
+`projection.consumer` refused a second active registration. That limit existed because the outbox
+could record one outcome per event, and it is gone with the per-consumer delivery that ended it.
 
 Security debt is reported per consumer. The dispatcher records which consumer refused each
 event in `platform.dead_letter.consumer` (foundation-platform v0.2.8). When a consumer reads the
@@ -75,28 +80,27 @@ the whole estate. Rows from before v0.2.8 carry `NULL` and are counted for every
 reading `NULL` as nobody's would clear every incident that predates the column. So one
 consumer's poison event no longer refuses another consumer's traffic. A consumer retired with
 debt outstanding also stops blocking the one registered after it, which bootstraps from a
-snapshot taken after the event. Attribution is the half of lifting the single-consumer
-restriction that this repository can make. The other half is delivering one event to several
-consumers with separate outcomes, and that needs a delivery substrate the outbox does not have
-(ROADMAP backlog item 6).
+snapshot taken after the event.
 
 ## Technical Context
 
 Membership security events reach the consumer through `platform.outbox` and a dispatcher that
-delivers over HTTP: the Direct Durable Delivery profile of ADR-GLB-016. The dispatcher runs in
-`foundation-reference`, because ADR-ORG-001 §5.4 forbids outbound HTTP from this service.
+delivers over HTTP: the Direct Durable Delivery profile of ADR-GLB-016. One dispatcher runs per
+consumer and claims that consumer's deliveries alone (`ADR-GLB-018 §5.4`). foundation-reference's
+runs in `foundation-reference`, because ADR-ORG-001 §5.4 forbids outbound HTTP from this service.
 
 Security events travel in the priority lane. The dispatcher dead-letters one only when the
 consumer refuses it permanently (`400`, `409`, `422`), which makes it poison. An unreachable
 consumer never dead-letters one: after three attempts the row is released back for delivery.
-A dead-lettered row is copied to `platform.dead_letter` and marked published, so redelivery
-stops.
+A dead-lettered delivery is copied to `platform.dead_letter` under its consumer's name and marked
+published, so redelivery to that consumer stops. Other consumers' deliveries of the same event are
+unaffected.
 
 The consumer applies an event and its inbox guard in one transaction, and only then
 acknowledges. Acknowledgement therefore means applied. That is a property of this transport,
 not of the type, and it ends the moment a broker sits between the two.
 
-`platform` is versioned by foundation-platform (v0.2.7) on its own release cadence. This
+`platform` is versioned by foundation-platform (v0.3.1) on its own release cadence. This
 repository applies that schema and owns the grants on it, which is why the privilege posture in
 **Data Model** is stated here rather than upstream.
 
@@ -108,9 +112,9 @@ repository applies that schema and owns the grants on it, which is why the privi
 | `dispatch.HTTPPublisher` (foundation-reference) | Delivers one envelope. Classifies `400`/`409`/`422` as poison and everything else as unavailable. Takes the evidence class from the consumer's reply rather than from its own judgement. |
 | Delivery intake (foundation-reference) | Applies the event, then emits the application receipt on exactly the paths where the assertion holds. |
 | `projection.FrontierReader` | Reports publication facts and unresolved security debt. Computes no verdict. |
-| `projection.Registry` | Registers and retires projection consumers, and refuses a second active one. |
-| `projection.Replayer` | Re-appends a dead letter to the outbox under its original `event_id` and priority, from the row itself. Leaves the dead letter untouched. |
-| `projection.Resolver` | Closes a dead letter as `REPLAYED` on the active consumer's `consumer_applied` receipt for the event, or as `SUPERSEDED` on that consumer's `consumer_applied` receipt for a newer version of the same Membership or Tenant. Nothing else. |
+| `projection.Registry` | Registers projection consumers with their subscriptions, and retires them. Retiring abandons the deliveries a consumer was still owed (`ADR-GLB-018 §5.5`). |
+| `projection.Replayer` | Re-appends a dead letter to the outbox under its original `event_id` and priority, from the row itself, owed to the dead letter's consumer alone (`outbox.To`). Leaves the dead letter untouched. |
+| `projection.Resolver` | Closes a dead letter as `REPLAYED` on its consumer's `consumer_applied` receipt for the event, or as `SUPERSEDED` on that consumer's `consumer_applied` receipt for a newer version of the same Membership or Tenant. Nothing else. |
 | `membership.Service` | Writes `membership.membership_event` beside every Membership event it publishes, in the publishing transaction. |
 | `tenant.Service` | Writes `tenant.tenant_event` beside every Tenant event it publishes, in the publishing transaction. |
 | `db.ResolutionPool` | The only pool that can write the resolution columns. It connects as `organization_resolution_rt` through its own credential. |
@@ -184,6 +188,8 @@ platform.delivery_receipt   organization_dispatch_rt     INSERT, SELECT
                             no runtime role              UPDATE, DELETE
                             organization_migrator        DELETE, only through retention (below)
 
+platform.outbox             organization_dispatch_rt     SELECT   (the envelope; publication state is the delivery's)
+
 platform.dead_letter        organization_dispatch_rt     INSERT, SELECT
                             organization_provider_rt     SELECT   (frontier debt facts, replay source)
                             organization_resolution_rt   SELECT, and UPDATE on the four resolution columns
@@ -200,7 +206,19 @@ membership.membership_event organization_rt              INSERT   (written when 
                             organization_provider_rt     none
                             no runtime role              UPDATE, DELETE, TRUNCATE
 
-projection.consumer         organization_resolution_rt   SELECT   (the active consumer, derived server-side)
+platform.outbox_delivery    organization_dispatch_rt     SELECT, UPDATE   (its consumer's claim and outcome)
+                            organization_rt              INSERT   (outbox.Append)
+                            organization_provider_rt     INSERT   (outbox.Append), SELECT (frontier, signals),
+                                                         UPDATE on the columns outbox.Abandon writes (retirement)
+                            organization_consumer_rt     SELECT   (its own frontier)
+
+platform.subscription       organization_provider_rt     SELECT, INSERT, UPDATE (retired_at)
+                                                         (registration and retirement)
+                            organization_rt              SELECT (consumer, event_types, retired_at)
+                                                         (outbox.Append's fan-out)
+                            organization_consumer_rt     SELECT (consumer, event_types, retired_at)
+
+projection.consumer         organization_resolution_rt   SELECT   (whether the dead letter's consumer is active, for a waiver)
                             organization_dispatch_rt     SELECT (consumer_id, retired_at) only
                                                          (the dispatcher's startup check on its own name)
 audit.privileged_access     organization_resolution_rt   INSERT   (the outcome record)
@@ -244,10 +262,20 @@ that earns it.
 Two provider-only operations. Each requires an `X-Administrative-Reason`.
 
 ```
-POST /v1/dead-letters/{event_id}/replay    202  {event_id, event_type, position, resolved: false}
-POST /v1/dead-letters/{event_id}/resolve   200  {event_id, consumer, resolution_type, resolution_reference}
-POST /v1/dead-letters/{event_id}/waive     200  {event_id, consumer, waived_until, waiver_reason, resolved: false}
+POST /v1/dead-letters/{event_id}/consumers/{consumer}/replay    202  {event_id, consumer, event_type, position, resolved: false}
+POST /v1/dead-letters/{event_id}/consumers/{consumer}/resolve   200  {event_id, consumer, resolution_type, resolution_reference}
+POST /v1/dead-letters/{event_id}/consumers/{consumer}/waive     200  {event_id, consumer, waived_until, waiver_reason, resolved: false}
 ```
+
+The path is the dead letter's key. An event dead-lettered at two consumers is two incidents, and
+an operator acting on one acts on it alone. A request naming a consumer with no dead letter for the
+event is `404`, and its message lists the consumers that do have one, so a mistyped name reads as
+what it is.
+
+A dead letter that names no consumer has no address here. It predates foundation-platform v0.2.8,
+when the dispatcher began recording the consumer, and no code path writes one now. An
+authority-bearing one would refuse every consumer and could be closed by none, so the post stage
+refuses to deploy while one is unresolved (§The superseded case).
 
 `resolve` takes an optional body naming the reason:
 
@@ -258,9 +286,10 @@ POST /v1/dead-letters/{event_id}/waive     200  {event_id, consumer, waived_unti
 anything else                         400
 ```
 
-The operator chooses the reason, and the server chooses the subject the evidence must be about.
-The consumer is read from `projection.consumer` and is never accepted from the request, and for
-`SUPERSEDED` the server finds the newer event rather than letting the caller name it.
+The operator chooses the incident and the reason. The incident fixes whose evidence counts: it is
+the dead letter's own consumer, so a caller cannot close one consumer's incident with another
+consumer's receipt. For `SUPERSEDED` the server finds the newer event rather than letting the
+caller name it.
 `resolved_by` is the authenticated operator. An unknown reason, a lower-case spelling, or an
 unknown field is `400`, never a fallback to `REPLAYED`.
 
@@ -270,11 +299,11 @@ unknown field is `400`, never a fallback to `REPLAYED`.
 | No administrative reason, a malformed or nil `event_id`, or an unsupported `resolution_type` | `400` |
 | No dead letter for the event | `404` |
 | Already resolved | `409` |
-| No active projection consumer registered | `412` |
-| `REPLAYED`: no `consumer_applied` receipt for the active consumer | `412` |
-| `SUPERSEDED`: no recorded version for the event, or no newer version of the Membership applied by the active consumer | `412` |
+| `REPLAYED`: no `consumer_applied` receipt from the dead letter's consumer | `412` |
+| `SUPERSEDED`: no recorded version for the event, or no newer version of the Membership applied by the dead letter's consumer | `412` |
 | Waive: no reason, no expiry, or an expiry not after now or beyond 90 days | `400` |
-| Waive: the incident names no consumer, or names the active one | `412` |
+| Waive: the dead letter's consumer is active | `412` |
+| Replay only: the consumer no longer subscribes to the event's type, because it was retired or resubscribed | `412` |
 | Waive: already under an unexpired waiver, or already resolved | `409` |
 | Replay only: the row cannot re-append itself (no envelope, or a null `aggregate_id` or `priority`) | `412` |
 
@@ -282,7 +311,7 @@ Both honour `Idempotency-Key`. The claim is made inside the operation's own tran
 retry after a lost response replays the stored answer. Without the key, a retried `resolve` would
 read the incident as already resolved and answer `409` to a request that succeeded.
 
-The `412` for missing evidence names the active consumer and lists the receipts it did find as
+The `412` for missing evidence names the dead letter's consumer and lists the receipts it did find as
 `consumer (evidence)`. A receipt under another consumer name therefore reads as a
 `DISPATCH_CONSUMER_NAME` mismatch rather than as an absence, and a `transport_accepted` receipt
 reads as a delivery that was never confirmed applied.
@@ -308,7 +337,7 @@ A dead letter `X` may be resolved as `REPLAYED` only if all of the following hol
 ```
 X is unresolved
 a row exists in platform.delivery_receipt for X.event_id
-that row's consumer is the active projection consumer, derived server-side
+that row's consumer is X.consumer
 that row's evidence is 'consumer_applied'
 ```
 
@@ -318,7 +347,7 @@ A dead letter `X` may be resolved as `SUPERSEDED` only if all of the following h
 X is unresolved
 membership.membership_event holds X.event_id, giving membership M and version V
 a row exists in platform.delivery_receipt for some event E
-that row's consumer is the active projection consumer, derived server-side
+that row's consumer is X.consumer
 that row's evidence is 'consumer_applied'
 membership.membership_event holds E.event_id for the same M, with version W > V
 ```
@@ -355,12 +384,12 @@ reasons state different facts, and each is recorded as what it is.
 ```
 record ATTEMPT   "resolve dead-lettered event <id>"          own transaction, before anything else
 BEGIN            as organization_resolution_rt
-  read X: absent -> 404, resolved -> 409
-  read the active consumer: none -> 412
-  REPLAYED:   EXISTS consumer_applied receipt for (X, consumer): no -> 412, naming what was found
+  read X = (event_id, consumer): absent -> 404, resolved -> 409
+  REPLAYED:   EXISTS consumer_applied receipt for (X.event_id, X.consumer): no -> 412, naming what was found
   SUPERSEDED: read (M, V) for X: none -> 412
               find the lowest applied E for M with W > V: none -> 412
-  UPDATE platform.dead_letter SET the four columns WHERE event_id = X AND resolved_at IS NULL
+  UPDATE platform.dead_letter SET the four columns
+   WHERE event_id = X.event_id AND consumer = X.consumer AND resolved_at IS NULL
   rows affected != 1 -> 409
   record OUTCOME "closed dead-lettered event <id> as <reason> on <reference>"
                  SUPERSEDED appends "; Membership <M> version <V> superseded by version <W> (<type>)"
@@ -393,7 +422,7 @@ that an operator knows about it, why, and until when:
 ```
 waive X until T because R
   X is unresolved and not under an unexpired waiver
-  X names a consumer, and it is not the active consumer, derived server-side
+  X's consumer is not active
   now < T <= now + 90 days, on the database clock
   R is not blank
   -> waived_at = now, waived_until = T, waived_by = the operator, waiver_reason = R
@@ -406,10 +435,8 @@ the incident as debt, and the closure record stays empty. The outcome audit reco
 **It never makes a consumer fresh.** The consumer's own frontier never counted another
 consumer's dead letter in the first place (§Scope). The two refusals keep it that way:
 
-- **The active consumer's incident.** This is a live outage with corrective paths: replay it,
+- **An active consumer's incident.** This is a live outage with corrective paths: replay it,
   or supersede it. Silencing its alert would hide exactly what the alert exists to show.
-- **An incident naming no consumer.** It predates attribution and counts against every
-  consumer, the active one included.
 
 **What it changes is operational.** foundation-platform's helpers read the waiver columns:
 
@@ -434,7 +461,8 @@ identity has no debt, no applied position, and nothing inherited.
 
 ```
 1. retire the consumer:           POST /v1/projections/consumers/{old}/retire
-2. register the new identity:     POST /v1/projections/consumers        {consumer_id: new, ...}
+                                  (its subscription is retired and what it was owed abandoned)
+2. register the new identity:     POST /v1/projections/consumers        {consumer_id: new, event_types, ...}
 3. point all three names at it:   DISPATCH_CONSUMER_NAME, REFERENCE_CONSUMER_NAME, and the
                                   registration, which must agree (§Configuration)
 4. bootstrap from a snapshot:     POST /v1/projections/consumers/{new}/bootstrap, then the
@@ -456,8 +484,8 @@ Why it is sound, step by step:
 - **The new projection cannot miss the failed event's effect.** A snapshot reads the
   authoritative tables, and the failed event committed before it was ever dead-lettered.
 - **Unattributed dead letters are the exception.** Those from before foundation-platform v0.2.8
-  name no consumer, so they count for the new identity too. They are replayed or superseded,
-  not rebuilt around.
+  name no consumer, so they count for the new identity too. None can exist on a deployed
+  database, because the post stage refuses one (§The superseded case).
 
 ### Why scalar progress is not evidence
 
@@ -514,8 +542,7 @@ Two states remain that neither reason closes except by `REPLAYED`:
   neither a Membership nor a Tenant event.
 
 **A retired consumer's incident** has no corrective path at all, because no replay reaches its
-consumer. It no longer blocks the active consumer (§Scope), and it is waived rather than closed
-(§WAIVED).
+consumer. It blocks no other consumer (§Scope), and it is waived rather than closed (§WAIVED).
 
 **A dead letter with no closure path at all is refused at deploy.** Rows written by older
 platform versions can lack everything a closure needs:
@@ -523,9 +550,12 @@ platform versions can lack everything a closure needs:
 - no `aggregate_id` or `priority`, from before foundation-platform v0.2.3, so it cannot replay
   itself;
 - no history row, so it cannot be superseded;
-- no `consumer`, from before v0.2.8, or the active consumer's name, so it cannot be waived.
+- an active consumer's name, so it cannot be waived.
 
-An authority-bearing row with all three would refuse every projection-backed check forever.
+An authority-bearing row with all three would refuse its consumer's projection-backed checks
+forever. So would one that names no consumer at all, whatever else it carries: it counts for every
+consumer, and the API addresses a dead letter by its consumer, so nothing can replay, close or
+waive it.
 `organization-migrate -stage=post` lists such rows after the isolation check
 (`controldb.UnclosableDeadLetters`, with `projection.AuthorityEventTypes`), logs each
 `event_id`, and fails. Nothing is in production, so the expected count is zero; the stage asserts
@@ -537,7 +567,7 @@ to declare authority delivered without evidence, the one thing this design refus
 | Setting | Effect |
 | :-- | :-- |
 | `ORGANIZATION_RESOLUTION_DATABASE_URL` | Required, with no fallback. The credential of a login role that inherits `organization_resolution_rt`, opened as its own pool of two connections. Refused at startup when it equals the provider or tenant DSN: a resolution credential shared with another pool would give that pool the power to close incidents. |
-| `DISPATCH_CONSUMER_NAME` (foundation-reference) | The consumer's name, not its endpoint. Delivery receipts are keyed by it, and the resolution predicate asks whether a specific consumer holds a specific event. An endpoint cannot answer that, because an endpoint moves and the identity does not. The dispatch role may read `consumer_id` and `retired_at` of `projection.consumer`, so the dispatcher can refuse to start when this name is not an active registered consumer. Without that check, a mismatch produced receipts no resolution reads, found only when an incident could not be closed. |
+| `DISPATCH_CONSUMER_NAME` (foundation-reference) | The consumer's name, not its endpoint. Each consumer runs its own dispatcher under its own name, and that dispatcher claims only the deliveries owed to that name. Delivery receipts are keyed by it, and the resolution predicate asks whether a specific consumer holds a specific event. An endpoint cannot answer that, because an endpoint moves and the identity does not. The dispatch role may read `consumer_id` and `retired_at` of `projection.consumer`, so the dispatcher can refuse to start when this name is not an active registered consumer. Without that check, a mismatch produced receipts no resolution reads, found only when an incident could not be closed. |
 | `REFERENCE_CONSUMER_NAME` (foundation-reference) | The consumer's own identity for its inbox guard. It must equal the above and the name registered with this service. |
 
 Nothing validates that the three names agree. They are configured separately, and the
@@ -555,7 +585,8 @@ test red, not assumed to.
 | An incident closes on applied evidence, sets all four columns, and clears the frontier debt | `internal/projection/resolve_integration_test.go` `TestAnIncidentClosesOnAppliedEvidence` |
 | No evidence, another consumer's receipt, or a `transport_accepted` receipt resolves nothing | same file: `TestAnIncidentWithNoEvidenceStaysOpen`, `TestAReceiptUnderAnotherConsumerNameResolvesNothing`, `TestTransportAcceptanceIsNotResolutionEvidence` |
 | A keyed resolution claims its key under the resolution role, and a retry replays the stored response | same file: `TestAKeyedResolutionClaimsItsKeyAndARetryIsAnsweredFromIt` |
-| A closed or unknown incident is refused; nothing registered to enforce is refused | same file: `TestResolvingAClosedIncidentIsRefused`, `TestResolvingAnUnknownEventIsRefused`, `TestTheResolverRefusesWhenNothingIsRegisteredToEnforce` |
+| A closed or unknown incident is refused, and a consumer with no dead letter for the event is refused with the consumers that have one | same file: `TestResolvingAClosedIncidentIsRefused`, `TestResolvingAnUnknownEventIsRefused`, `TestAnIncidentIsAddressedByItsConsumer` |
+| One consumer's incident closes on its own evidence and leaves another consumer's incident for the same event open | same file: `TestOneConsumersClosureLeavesAnothersIncidentOpen` |
 | The resolution role cannot rewrite the incident or manufacture its own evidence | same file: `TestTheResolutionRoleCannotRewriteTheIncident`, `TestTheResolutionRoleCannotManufactureItsOwnEvidence` |
 | The replay role cannot resolve what it replayed | `internal/projection/replay_integration_test.go` `TestTheReplayRoleCannotResolveWhatItReplayed` |
 | The outcome is recorded inside the closing transaction; a refusal leaves no account of a closure | `resolve_integration_test.go` `TestAClosureRecordsItselfInsideTheTransactionThatMadeIt`, `TestARefusedClosureLeavesNoAccountOfAClosure` |
@@ -566,11 +597,11 @@ test red, not assumed to.
 | The resolution role cannot insert, renumber, or erase Membership history | same file: `TestTheResolutionRoleCannotRewriteMembershipHistory` |
 | A Tenant event closes as `SUPERSEDED` on a newer applied one for the same Tenant, and an older one never supersedes it. A mutation replacing the version comparison was observed turning it red | `internal/projection/superseded_tenant_integration_test.go` `TestATenantEventClosesAsSupersededOnANewerAppliedOne`, `TestAnOlderTenantEventDoesNotSupersedeANewerOne` |
 | The resolution role reads Tenant history and cannot insert, renumber, or erase it | same file: `TestTheResolutionRoleCannotRewriteTenantHistory` |
-| The post stage names exactly the dead letters no resolution can close: unreplayable, unversioned, and unattributed or the active consumer's. It does not name a waivable, replayable, versioned or non-authority row. A mutation dropping the replayability condition was observed turning it red | `internal/controldb/unclosable_integration_test.go` `TestThePostStageNamesOnlyDeadLettersNoResolutionCanClose` |
+| The post stage names exactly the dead letters no resolution can close: every unattributed one, and those that are unreplayable, unversioned and an active consumer's. It does not name a waivable, replayable, versioned or non-authority row. A mutation dropping the replayability condition was observed turning it red | `internal/controldb/unclosable_integration_test.go` `TestThePostStageNamesOnlyDeadLettersNoResolutionCanClose` |
 | Every published Tenant event has a history row that agrees with it, and a rolled-back transition leaves none | `internal/tenant/service_integration_test.go` `TestEveryPublishedTenantEventRecordsItsSecurityVersion` |
 | The frontier counts every type the Membership and Tenant state machines publish, and nothing else | `internal/httpapi/frontier_debt_test.go` `TestTheFrontierDebtCoversEveryAuthorityEvent` |
-| A retired consumer's incident is waived and stays open: `resolved_at` stays null, the estate frontier still reports the debt, the active consumer is not charged with it, and no closure record is filed | `internal/projection/waive_integration_test.go` `TestARetiredConsumersIncidentIsWaivedAndStaysOpen` |
-| A waiver is refused for the active consumer's incident and for one naming no consumer, and the refusal names the corrective path. It is also refused without a reason, or with an expiry outside (now, now + 90 days]. A mutation making the active consumer's incident waivable was observed turning it red | same file: `TestAWaiverIsRefusedWhereItWouldHideALiveOutage` |
+| A retired consumer's incident is waived and stays open: `resolved_at` stays null, the estate frontier still reports the debt, an active consumer is not charged with it, and no closure record is filed | `internal/projection/waive_integration_test.go` `TestARetiredConsumersIncidentIsWaivedAndStaysOpen` |
+| A waiver is refused for an active consumer's incident, and the refusal names the corrective path. It is also refused without a reason, or with an expiry outside (now, now + 90 days]. A mutation making an active consumer's incident waivable was observed turning it red | same file: `TestAWaiverIsRefusedWhereItWouldHideALiveOutage` |
 | A standing waiver is not stacked, and a resolved incident is not waived | same file: `TestAWaiverIsNotStackedOrAppliedToAClosedIncident` |
 | A malformed waiver, or one from a tenant caller, is refused before the database | `internal/httpapi/dead_letter_resolve_test.go` `TestAMalformedWaiverIsRefusedBeforeTheDatabase`, `TestAWaiverIsProviderScoped` |
 | Every published Membership event has a history row that agrees with it, and a rolled-back transition leaves none | `internal/membership/service_integration_test.go` `TestEveryPublishedEventRecordsItsVersion` |
@@ -578,7 +609,9 @@ test red, not assumed to.
 | An unsupported `resolution_type`, a lower-case spelling, or an unknown field is `400` before the database is reached | `internal/httpapi/dead_letter_resolve_test.go` `TestAResolutionNamingAnUnsupportedReasonIsRefused` |
 | The attempt is recorded before the transaction and survives its rollback | `internal/db/binding_test.go` `TestProviderAccessIsRecordedBeforeTheTransaction`; `internal/access/access_integration_test.go` `TestEvidenceSurvivesADomainRollback` |
 | A resolution credential shared with another pool is refused | `internal/config/config_test.go` `TestAResolutionCredentialSharedWithAnotherPoolIsRefused`, with the suite clearing ambient `ORGANIZATION_*` variables |
-| A second active projection consumer is refused, by registry and by constraint | `internal/projection/consumer_single_active_integration_test.go`; two CI mutations |
+| Several consumers are active at once, each owed only its subscribed types; a subscription change or a revival clears the snapshot mark; retiring abandons only that consumer's deliveries; a type the registry does not offer is refused | `internal/projection/consumer_integration_test.go` |
+| A replay is owed to the refusing consumer alone, and one to a consumer that no longer subscribes is refused | `internal/projection/replay_integration_test.go` `TestAReplayIsOwedToTheRefusingConsumerAlone`, `TestAReplayToAConsumerThatNoLongerSubscribesIsRefused` |
+| Each consumer's frontier counts its own owed deliveries; the estate counts all | `internal/projection/frontier_integration_test.go` `TestEachConsumersFrontierCountsItsOwnDeliveries` |
 | Every role holds exactly its declared platform privileges, and new platform tables arrive closed | `internal/controldb/platform_privileges_integration_test.go`; CI mutation |
 | A superseded delivery carries no application receipt | `foundation-reference/internal/httpapi/receipt_test.go`; CI mutation |
 | Applied evidence cannot be claimed without the consumer's marker | `foundation-platform/outbox/receipt_integration_test.go`; CI mutation |
@@ -651,9 +684,12 @@ authority the consumer cannot vouch for. The incident is the undelivered event.
 Recovery:
 
 1. Fix the cause the consumer refused for.
-2. Replay the highest dead-lettered version of each affected Membership.
-3. Confirm that the replay produced a `consumer_applied` receipt.
+2. Replay the highest dead-lettered version of each affected Membership, to that consumer.
+3. Confirm that the replay produced a `consumer_applied` receipt from that consumer.
 4. Resolve it as `REPLAYED`, and each lower version of the same Membership as `SUPERSEDED`.
+
+Each step names the consumer. An event dead-lettered at two consumers is recovered twice, once
+per consumer, because each consumer's evidence is its own.
 
 Skipping step 3 leads to a resolve with no evidence behind it, which the predicate refuses. If
 a newer event for the Membership was already delivered and applied, step 2 is unnecessary for

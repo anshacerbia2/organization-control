@@ -43,15 +43,15 @@ func history(t *testing.T, f *fixture, eventID, membershipID, tenantID id.UUID, 
 }
 
 // deadLettered files an incident for a Membership event that also has its history row.
-func deadLettered(t *testing.T, f *fixture, membershipID, tenantID id.UUID, version int64, eventType string) id.UUID {
+func deadLettered(t *testing.T, f *fixture, consumer string, membershipID, tenantID id.UUID, version int64, eventType string) id.UUID {
 	t.Helper()
 	eventID := mustID(t)
 	f.exec(t, `INSERT INTO platform.dead_letter
 	    (event_id, event_type, envelope, payload, aggregate_id, failure_class, failure_detail,
-	     attempts, first_failed_at)
+	     attempts, first_failed_at, consumer)
 	    VALUES ($1::uuid, $2, '{}'::jsonb, '{}'::jsonb, $3::uuid, 'poison',
-	            'the consumer refused the envelope', 3, clock_timestamp())`,
-		eventID.String(), eventType, membershipID.String())
+	            'the consumer refused the envelope', 3, clock_timestamp(), $4)`,
+		eventID.String(), eventType, membershipID.String(), consumer)
 	t.Cleanup(func() {
 		f.exec(t, `DELETE FROM platform.dead_letter WHERE event_id = $1`, eventID.String())
 	})
@@ -98,7 +98,7 @@ func TestAnIncidentClosesAsSupersededOnANewerAppliedEvent(t *testing.T) {
 	tenantID := f.seedTenant(t)
 	membershipID := f.seedMembership(t, tenantID, 4)
 
-	failed := deadLettered(t, f, membershipID, tenantID, 3, typeSuspended)
+	failed := deadLettered(t, f, consumer, membershipID, tenantID, 3, typeSuspended)
 	newer := applied(t, f, membershipID, tenantID, 4, typeRestored, consumer, "consumer_applied")
 
 	reader, err := NewFrontierReader(f.pool)
@@ -111,7 +111,7 @@ func TestAnIncidentClosesAsSupersededOnANewerAppliedEvent(t *testing.T) {
 	}
 
 	r, _ := resolver(t, f)
-	resolution, err := r.Supersede(f.ctx, failed)
+	resolution, err := r.Supersede(f.ctx, failed, consumer)
 	if err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
@@ -149,11 +149,11 @@ func TestAReplayedOlderEventDoesNotSupersedeANewerRevocation(t *testing.T) {
 	tenantID := f.seedTenant(t)
 	membershipID := f.seedMembership(t, tenantID, 5)
 
-	revocation := deadLettered(t, f, membershipID, tenantID, 5, typeRevoked)
+	revocation := deadLettered(t, f, consumer, membershipID, tenantID, 5, typeRevoked)
 	applied(t, f, membershipID, tenantID, 4, typeGranted, consumer, "consumer_applied")
 
 	r, _ := resolver(t, f)
-	if _, err := r.Supersede(f.ctx, revocation); !errors.Is(err, ErrNotSuperseded) {
+	if _, err := r.Supersede(f.ctx, revocation, consumer); !errors.Is(err, ErrNotSuperseded) {
 		t.Fatalf("Supersede returned %v, want ErrNotSuperseded: an older event's receipt closed "+
 			"a revocation the consumer never applied", err)
 	}
@@ -174,13 +174,13 @@ func TestANewerEventThatIsNotEvidenceSupersedesNothing(t *testing.T) {
 	membershipID := f.seedMembership(t, tenantID, 3)
 	otherMembership := f.seedMembership(t, tenantID, 9)
 
-	failed := deadLettered(t, f, membershipID, tenantID, 2, typeSuspended)
+	failed := deadLettered(t, f, consumer, membershipID, tenantID, 2, typeSuspended)
 	applied(t, f, membershipID, tenantID, 3, typeRestored, consumer, "transport_accepted")
 	applied(t, f, membershipID, tenantID, 4, typeSuspended, consumer+"-typo", "consumer_applied")
 	applied(t, f, otherMembership, tenantID, 9, typeRestored, consumer, "consumer_applied")
 
 	r, _ := resolver(t, f)
-	_, err := r.Supersede(f.ctx, failed)
+	_, err := r.Supersede(f.ctx, failed, consumer)
 	if !errors.Is(err, ErrNotSuperseded) {
 		t.Fatalf("Supersede returned %v, want ErrNotSuperseded", err)
 	}
@@ -197,10 +197,11 @@ func TestANewerEventThatIsNotEvidenceSupersedesNothing(t *testing.T) {
 func TestAnIncidentWithNoRecordedVersionCannotBeSuperseded(t *testing.T) {
 	f := newFixture(t)
 	f.register(t)
-	eventID, _ := abandoned(t, f, outbox.PriorityHigh, true)
+	consumer := f.register(t)
+	eventID, _ := abandoned(t, f, consumer, outbox.PriorityHigh, true)
 
 	r, _ := resolver(t, f)
-	_, err := r.Supersede(f.ctx, eventID)
+	_, err := r.Supersede(f.ctx, eventID, consumer)
 	if !errors.Is(err, ErrNotSuperseded) {
 		t.Fatalf("Supersede returned %v, want ErrNotSuperseded", err)
 	}
@@ -217,11 +218,11 @@ func TestANewerAppliedEventDoesNotCloseAnIncidentAsReplayed(t *testing.T) {
 	tenantID := f.seedTenant(t)
 	membershipID := f.seedMembership(t, tenantID, 4)
 
-	failed := deadLettered(t, f, membershipID, tenantID, 3, typeSuspended)
+	failed := deadLettered(t, f, consumer, membershipID, tenantID, 3, typeSuspended)
 	applied(t, f, membershipID, tenantID, 4, typeRestored, consumer, "consumer_applied")
 
 	r, _ := resolver(t, f)
-	if _, err := r.Resolve(f.ctx, failed); !errors.Is(err, ErrNoAppliedEvidence) {
+	if _, err := r.Resolve(f.ctx, failed, consumer); !errors.Is(err, ErrNoAppliedEvidence) {
 		t.Fatalf("Resolve returned %v, want ErrNoAppliedEvidence", err)
 	}
 }

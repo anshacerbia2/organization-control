@@ -39,8 +39,11 @@ import (
 var expectedPlatformPrivileges = map[string]map[string][]string{
 	"organization_rt": {
 		// outbox.Append, called from membership, invitation, workspace, organization, tenant and
-		// offboarding transitions, inside the caller's own domain transaction.
-		"outbox": {"INSERT"},
+		// offboarding transitions, inside the caller's own domain transaction. The same statement
+		// writes the delivery each subscriber is owed; its read of three platform.subscription
+		// columns is column-level and so is not listed here.
+		"outbox":          {"INSERT"},
+		"outbox_delivery": {"INSERT"},
 		// The idempotency claim store runs on the tenant connections by design.
 		"idempotency_key": {"INSERT", "SELECT", "UPDATE"},
 		// dead_letter: none. No request-path code reads incident evidence. It previously held
@@ -50,8 +53,14 @@ var expectedPlatformPrivileges = map[string]map[string][]string{
 		// database, and referenced nowhere in this repository's Go code.
 	},
 	"organization_provider_rt": {
-		"outbox":      {"INSERT", "SELECT"},
-		"dead_letter": {"SELECT"},
+		"outbox": {"INSERT", "SELECT"},
+		// Append, the frontier and the lane signals; the abandonment at a retirement writes six
+		// columns, which is column-level and so not listed.
+		"outbox_delivery": {"INSERT", "SELECT"},
+		// Registration subscribes, and retirement retires the subscription through the one
+		// column-level UPDATE it holds.
+		"subscription": {"INSERT", "SELECT"},
+		"dead_letter":  {"SELECT"},
 		// claimWithin inside withProviderScope. Completion runs on the tenant connections, so no
 		// UPDATE; grantcheck found the one the old schema-wide grant carried unused.
 		"idempotency_key": {"INSERT", "SELECT"},
@@ -73,13 +82,19 @@ var expectedPlatformPrivileges = map[string]map[string][]string{
 	// A registered consumer: the snapshot's high-water mark and the frontier read the outbox and the
 	// unresolved dead letters, and claimWithin runs inside its recorded scope. Nothing written.
 	"organization_consumer_rt": {
-		"outbox":          {"SELECT"},
+		"outbox": {"SELECT"},
+		// Its own owed deliveries, for its frontier.
+		"outbox_delivery": {"SELECT"},
 		"dead_letter":     {"SELECT"},
 		"idempotency_key": {"INSERT", "SELECT"},
 	},
 	"organization_dispatch_rt": {
-		"outbox": {"SELECT", "UPDATE"},
-		// SELECT is not for reading incidents. `ON CONFLICT (event_id) DO NOTHING` makes
+		// The envelope. Publication state is the delivery's since foundation-platform v0.3.0, so
+		// the UPDATE it held here is withdrawn.
+		"outbox": {"SELECT"},
+		// The claim, the lease and the outcome, for its consumer's deliveries alone.
+		"outbox_delivery": {"SELECT", "UPDATE"},
+		// SELECT is not for reading incidents. `ON CONFLICT ON CONSTRAINT dead_letter_delivery` makes
 		// PostgreSQL require SELECT on the table being inserted into; measured, not assumed.
 		"dead_letter": {"INSERT", "SELECT"},
 		// Measured for this table too rather than carried across from the one above. Assuming it

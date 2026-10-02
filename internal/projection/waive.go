@@ -14,11 +14,10 @@ package projection
 // NULL, so the estate view still counts the incident; and a consumer's own view never counted
 // another consumer's row in the first place. The two rules below keep it that way:
 //
-//   - The refusing consumer must be named, and must not be the active one. A dead letter the
-//     active consumer refused is a live outage with corrective paths -- replay it, or supersede
-//     it -- and silencing its alert would hide exactly the thing the alert exists to show. A dead
-//     letter naming no consumer predates attribution and counts against everyone, including the
-//     active consumer, so it is refused for the same reason.
+//   - The refusing consumer must not be active. A dead letter an active consumer refused is a live
+//     outage with corrective paths -- replay it, or supersede it -- and silencing its alert would
+//     hide exactly the thing the alert exists to show. The dead letter is named by its consumer
+//     (ADR-GLB-018 §5.3), so one that names no consumer has no address here at all.
 //   - It expires, within MaxWaiver. An exception somebody forgot becomes a question again.
 //
 // Like a resolution, it runs as organization_resolution_rt, which holds UPDATE on the four waiver
@@ -60,27 +59,32 @@ type Waiver struct {
 }
 
 const readForWaiver = `SELECT resolved_at IS NOT NULL,
-       consumer,
        waived_until IS NOT NULL AND waived_until > now(),
        now()
   FROM platform.dead_letter
- WHERE event_id = $1`
+ WHERE event_id = $1 AND consumer = $2`
+
+const consumerActive = `SELECT EXISTS (
+    SELECT 1 FROM projection.consumer WHERE consumer_id = $1 AND retired_at IS NULL)`
 
 const waiveDeadLetter = `UPDATE platform.dead_letter
    SET waived_at     = now(),
-       waived_until  = $2,
-       waived_by     = $3,
-       waiver_reason = $4
+       waived_until  = $3,
+       waived_by     = $4,
+       waiver_reason = $5
  WHERE event_id = $1
+   AND consumer = $2
    AND resolved_at IS NULL`
 
-// Waive records a waiver on an unresolved dead letter refused by a consumer that is no longer
-// active, until the given instant.
-func (r *Resolver) Waive(ctx context.Context, eventID id.UUID, reason string, until time.Time) (Waiver, error) {
+// Waive records a waiver on the consumer's unresolved dead letter for the event, until the given
+// instant, when that consumer is no longer active.
+func (r *Resolver) Waive(ctx context.Context, eventID id.UUID, consumer, reason string, until time.Time) (Waiver, error) {
 	reason = strings.TrimSpace(reason)
 	switch {
 	case eventID.IsNil():
 		return Waiver{}, fmt.Errorf("%w: an event identifier is required", ErrInvalid)
+	case strings.TrimSpace(consumer) == "":
+		return Waiver{}, requireConsumerName(consumer)
 	case reason == "":
 		return Waiver{}, fmt.Errorf("%w: a waiver must say why", ErrInvalid)
 	case until.IsZero():
@@ -92,17 +96,18 @@ func (r *Resolver) Waive(ctx context.Context, eventID id.UUID, reason string, un
 	}
 
 	var out Waiver
-	err := db.WithResolutionScope(ctx, r.pool, "waive dead-lettered event "+eventID.String(),
+	err := db.WithResolutionScope(ctx, r.pool, "waive dead-lettered event "+eventID.String()+" at "+consumer,
 		func(ctx context.Context, tx db.Tx) error {
+			if err := requireDeadLetter(ctx, tx, eventID, consumer); err != nil {
+				return err
+			}
 			var (
 				resolved, waived bool
-				consumer         *string
 				now              time.Time
 			)
-			if err := tx.QueryRow(ctx, readForWaiver, eventID.String()).Scan(
-				&resolved, &consumer, &waived, &now); err != nil {
-				// No row, or the read failed; either way there is nothing to waive.
-				return fmt.Errorf("%w: %s", ErrDeadLetterNotFound, eventID)
+			if err := tx.QueryRow(ctx, readForWaiver, eventID.String(), consumer).Scan(
+				&resolved, &waived, &now); err != nil {
+				return fmt.Errorf("projection: reading the dead letter for %s at %s: %w", eventID, consumer, err)
 			}
 			if resolved {
 				return fmt.Errorf("%w: %s", ErrAlreadyResolved, eventID)
@@ -115,24 +120,17 @@ func (r *Resolver) Waive(ctx context.Context, eventID id.UUID, reason string, un
 				return fmt.Errorf("%w: a waiver must expire after now and within %s of it, not at %s",
 					ErrInvalid, MaxWaiver, until.UTC().Format(time.RFC3339))
 			}
-			if consumer == nil {
-				return fmt.Errorf("%w: %s names no consumer, so it predates attribution and counts "+
-					"against every consumer, the active one included; replay or supersede it instead",
-					ErrNotWaivable, eventID)
+			var active bool
+			if err := tx.QueryRow(ctx, consumerActive, consumer).Scan(&active); err != nil {
+				return fmt.Errorf("projection: reading whether %s is active: %w", consumer, err)
+			}
+			if active {
+				return fmt.Errorf("%w: %s was refused by %q, which is enforcing now; its debt is a "+
+					"live outage with a corrective path, so replay or supersede it instead",
+					ErrNotWaivable, eventID, consumer)
 			}
 
-			var active *string
-			if err := tx.QueryRow(ctx,
-				`SELECT (SELECT consumer_id FROM projection.consumer WHERE retired_at IS NULL)`).Scan(&active); err != nil {
-				return fmt.Errorf("projection: reading the active consumer: %w", err)
-			}
-			if active != nil && *active == *consumer {
-				return fmt.Errorf("%w: %s was refused by %q, the consumer that is enforcing now; its "+
-					"debt is a live outage with a corrective path, so replay or supersede it instead",
-					ErrNotWaivable, eventID, *consumer)
-			}
-
-			tag, err := tx.Exec(ctx, waiveDeadLetter, eventID.String(), until.UTC(), scope.Actor().String(), reason)
+			tag, err := tx.Exec(ctx, waiveDeadLetter, eventID.String(), consumer, until.UTC(), scope.Actor().String(), reason)
 			if err != nil {
 				return fmt.Errorf("projection: waiving %s: %w", eventID, err)
 			}
@@ -146,12 +144,12 @@ func (r *Resolver) Waive(ctx context.Context, eventID id.UUID, reason string, un
 				Actor:       scope.Actor(),
 				Correlation: scope.Correlation(),
 				Reason: fmt.Sprintf("waived dead-lettered event %s refused by %q until %s: %s",
-					eventID, *consumer, until.UTC().Format(time.RFC3339), reason),
+					eventID, consumer, until.UTC().Format(time.RFC3339), reason),
 			}); err != nil {
 				return fmt.Errorf("projection: recording the waiver of %s: %w", eventID, err)
 			}
 
-			out = Waiver{EventID: eventID, Consumer: *consumer, Until: until.UTC(), Reason: reason}
+			out = Waiver{EventID: eventID, Consumer: consumer, Until: until.UTC(), Reason: reason}
 			return nil
 		})
 	if err != nil {

@@ -39,6 +39,8 @@ BEGIN
               ('audit.privileged_access'),
               ('projection.consumer'),
               ('platform.outbox'),
+              ('platform.outbox_delivery'),
+              ('platform.subscription'),
               ('platform.processed_event'),
               ('platform.dead_letter'),
               ('platform.delivery_receipt'),
@@ -262,6 +264,40 @@ ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA platform
 GRANT INSERT ON platform.outbox TO organization_rt;
 GRANT INSERT ON platform.outbox TO organization_provider_rt;
 
+-- platform.outbox_delivery -- INSERT, and platform.subscription -- SELECT on three columns
+--
+-- organization_rt, organization_provider_rt -> outbox.Append -> appendStatement
+--
+-- One statement writes the event and the delivery each subscriber is owed (ADR-GLB-018 §5.2). It
+-- reads which consumers subscribe, and reads nothing back from the outbox, so neither role gains
+-- a read of the outbox it appends to (§5.6). The three columns show which consumers exist and what
+-- each receives, which is configuration rather than authority data.
+GRANT INSERT ON platform.outbox_delivery TO organization_rt, organization_provider_rt;
+GRANT SELECT (consumer, event_types, retired_at) ON platform.subscription TO organization_rt;
+
+-- platform.subscription -- provider only, the rest of it
+--
+-- organization_provider_rt -> projection.Registry.Register -> outbox.Subscribe -> INSERT, and
+--                             UPDATE retired_at on the subscription it replaces
+--                          -> projection.Registry.Retire   -> outbox.Unsubscribe -> UPDATE retired_at
+--                          -> projection.Registry.Get      -> selectConsumer     -> SELECT event_types
+--
+-- Column-level UPDATE: a subscription is replaced, never edited, so no role rewrites event_types.
+GRANT SELECT, INSERT ON platform.subscription TO organization_provider_rt;
+GRANT UPDATE (retired_at) ON platform.subscription TO organization_provider_rt;
+
+-- platform.outbox_delivery -- SELECT and the abandonment's columns, provider only
+--
+-- organization_provider_rt -> projection.FrontierReader -> frontierStatement -> SELECT
+--                          -> projection.SignalsReader  -> laneSignals       -> SELECT
+--                          -> projection.Registry.Retire -> outbox.Abandon   -> UPDATE
+--
+-- The UPDATE is the six columns Abandon writes, so a retirement can close what the retired consumer
+-- was owed (ADR-GLB-018 §5.5) and cannot touch anything that identifies the delivery.
+GRANT SELECT ON platform.outbox_delivery TO organization_provider_rt;
+GRANT UPDATE (published, failure_class, last_error, next_attempt_at, lease_id, leased_until)
+    ON platform.outbox_delivery TO organization_provider_rt;
+
 -- platform.outbox -- SELECT, provider only
 --
 -- organization_provider_rt -> projection.Publisher.Snapshot -> markStatement -> SELECT
@@ -333,15 +369,23 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA platform FROM PUBLIC;
 -- schema-wide grant would hand this role both, and would silently hand it whatever the substrate
 -- adds to the schema next.
 GRANT USAGE ON SCHEMA platform TO organization_dispatch_rt;
-GRANT SELECT, UPDATE            ON platform.outbox      TO organization_dispatch_rt;
+
+-- SELECT on the outbox, for the envelope, and SELECT and UPDATE on the deliveries, for the claim,
+-- the lease and the outcome. Since foundation-platform v0.3.0 publication state is a delivery's
+-- (ADR-GLB-018 §5.2), so the dispatcher no longer writes the outbox at all, and the UPDATE it held
+-- there is withdrawn.
+GRANT SELECT                    ON platform.outbox          TO organization_dispatch_rt;
+REVOKE UPDATE                   ON platform.outbox          FROM organization_dispatch_rt;
+GRANT SELECT, UPDATE            ON platform.outbox_delivery TO organization_dispatch_rt;
 
 -- INSERT and SELECT on dead_letter. UPDATE is withdrawn; SELECT is required, and not for the
 -- reason it looks like.
 --
--- deadLetterStatement inserts into dead_letter and SELECTs from the OUTBOX, so the obvious
--- reading is that INSERT alone suffices. It does not. The statement ends
--- `ON CONFLICT (event_id) DO NOTHING`, and a conflict target makes PostgreSQL demand SELECT on
--- the table being inserted into. Measured rather than reasoned, as the identical statement with
+-- deadLetterStatement inserts into dead_letter and SELECTs from the outbox and the delivery, so the
+-- obvious reading is that INSERT alone suffices. It does not. The statement ends
+-- `ON CONFLICT ON CONSTRAINT dead_letter_delivery DO NOTHING` (it ended `ON CONFLICT (event_id)`
+-- before v0.3.0), and a conflict target makes PostgreSQL demand SELECT on the table being inserted
+-- into. Measured rather than reasoned, as the identical statement with
 -- and without the clause, under this exact role:
 --
 --   INSERT ... VALUES (...)                                    -> INSERT 0 1
@@ -382,7 +426,7 @@ GRANT USAGE, SELECT             ON SEQUENCE platform.outbox_sequence TO organiza
 -- No DELETE on the outbox. A dispatched row is marked published, never removed: retention is the
 -- maintenance job's decision, and a worker able to delete is a worker whose bug is unrecoverable
 -- because the evidence goes with it.
-REVOKE DELETE ON platform.outbox FROM organization_dispatch_rt;
+REVOKE DELETE ON platform.outbox, platform.outbox_delivery FROM organization_dispatch_rt;
 
 -- Whether its own consumer name is registered and active, read once at startup.
 --
@@ -509,6 +553,12 @@ GRANT UPDATE (snapshot_mark, last_reported_mark, last_reported_at, verify_calls_
 -- Read-only. A consumer that could write either could forge the facts its own freshness is judged by.
 GRANT SELECT ON platform.outbox TO organization_consumer_rt;
 GRANT SELECT ON platform.dead_letter TO organization_consumer_rt;
+
+-- Its own owed deliveries, for its frontier, and its subscription's types, for its registry row.
+-- The frontier filters to the consumer's own deliveries; reading the table is what that filter
+-- runs on, and it writes neither.
+GRANT SELECT ON platform.outbox_delivery TO organization_consumer_rt;
+GRANT SELECT (consumer, event_types, retired_at) ON platform.subscription TO organization_consumer_rt;
 
 -- The idempotency claim, for the reason the resolution role holds it: claimWithin runs inside
 -- every recorded scope, so a keyed request claims its key under this role.

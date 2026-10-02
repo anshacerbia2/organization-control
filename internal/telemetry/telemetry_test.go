@@ -69,10 +69,10 @@ func TestTheGaugesReportTheSignals(t *testing.T) {
 	ratio := 0.2
 	got := collect(t, fixedReader{signals: projection.Signals{
 		Lanes: []projection.LaneSignal{
-			{Lane: "priority", Count: 2, OldestAge: 45},
-			{Lane: "standard", Count: 7, OldestAge: 400},
+			{Consumer: "foundation-reference", Lane: "priority", Count: 2, OldestAge: 45},
+			{Consumer: "foundation-reference", Lane: "standard", Count: 7, OldestAge: 400},
 		},
-		SecurityDebt: 1, SecurityDebtOldestAge: 90,
+		Debt:  []projection.DebtSignal{{Consumer: "foundation-reference", Count: 1, OldestAge: 90}},
 		Stale: 3, StaleOldestAge: 100000,
 		Consumers: []projection.ConsumerSignal{
 			{Consumer: "foundation-reference", ReportAge: 120, MaxAcceptedAge: 60, VerifyRatio: &ratio},
@@ -87,8 +87,8 @@ func TestTheGaugesReportTheSignals(t *testing.T) {
 		{OutboxUnpublished, "lane", "priority", 2},
 		{OutboxOldestUnpublished, "lane", "priority", 45},
 		{OutboxOldestUnpublished, "lane", "standard", 400},
-		{SecurityDebt, "", "", 1},
-		{SecurityDebtOldest, "", "", 90},
+		{SecurityDebt, "consumer", "foundation-reference", 1},
+		{SecurityDebtOldest, "consumer", "foundation-reference", 90},
 		{StaleDeadLetters, "", "", 3},
 		{StaleDeadLettersOldest, "", "", 100000},
 		{ConsumerReportAge, "consumer", "foundation-reference", 120},
