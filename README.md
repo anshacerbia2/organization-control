@@ -337,6 +337,12 @@ The anonymous route reads nothing. SAD-004 §5.5 requires an invitation lookup t
 for an absent, expired, revoked, accepted, and valid token, and the only construction where that
 holds for the status code, the body, *and* the response time is one that looks nothing up.
 
+### Against the kernel
+
+The dev issuer drives this service alone. Delivering provider grants to the Identity Control API,
+and serving its workload on the consumer routes, needs kernel tokens on both sides:
+identity-control's `docs/run.md` §8 wires the two, in an order where each step's token still works.
+
 ### Driving the service by hand
 
 Every authenticated route needs a token from the issuer named in `ORGANIZATION_JWKS_URL`, so without
