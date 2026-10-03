@@ -124,6 +124,12 @@ Enforcement is the sum of a propagation term this service starts and a token-lif
 term the token profile owns. No single owner states the interval; the operational
 dashboard presents the sum.
 
+## On the development server
+
+`deploy/dev` runs this service on the shared development server, the way every service there is
+deployed (STD-GLB-009 §Development Server Deployment). Its README is the procedure, and its
+§Wiring to other services connects this service to the Identity Control API.
+
 ## Building the database
 
 Four sources build one database, and each is owned by whoever owns the SQL:

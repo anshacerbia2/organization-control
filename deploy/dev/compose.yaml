@@ -1,0 +1,134 @@
+# organization-control on the development server, beside identity-kernel's and identity-control's
+# stacks (STD-GLB-009 §Development Server Deployment).
+#
+#   docker compose up -d --build
+#
+# Its own Control Database (EAD-003 keeps each domain's persistence private), a one-shot migration
+# job that must succeed before the service starts, the service with its delivery dispatcher in
+# process (ADR-GLB-018 §5.4), and the one-off tasks behind profiles. It reaches Keycloak over the
+# kernel's scnehaux-identity-api network, and identity-control over identity-control's
+# scnehaux-identity-control-api network, which identity-control reaches it on in turn. Start both of
+# those stacks first; each creates its network.
+
+name: scnehaux-organization-control-dev
+
+services:
+  postgres:
+    # postgres:17.11-alpine
+    image: postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      # Organization's authority data, provider grants included. `docker compose down -v` destroys
+      # it and is never part of a procedure: the Identity Control API's provider projection is built
+      # from these grants, and a new database would revoke them there.
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [internal]
+
+  migrate:
+    build:
+      context: ../..
+      target: migrate
+    # Named, so every one-off task below runs this image and `up --build` rebuilds them with the
+    # release.
+    image: scnehaux-organization-control-dev-migrate
+    restart: "no"
+    environment:
+      POSTGRES_SUPER_URL: postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432
+      ORGANIZATION_RUNTIME_PASSWORD: ${ORGANIZATION_RUNTIME_PASSWORD:?set ORGANIZATION_RUNTIME_PASSWORD in .env}
+      ORGANIZATION_PROVIDER_PASSWORD: ${ORGANIZATION_PROVIDER_PASSWORD:?set ORGANIZATION_PROVIDER_PASSWORD in .env}
+      ORGANIZATION_DISPATCH_PASSWORD: ${ORGANIZATION_DISPATCH_PASSWORD:?set ORGANIZATION_DISPATCH_PASSWORD in .env}
+      ORGANIZATION_RESOLUTION_PASSWORD: ${ORGANIZATION_RESOLUTION_PASSWORD:?set ORGANIZATION_RESOLUTION_PASSWORD in .env}
+      ORGANIZATION_CONSUMER_PASSWORD: ${ORGANIZATION_CONSUMER_PASSWORD:?set ORGANIZATION_CONSUMER_PASSWORD in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
+  # The first provider grant (README §Bootstrapping the first provider), run once by an operator:
+  # an emergency provider:organization-control grant for the Identity Control API's ceremony
+  # Principal. It writes as the provider role, never the migration one.
+  bootstrap-provider:
+    image: scnehaux-organization-control-dev-migrate
+    profiles: ["bootstrap-provider"]
+    entrypoint: ["organization-control", "bootstrap-provider"]
+    environment:
+      ORGANIZATION_PROVIDER_DATABASE_URL: postgres://organization_provider_app:${ORGANIZATION_PROVIDER_PASSWORD:?set ORGANIZATION_PROVIDER_PASSWORD in .env}@postgres:5432/organization_control?sslmode=disable
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [internal]
+
+  # The daily maintenance stage: outbox partitions, retention, and the stale-incident count
+  # (README §Building the database). Run it from cron on the server; it exits 3 on an incident open
+  # past 24 hours.
+  maintenance:
+    image: scnehaux-organization-control-dev-migrate
+    profiles: ["maintenance"]
+    entrypoint: ["organization-migrate", "-stage=maintenance"]
+    environment:
+      ORGANIZATION_MIGRATION_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/organization_control?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
+  organization-control:
+    build:
+      context: ../..
+      target: service
+    restart: unless-stopped
+    # The workload's private key in ./keys is mode 0600 and owned by KEYS_OWNER, the image's nonroot
+    # user unless a local override says otherwise.
+    user: "${KEYS_OWNER:-65532:65532}"
+    environment:
+      # One login role per pool, each inheriting its own group role (scripts/login-roles.sql).
+      ORGANIZATION_TENANT_DATABASE_URL: postgres://organization_app:${ORGANIZATION_RUNTIME_PASSWORD:?set ORGANIZATION_RUNTIME_PASSWORD in .env}@postgres:5432/organization_control?sslmode=disable
+      ORGANIZATION_PROVIDER_DATABASE_URL: postgres://organization_provider_app:${ORGANIZATION_PROVIDER_PASSWORD:?set ORGANIZATION_PROVIDER_PASSWORD in .env}@postgres:5432/organization_control?sslmode=disable
+      ORGANIZATION_RESOLUTION_DATABASE_URL: postgres://organization_resolution_app:${ORGANIZATION_RESOLUTION_PASSWORD:?set ORGANIZATION_RESOLUTION_PASSWORD in .env}@postgres:5432/organization_control?sslmode=disable
+      ORGANIZATION_CONSUMER_DATABASE_URL: postgres://organization_consumer_app:${ORGANIZATION_CONSUMER_PASSWORD:?set ORGANIZATION_CONSUMER_PASSWORD in .env}@postgres:5432/organization_control?sslmode=disable
+      ORGANIZATION_LISTEN_ADDRESS: ":8080"
+      # A development server: a provider activation needs no second provider's approval unless set.
+      ORGANIZATION_ENVIRONMENT: non-production
+      # Tokens come from the kernel. The issuer is its public one, whatever address Keycloak is
+      # reached on; the key set is fetched over the private network. The audience is this service's
+      # keyless resource registration, never a client (STD-IAM-002 §3.1).
+      ORGANIZATION_TOKEN_ISSUER: ${KEYCLOAK_ISSUER:?set KEYCLOAK_ISSUER in .env}
+      ORGANIZATION_JWKS_URL: http://keycloak:8080/realms/scnehaux/protocol/openid-connect/certs
+      ORGANIZATION_TOKEN_AUDIENCE: organization-control-api
+      # Delivery to the Identity Control API (ADR-GLB-018 §5.4, TDD-identity-control-006). Empty
+      # until README §Wiring to other services sets it; the service then runs no dispatcher.
+      ORGANIZATION_DELIVERY_TARGETS: ${ORGANIZATION_DELIVERY_TARGETS:-}
+      ORGANIZATION_DISPATCH_DATABASE_URL: postgres://organization_dispatch_app:${ORGANIZATION_DISPATCH_PASSWORD:?set ORGANIZATION_DISPATCH_PASSWORD in .env}@postgres:5432/organization_control?sslmode=disable
+      ORGANIZATION_WORKLOAD_CLIENT_ID: organization-control-workload
+      ORGANIZATION_WORKLOAD_KEY_FILE: /keys/organization-control-workload.pem
+      ORGANIZATION_WORKLOAD_TOKEN_URL: http://keycloak:8080/realms/scnehaux/protocol/openid-connect/token
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./keys:/keys:ro
+    ports:
+      - "127.0.0.1:${ORGANIZATION_CONTROL_PORT:-8083}:8080"
+    networks: [internal, kernel, identity-control]
+
+volumes:
+  postgres:
+
+networks:
+  internal:
+  kernel:
+    external: true
+    name: scnehaux-identity-api
+  # identity-control's api network: Organization Control delivers to it, and it reads Organization
+  # Control's snapshot and frontier over it.
+  identity-control:
+    external: true
+    name: scnehaux-identity-control-api
