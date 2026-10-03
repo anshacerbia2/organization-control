@@ -34,3 +34,8 @@ Thumbs.db
 
 # The PR body, written locally and read by `gh pr create`. Not repository content.
 /.pr-body.md
+
+# The development server's environment and private keys (deploy/dev). Each holds credentials; only
+# deploy/dev/.env.example is committed, and only public JWKs leave the server.
+deploy/dev/.env
+deploy/dev/keys/
