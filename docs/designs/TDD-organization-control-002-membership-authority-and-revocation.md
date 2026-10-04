@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.7.0
+  version: 1.8.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-02
+  last_reviewed: 2026-10-04
   parent_sad: SAD-004
 ---
 
@@ -449,10 +449,18 @@ reordered predecessor:
 ```
 
 Every Tenant security or activation event similarly carries `tenant_id`, complete
-`tenant_status`, and `tenant_security_version`. Snapshot rows use the same fields. The
-versions, not delivery order or `streamposition`, decide which desired state is newer;
-this is mandatory because the priority lane may deliver a revocation before an older
-grant.
+`tenant_status`, `tenant_version` and `tenant_security_version`. Snapshot rows use the same fields:
+each row carries its Membership's fields and its Tenant's `tenant_status`, `tenant_version` and
+`tenant_security_version`. The versions, not delivery order or `streamposition`, decide which
+desired state is newer; this is mandatory because the priority lane may deliver a revocation
+before an older grant.
+- **`tenant_version` joined the snapshot row in 1.8.0.** Before it, a consumer that keeps Tenant
+  state could not order a row's `tenant_status` against a Tenant event it had already applied.
+- **The two Tenant versions answer different questions.** `tenant_version` orders two states of one
+  Tenant, and `tenant_security_version` decides whether a held context is stale. A transition that
+  does not increment the security version publishes the same value twice, so it cannot order them.
+- **The consumer that needs it** is identity-control, which projects each Tenant's status into the
+  kernel (`TDD-identity-control-002` 2.0.0).
 
 ### Bootstrap Contract
 

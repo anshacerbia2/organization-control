@@ -27,8 +27,12 @@ type Row struct {
 	MembershipStatus  string `json:"membership_status"`
 	MembershipVersion int64  `json:"membership_version"`
 
-	TenantStatus          string `json:"tenant_status"`
-	TenantSecurityVersion int64  `json:"tenant_security_version"`
+	TenantStatus string `json:"tenant_status"`
+	// TenantVersion orders the Tenant state this row carries against a Tenant event, as the Tenant
+	// event's own tenant_version does. Without it a consumer could not tell whether a Tenant event
+	// it already applied is newer than the status a snapshot row reports.
+	TenantVersion         int64 `json:"tenant_version"`
+	TenantSecurityVersion int64 `json:"tenant_security_version"`
 }
 
 // Page is one page of a snapshot.
@@ -133,6 +137,7 @@ const selectRows = `SELECT m.membership_id::text,
        m.status,
        m.membership_version,
        t.status,
+       t.version,
        t.tenant_security_version
 FROM membership.membership m
 JOIN tenant.tenant t ON t.tenant_id = m.tenant_id
@@ -224,7 +229,7 @@ func snapshotIn(ctx context.Context, tx db.Tx, req SnapshotRequest, size int, pa
 		)
 		if err := rows.Scan(&rawMembership, &rawPrincipal, &rawTenant, &rawWorkspace,
 			&row.SubjectType, &row.MembershipStatus, &row.MembershipVersion,
-			&row.TenantStatus, &row.TenantSecurityVersion); err != nil {
+			&row.TenantStatus, &row.TenantVersion, &row.TenantSecurityVersion); err != nil {
 			return fmt.Errorf("projection: scan row: %w", err)
 		}
 		if row.MembershipID, err = id.Parse(rawMembership); err != nil {

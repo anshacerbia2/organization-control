@@ -317,6 +317,20 @@ func TestAReportedPositionCannotGoBackwards(t *testing.T) {
 // TestPagingCoversTheSetOnceWithNoDuplicate is the "no gap and no duplicate" half of the exit
 // criterion, at the paging layer.
 //
+// A row carries its Tenant's version beside its status, so a consumer orders the Tenant state of a
+// snapshot against a Tenant event the way it orders two Tenant events.
+func TestASnapshotRowCarriesTheTenantVersion(t *testing.T) {
+	f := newFixture(t)
+	consumerID := f.register(t)
+	tenantID := f.seedTenant(t)
+	f.exec(t, `UPDATE tenant.tenant SET version = 7, tenant_security_version = 3 WHERE tenant_id = $1`, tenantID.String())
+	f.seedMembership(t, tenantID, 1)
+	rows := f.rowsFor(t, consumerID, tenantID)
+	if len(rows) != 1 || rows[0].TenantVersion != 7 || rows[0].TenantSecurityVersion != 3 || rows[0].TenantStatus != "active" {
+		t.Fatalf("rows %+v; want one active row at tenant version 7, security version 3", rows)
+	}
+}
+
 // Keyset paging on membership_id rather than OFFSET: the cursor is what makes a page boundary
 // stable, and an OFFSET-paged snapshot re-reads and discards everything it skips.
 func TestPagingCoversTheSetOnceWithNoDuplicate(t *testing.T) {
