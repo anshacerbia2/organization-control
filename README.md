@@ -244,12 +244,23 @@ names, and `sub` is not read.
 
 | Caller | Token | Record read for each request |
 | :-- | :-- | :-- |
-| Tenant administrator | `tenant_id` | — |
+| Tenant administrator | `subject_type` `human`, `tenant_id`, `acr` `aal2` or higher, `auth_time` | in that Tenant: an active Membership, the Tenant active, and a tenant administration grant (ADR-ORG-003) |
 | Provider | `subject_type` `human`, `acr`, `auth_time`, no `tenant_id` | a provider grant for the `principal_id` |
 | Projection consumer | `subject_type` `workload`, `workload_owner`, no `tenant_id` | an active consumer registered with the `principal_id` |
 
-A revoked grant or a retired consumer stops at the next request, not when the token expires. A record
-read that fails answers 503 and admits nobody.
+A revoked grant, a retired consumer, a revoked Membership or a suspended Tenant stops at the next
+request, not when the token expires. A record read that fails answers 503 and admits nobody.
+
+**A Tenant's administrators** are granted by a provider, with `X-Administrative-Reason`:
+
+```text
+GET   /v1/tenants/{tenant_id}/administrators
+POST  /v1/tenants/{tenant_id}/administrators                  {"principal_id": "..."}
+POST  /v1/tenants/{tenant_id}/administrators/{grant_id}/revoke
+```
+
+A grant gives a Principal with no Membership in the Tenant a Tenant-wide one, in the same
+transaction. A revocation leaves the Membership in place.
 
 **The first provider grant** is made once, by a command on the deployable:
 

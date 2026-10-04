@@ -140,7 +140,7 @@
       "the caller records through an interface the composition root fills, so authentication holds",
       "no statement."
     ],
-    "internal/authority": ["internal/db", "internal/system"],
+    "internal/authority": ["internal/db", "internal/system", "internal/membership"],
 
     "_comment_delivery": [
       "internal/delivery runs this service's consumers' dispatchers (ADR-GLB-018 5.4). It reaches no",

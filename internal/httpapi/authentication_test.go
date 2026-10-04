@@ -45,6 +45,8 @@ type fakeRecords struct {
 	eligible  map[id.UUID]bool
 	emergency map[id.UUID]bool
 	consumers map[id.UUID]string
+	// standings is each Principal's standing in each Tenant; one absent stands nowhere.
+	standings map[[2]id.UUID]authority.TenantStanding
 	err       error
 	reads     int
 }
@@ -67,17 +69,29 @@ func (f *fakeRecords) ConsumerFor(_ context.Context, principal id.UUID) (string,
 	return f.consumers[principal], f.err
 }
 
+func (f *fakeRecords) TenantStanding(_ context.Context, principal, tenant, _ id.UUID) (authority.TenantStanding, error) {
+	f.reads++
+	return f.standings[[2]id.UUID{principal, tenant}], f.err
+}
+
 // The Principals the fake records know.
 var (
 	testProvider         = id.MustParse("01a0f64a-c533-7000-a956-c3f095484a01")
 	testConsumerWorkload = id.MustParse("01a0f64a-c533-7000-a956-c3f095484a02")
 	testConsumerName     = "foundation-reference"
+
+	// testAdministrator administers testTenant: an active Membership, an active Tenant and a grant.
+	testAdministrator = id.MustParse("01a0f64a-c533-7000-a956-c3f095484a03")
+	testTenant        = id.MustParse("01a0f64a-c533-7000-a956-c3f095484a04")
 )
 
 func testRecords() *fakeRecords {
 	return &fakeRecords{
 		providers: map[id.UUID]bool{testProvider: true},
 		consumers: map[id.UUID]string{testConsumerWorkload: testConsumerName},
+		standings: map[[2]id.UUID]authority.TenantStanding{
+			{testAdministrator, testTenant}: {Member: true, TenantActive: true, Granted: true},
+		},
 	}
 }
 
@@ -88,7 +102,7 @@ func testAuthConfig() AuthenticationConfig {
 // The three token shapes of TDD-organization-control-001 §Caller Authority.
 func tenantClaims(principal, tenant id.UUID) map[string]any {
 	return map[string]any{"sub": "kc-user", "principal_id": principal.String(), "subject_type": "human",
-		"tenant_id": tenant.String()}
+		"tenant_id": tenant.String(), "acr": "aal2", "auth_time": time.Now().Unix()}
 }
 
 func providerClaims(principal id.UUID) map[string]any {
@@ -225,7 +239,7 @@ func TestAuthenticateResolvesATenantCallerByPrincipalID(t *testing.T) {
 	t.Parallel()
 
 	s := newSigner(t)
-	principal, tenantID := mustID(t), mustID(t)
+	principal, tenantID := testAdministrator, testTenant
 	records := testRecords()
 
 	caller, called, recorder := authenticated(t, s, AuthenticationConfig{Records: records, Consumers: true},
@@ -242,8 +256,75 @@ func TestAuthenticateResolvesATenantCallerByPrincipalID(t *testing.T) {
 	case caller.Tenant != tenantID:
 		t.Errorf("the caller's Tenant is %s, want %s", caller.Tenant, tenantID)
 	}
-	if records.reads != 0 {
-		t.Errorf("a tenant token read %d records, want none", records.reads)
+	if records.reads != 1 {
+		t.Errorf("a tenant token read %d records, want its standing in the Tenant once", records.reads)
+	}
+}
+
+// A tenant token is admitted only with all three facts in the Tenant it selects (ADR-ORG-003 §5.3).
+// Each missing alone is refused with the same message, and so is the right Principal in another
+// Tenant: tenant_id selects, and confers nothing.
+func TestATenantTokenNeedsAllThreeFactsInItsTenant(t *testing.T) {
+	t.Parallel()
+
+	s := newSigner(t)
+	other := mustID(t)
+	cases := map[string]authority.TenantStanding{
+		"not a member":      {TenantActive: true, Granted: true},
+		"Tenant not active": {Member: true, Granted: true},
+		"no grant":          {Member: true, TenantActive: true},
+	}
+	var messages []string
+	for name, standing := range cases {
+		records := testRecords()
+		records.standings[[2]id.UUID{testAdministrator, other}] = standing
+		_, called, recorder := authenticated(t, s, AuthenticationConfig{Records: records, Consumers: true},
+			s.sign(t, tenantClaims(testAdministrator, other)))
+		if called || recorder.Code != http.StatusForbidden {
+			t.Errorf("%s: answered %d, called=%t, want 403", name, recorder.Code, called)
+		}
+		messages = append(messages, recorder.Body.String())
+	}
+	for _, message := range messages[1:] {
+		if message != messages[0] {
+			t.Errorf("the refusals differ, and so tell which record is missing:\n%s\n%s", messages[0], message)
+		}
+	}
+
+	_, called, recorder := authenticated(t, s, testAuthConfig(), s.sign(t, tenantClaims(testAdministrator, mustID(t))))
+	if called || recorder.Code != http.StatusForbidden {
+		t.Errorf("the administrator of one Tenant selecting another answered %d, called=%t, want 403", recorder.Code, called)
+	}
+}
+
+// Tenant administration is privileged access at aal2 (ADR-IAM-004), and only a person holds it. The
+// claims are checked before any record is read.
+func TestATenantTokenNeedsAPersonAtAAL2(t *testing.T) {
+	t.Parallel()
+
+	s := newSigner(t)
+	admin := tenantClaims(testAdministrator, testTenant)
+	for name, claims := range map[string]map[string]any{
+		"no acr":          without(admin, "acr"),
+		"acr aal1":        with(admin, "acr", "aal1"),
+		"acr unmapped 1":  with(admin, "acr", "1"),
+		"no auth_time":    without(admin, "auth_time"),
+		"a workload":      with(admin, "subject_type", "workload"),
+		"acr not aal2ish": with(admin, "acr", "AAL2"),
+	} {
+		records := testRecords()
+		_, called, recorder := authenticated(t, s, AuthenticationConfig{Records: records, Consumers: true},
+			s.sign(t, claims))
+		if called || recorder.Code != http.StatusForbidden {
+			t.Errorf("%s: answered %d, called=%t, want 403", name, recorder.Code, called)
+		}
+		if records.reads != 0 {
+			t.Errorf("%s: read %d records before refusing the claims", name, records.reads)
+		}
+	}
+	_, called, recorder := authenticated(t, s, testAuthConfig(), s.sign(t, with(admin, "acr", "phr")))
+	if !called {
+		t.Errorf("acr phr, above aal2, answered %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -338,6 +419,7 @@ func TestAFailedRecordReadAnswers503(t *testing.T) {
 	for name, claims := range map[string]map[string]any{
 		"provider": providerClaims(testProvider),
 		"consumer": consumerClaims(testConsumerWorkload),
+		"tenant":   tenantClaims(testAdministrator, testTenant),
 	} {
 		_, called, recorder := authenticated(t, s, AuthenticationConfig{Records: records, Consumers: true},
 			s.sign(t, claims))
@@ -431,6 +513,9 @@ func TestRequirementAndMapperAgree(t *testing.T) {
 		without(providerClaims(mustID(t)), "acr"),
 		without(consumerClaims(mustID(t)), "workload_owner"),
 		with(providerClaims(mustID(t)), "tenant_id", "not-a-uuid"),
+		without(tenantClaims(mustID(t), mustID(t)), "auth_time"),
+		with(tenantClaims(mustID(t), mustID(t)), "acr", "aal1"),
+		with(tenantClaims(mustID(t), mustID(t)), "subject_type", "workload"),
 	}
 
 	for index, set := range sets {

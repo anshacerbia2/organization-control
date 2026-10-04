@@ -37,11 +37,10 @@ func (r *recorder) RecordProviderAccess(context.Context, db.ProviderAccess) erro
 type fixture struct {
 	setup *fdb.Pool
 
-	service      *Service
-	provider     *db.ProviderPool
-	providerCtx  context.Context
-	tenantCtxFor func(id.UUID) context.Context
-	fixed        time.Time
+	service     *Service
+	provider    *db.ProviderPool
+	providerCtx context.Context
+	fixed       time.Time
 }
 
 func dsnFor(t *testing.T, user, password string) string {
@@ -138,14 +137,7 @@ func newFixture(t *testing.T) *fixture {
 		service:     service,
 		provider:    provider,
 		providerCtx: db.WithScope(ctx, providerScope),
-		tenantCtxFor: func(tenantID id.UUID) context.Context {
-			scope, err := db.TenantScope(tenantID, actor, correlation)
-			if err != nil {
-				t.Fatalf("TenantScope: %v", err)
-			}
-			return db.WithScope(ctx, scope)
-		},
-		fixed: fixed,
+		fixed:       fixed,
 	}
 }
 
@@ -267,10 +259,10 @@ func (f *fixture) begin(t *testing.T, tenantID id.UUID, hold bool) Offboarding {
 // freezeAll drains the freeze in batches, the way a worker does.
 func (f *fixture) freezeAll(t *testing.T, tenantID id.UUID, size int) int {
 	t.Helper()
-	ctx := f.tenantCtxFor(tenantID)
+	ctx := f.providerCtx
 	total := 0
 	for round := 0; round < 100; round++ {
-		frozen, err := f.service.FreezeBatch(ctx, tenantID, size)
+		frozen, err := f.service.FreezeBatch(ctx, tenantID, size, "offboarding suite freeze")
 		if err != nil {
 			t.Fatalf("FreezeBatch round %d: %v", round, err)
 		}
@@ -332,7 +324,7 @@ func TestTheFreezeIsResumableAndSuspendsEveryMembership(t *testing.T) {
 	f.begin(t, tenantID, false)
 
 	// One batch of two, simulating a worker that stopped after the first batch.
-	first, err := f.service.FreezeBatch(f.tenantCtxFor(tenantID), tenantID, 2)
+	first, err := f.service.FreezeBatch(f.providerCtx, tenantID, 2, "offboarding suite freeze")
 	if err != nil {
 		t.Fatalf("FreezeBatch: %v", err)
 	}
@@ -371,7 +363,7 @@ func TestCompleteFreezeCountsRatherThanTrustingTheCaller(t *testing.T) {
 	tenantID, _ := f.seed(t, 3)
 	record := f.begin(t, tenantID, false)
 
-	if _, err := f.service.FreezeBatch(f.tenantCtxFor(tenantID), tenantID, 1); err != nil {
+	if _, err := f.service.FreezeBatch(f.providerCtx, tenantID, 1, "offboarding suite freeze"); err != nil {
 		t.Fatalf("FreezeBatch: %v", err)
 	}
 	if _, err := f.service.CompleteFreeze(f.providerCtx, record.OffboardingID); err == nil {

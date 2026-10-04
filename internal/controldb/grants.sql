@@ -34,6 +34,7 @@ BEGIN
               ('workspace.workspace'),
               ('membership.membership'),
               ('membership.membership_event'),
+              ('membership.tenant_admin_grant'),
               ('invitation.invitation'),
               ('operation.offboarding'),
               ('operation.offboarding_obligation'),
@@ -164,6 +165,15 @@ GRANT SELECT                 ON membership.membership TO organization_provider_r
 -- one and close a revocation's dead letter as superseded by it. The resolver reads it through its
 -- own role, below.
 GRANT INSERT ON membership.membership_event TO organization_rt;
+
+-- membership.tenant_admin_grant -- tenant only (ADR-ORG-003). SELECT for the check every tenant
+-- request makes, under that Tenant's policy; INSERT for a grant; UPDATE on the three revocation
+-- columns alone, which the revocation's lock needs as well. No DELETE, and no UPDATE of who was
+-- granted, by whom, when or why. A provider makes both writes, through db.WithProviderInTenant on
+-- the tenant pool, and the restrictive policies in rls.sql refuse them from any other transaction.
+-- The provider role holds nothing here.
+GRANT SELECT, INSERT ON membership.tenant_admin_grant TO organization_rt;
+GRANT UPDATE (revoked_at, revoked_by, revoke_reason) ON membership.tenant_admin_grant TO organization_rt;
 
 -- invitation.invitation
 --   organization_rt          SELECT, INSERT, UPDATE   issue, accept, revoke

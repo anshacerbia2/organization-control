@@ -140,6 +140,11 @@ func main() {
 	// event. A provider or consumer token names the Principal the records know unless another is
 	// asked for; a tenant token mints one per token, so two sessions stay distinguishable in the
 	// evidence. sub is the protocol subject and the service never reads it.
+	//
+	// A tenant token selects a Tenant and confers nothing (ADR-ORG-003): its Principal administers
+	// the Tenant only with an active Membership there and a tenant administration grant, which a
+	// provider makes at POST /v1/tenants/{tenant_id}/administrators. Ask for that Principal's token
+	// with principal_id. It carries acr aal2, which tenant administration requires.
 	mux.HandleFunc("GET /token", func(w http.ResponseWriter, r *http.Request) {
 		role := r.URL.Query().Get("role")
 		if role == "" {
@@ -222,6 +227,8 @@ func main() {
 			}
 			person(minted.String())
 			claims["tenant_id"] = tenantID
+			// Tenant administration is privileged access at two factors (ADR-IAM-004).
+			claims["acr"] = "aal2"
 		case "consumer":
 			// A workload: the service finds the consumer registered with its principal_id.
 			if principal == "" {

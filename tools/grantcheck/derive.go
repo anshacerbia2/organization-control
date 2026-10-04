@@ -55,6 +55,8 @@ var Roles = []string{tenantRole, providerRole, resolutionRole, consumerRole}
 // wrappers are the scope entry points, by SSA function name, and the role their pool connects as.
 var wrappers = map[string]string{
 	dbPkg + ".WithTenantScope":      tenantRole,
+	dbPkg + ".WithTenantRead":       tenantRole,
+	dbPkg + ".WithProviderInTenant": tenantRole,
 	dbPkg + ".WithProviderScope":    providerRole,
 	dbPkg + ".WithProviderSnapshot": providerRole,
 	dbPkg + ".WithResolutionScope":  resolutionRole,

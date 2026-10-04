@@ -9,6 +9,7 @@ import (
 
 	platform "github.com/anshacerbia2/foundation-platform/httpapi"
 	"github.com/anshacerbia2/foundation-platform/id"
+	"github.com/anshacerbia2/foundation-platform/observability"
 	"github.com/anshacerbia2/foundation-platform/verify"
 
 	"github.com/anshacerbia2/organization-control/internal/authority"
@@ -40,11 +41,12 @@ const (
 	// SubjectTypeClaim says whether the Principal is a person or a workload.
 	SubjectTypeClaim = "subject_type"
 
-	// TenantIDClaim carries the one Tenant a tenant-scoped caller administers.
+	// TenantIDClaim selects the one Tenant a tenant-scoped caller acts in. It confers nothing: the
+	// caller administers that Tenant only by its records (ADR-ORG-003).
 	TenantIDClaim = "tenant_id"
 
 	// AuthContextClassClaim and AuthTimeClaim are the assurance claims STD-IAM-002 §3.2 makes
-	// mandatory on a privileged token, which a provider's is.
+	// mandatory on a privileged token, which a provider's and a Tenant administrator's are.
 	AuthContextClassClaim = "acr"
 	AuthTimeClaim         = "auth_time"
 
@@ -67,6 +69,10 @@ type CallerRecords interface {
 	// ConsumerFor names the active projection consumer registered with the Principal, or "" when
 	// there is none.
 	ConsumerFor(ctx context.Context, principal id.UUID) (string, error)
+
+	// TenantStanding reads, in the Tenant, the Principal's Membership, the Tenant's status and its
+	// tenant administration grant (ADR-ORG-003 §5.3).
+	TenantStanding(ctx context.Context, principal, tenant, correlation id.UUID) (authority.TenantStanding, error)
 }
 
 // AuthenticationConfig is what authentication needs besides the verifier.
@@ -191,8 +197,14 @@ type Middleware = func(http.Handler) http.Handler
 // the moment that prefix changed. The ways to fail are named here instead, which is what a caller
 // needs to fix their own token and discloses nothing about this service's configuration.
 const insufficientClaims = "The token's claims confer no scope: it must carry a principal_id and a " +
-	"subject_type, and either a tenant_id, or no tenant_id with acr and auth_time for a person or " +
-	"workload_owner for a workload"
+	"subject_type, and either a tenant_id with a person's acr of aal2 or higher and auth_time, or no " +
+	"tenant_id with acr and auth_time for a person or workload_owner for a workload"
+
+// notAdministrator is the 403 detail for a tenant token whose Principal does not administer the
+// Tenant. One message for the three facts: the caller learns that it does not administer the
+// Tenant, not which record is missing.
+const notAdministrator = "The token's principal_id does not administer this Tenant: that needs an active " +
+	"Membership in an active Tenant and a tenant administration grant"
 
 // Requirement is the claim rule `verify.New` refuses to build without.
 //
@@ -234,7 +246,8 @@ type presented struct {
 
 // presentedFromClaims applies the claim rule of TDD-organization-control-001 §Caller Authority.
 //
-// A token with a Tenant is a tenant caller, whoever it names. One without is a candidate provider
+// A token with a Tenant is a candidate Tenant administrator, and must be a person's at aal2 or higher
+// with auth_time (ADR-ORG-003 §5.3). One without is a candidate provider
 // when it names a person, and must then carry the assurance claims a privileged token carries; or a
 // candidate consumer when it names a workload, and must then carry its owner. Realm roles are not
 // read: STD-IAM-002 §3.2 keeps them out of every access token, and a role the token did carry would
@@ -268,7 +281,18 @@ func presentedFromClaims(claims verify.Claims) (presented, error) {
 		if err != nil || tenant.IsNil() {
 			return presented{}, errors.New("the tenant_id claim is not a valid identifier")
 		}
-		return presented{principal: principal, workload: workload, tenant: tenant}, nil
+		// Tenant administration is privileged access, and ADR-IAM-004 requires two factors for it.
+		// Only a person administers a Tenant: a workload carries no acr to step up.
+		if workload {
+			return presented{}, errors.New("a token with a tenant_id must name a person: a workload administers no Tenant")
+		}
+		if acr, _ := claims.String(AuthContextClassClaim); !atLeastAAL2(acr) {
+			return presented{}, errors.New("a token with a tenant_id must carry acr aal2 or higher")
+		}
+		if _, ok := claims.Int64(AuthTimeClaim); !ok {
+			return presented{}, errors.New("a token with a tenant_id must carry auth_time")
+		}
+		return presented{principal: principal, tenant: tenant}, nil
 	}
 
 	if workload {
@@ -289,17 +313,33 @@ func presentedFromClaims(claims verify.Claims) (presented, error) {
 	return presented{principal: principal}, nil
 }
 
+// atLeastAAL2 is whether acr is aal2 or a higher level, in STD-IAM-002 §3.2's order: aal1, aal2,
+// phr. Any other value, the kernel's unmapped 0 and 1 included, is below aal1.
+func atLeastAAL2(acr string) bool {
+	return acr == "aal2" || acr == "phr"
+}
+
 // errRecords marks a failure to read the caller records, which is answered 503 rather than 403.
 var errRecords = errors.New("httpapi: the caller records could not be read")
 
-// authorize reads the record a token without a Tenant needs, and builds the caller.
+// authorize reads the records the token's caller needs, and builds the caller.
 //
-// One record per request, never both: a person can only be a provider and a workload only a
-// consumer, so the token's subject_type decides which is read. A workload holding a provider grant
-// gains nothing from it — STD-IAM-002 §3.2 keeps provider authority off workload tokens — and a
-// person registered as a consumer is not one.
+// A token with a Tenant reads that Tenant's records: the caller administers it only with an active
+// Membership, an active Tenant and a tenant administration grant (ADR-ORG-003 §5.3). Otherwise one
+// record per request, never both: a person can only be a provider and a workload only a consumer, so
+// the token's subject_type decides which is read. A workload holding a provider grant gains nothing
+// from it — STD-IAM-002 §3.2 keeps provider authority off workload tokens — and a person registered
+// as a consumer is not one.
 func authorize(ctx context.Context, p presented, cfg AuthenticationConfig) (Caller, error) {
 	if !p.tenant.IsNil() {
+		correlation, _ := observability.CorrelationID(ctx)
+		standing, err := cfg.Records.TenantStanding(ctx, p.principal, p.tenant, correlation)
+		if err != nil {
+			return Caller{}, errors.Join(errRecords, err)
+		}
+		if !standing.Administers() {
+			return Caller{}, errors.New(notAdministrator)
+		}
 		return Caller{Subject: p.principal, Tenant: p.tenant}, nil
 	}
 

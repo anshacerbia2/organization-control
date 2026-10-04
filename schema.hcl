@@ -906,6 +906,80 @@ table "membership_event" {
   }
 }
 
+// Who administers each Tenant (ADR-ORG-003). A token's tenant_id only selects a Tenant; a Principal
+// administers it while it holds an active Membership there and a grant here that is not revoked.
+// Granted and revoked by a provider alone, through db.WithProviderInTenant: the tenant role holds the
+// privileges, and the restrictive policies in internal/controldb/rls.sql refuse a write from any other
+// transaction. Insert-only but for the three revocation columns, like a provider grant.
+table "tenant_admin_grant" {
+  schema  = schema.membership
+  comment = "Tenant administration grants (ADR-ORG-003). Written by a provider only. RLS-protected."
+
+  column "grant_id" {
+    null = false
+    type = uuid
+  }
+  column "tenant_id" {
+    null = false
+    type = uuid
+  }
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+  // The provider who made the grant, by principal_id.
+  column "granted_by" {
+    null = false
+    type = uuid
+  }
+  column "reason" {
+    null = false
+    type = text
+  }
+  column "granted_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  // The revocation: when, by which provider, and why. NULL while the grant is in force.
+  column "revoked_at" {
+    null = true
+    type = timestamptz
+  }
+  column "revoked_by" {
+    null = true
+    type = uuid
+  }
+  column "revoke_reason" {
+    null = true
+    type = text
+  }
+
+  primary_key {
+    columns = [column.grant_id]
+  }
+
+  foreign_key "tenant_admin_grant_tenant_fk" {
+    columns     = [column.tenant_id]
+    ref_columns = [table.tenant.column.tenant_id]
+  }
+
+  // The per-request lookup, and one grant in force per Principal and Tenant. Partial, so a Principal
+  // revoked and granted again holds a second row beside the revoked one.
+  index "tenant_admin_grant_active" {
+    unique  = true
+    columns = [column.principal_id, column.tenant_id]
+    where   = "revoked_at IS NULL"
+  }
+
+  check "tenant_admin_grant_reason_check" {
+    expr = "btrim(reason) <> ''"
+  }
+  check "tenant_admin_grant_revocation_check" {
+    expr = "((revoked_at IS NULL) = (revoked_by IS NULL)) AND ((revoked_at IS NULL) = (revoke_reason IS NULL)) AND ((revoke_reason IS NULL) OR (btrim(revoke_reason) <> ''))"
+  }
+}
+
 table "invitation" {
   schema  = schema.invitation
   comment = "Intent to establish a future Membership. Not an identity proof. RLS-protected."

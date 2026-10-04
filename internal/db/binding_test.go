@@ -58,7 +58,8 @@ func TestScopeBindingLivesInExactlyOnePackage(t *testing.T) {
 			return readErr
 		}
 		text := string(body)
-		if !strings.Contains(text, "app.tenant_id") && !strings.Contains(text, "app.provider_scope") {
+		if !strings.Contains(text, "app.tenant_id") && !strings.Contains(text, "app.provider_scope") &&
+			!strings.Contains(text, "app.acting_provider") {
 			return nil
 		}
 		relative, relErr := filepath.Rel(root, path)
@@ -480,5 +481,109 @@ func TestTheBoundValueIsAParameterNotConcatenatedSQL(t *testing.T) {
 	}
 	if !found {
 		t.Error("the Tenant identifier was not passed as a statement argument")
+	}
+}
+
+// TestAProviderActsInOneTenantOnTheTenantPool is WithProviderInTenant's contract (TDD-organization-
+// control-001 §The Single Binding Path): the access recorded first, then the tenant pool bound to the
+// named Tenant with the provider as the acting provider, and fn given a tenant scope for that Tenant.
+func TestAProviderActsInOneTenantOnTheTenantPool(t *testing.T) {
+	actor, correlation, tenant := mustUUID(t), mustUUID(t), mustUUID(t)
+	scope, err := db.ProviderScope(actor, correlation)
+	if err != nil {
+		t.Fatalf("ProviderScope: %v", err)
+	}
+	providerSource, tenantSource := &fakeTx{}, &fakeTx{}
+	rec := &recorder{}
+	provider, err := db.NewProviderPool(providerSource, rec)
+	if err != nil {
+		t.Fatalf("NewProviderPool: %v", err)
+	}
+	tenants, err := db.NewTenantPool(tenantSource)
+	if err != nil {
+		t.Fatalf("NewTenantPool: %v", err)
+	}
+
+	var inside db.Scope
+	err = db.WithProviderInTenant(db.WithScope(context.Background(), scope), provider, tenants, tenant, "first administrator",
+		func(ctx context.Context, _ db.Tx) error {
+			if len(rec.calls) != 1 {
+				t.Errorf("the access was not recorded before the transaction: %d records", len(rec.calls))
+			}
+			inside, _ = db.ScopeFrom(ctx)
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("WithProviderInTenant: %v", err)
+	}
+	if len(rec.calls) != 1 || rec.calls[0].Actor != actor || rec.calls[0].Reason != "first administrator" {
+		t.Errorf("recorded %+v, want one record naming the provider and the reason", rec.calls)
+	}
+	if providerSource.opened != 0 || tenantSource.opened != 1 {
+		t.Errorf("opened provider %d, tenant %d; want the tenant pool alone", providerSource.opened, tenantSource.opened)
+	}
+	if got := tenantSource.bound(); len(got) != 2 || got[0] != "app.tenant_id" || got[1] != "app.acting_provider" {
+		t.Errorf("bound settings = %v, want [app.tenant_id app.acting_provider]", got)
+	}
+	if inside.IsProvider() || !inside.ActingProvider() || inside.TenantID() != tenant || inside.Actor() != actor {
+		t.Errorf("fn's scope = %+v, want a tenant scope for %s acted by the provider", inside, tenant)
+	}
+}
+
+// TestOnlyAProviderActsInANamedTenant: the Tenant is an argument here, so who may pass one is the
+// whole control. A tenant or consumer scope, a nil Tenant and a blank reason are refused before any
+// record or transaction.
+func TestOnlyAProviderActsInANamedTenant(t *testing.T) {
+	tenantScope, _ := db.TenantScope(mustUUID(t), mustUUID(t), mustUUID(t))
+	consumerScope, _ := db.ConsumerScope(mustUUID(t), mustUUID(t))
+	providerScope, _ := db.ProviderScope(mustUUID(t), mustUUID(t))
+	cases := map[string]struct {
+		scope  db.Scope
+		tenant id.UUID
+		reason string
+	}{
+		"tenant scope":   {tenantScope, mustUUID(t), "why"},
+		"consumer scope": {consumerScope, mustUUID(t), "why"},
+		"nil tenant":     {providerScope, id.UUID{}, "why"},
+		"blank reason":   {providerScope, mustUUID(t), ""},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec, source := &recorder{}, &fakeTx{}
+			provider, _ := db.NewProviderPool(&fakeTx{}, rec)
+			tenants, _ := db.NewTenantPool(source)
+			err := db.WithProviderInTenant(db.WithScope(context.Background(), c.scope), provider, tenants, c.tenant,
+				c.reason, func(context.Context, db.Tx) error { return nil })
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if len(rec.calls) != 0 || source.opened != 0 {
+				t.Errorf("recorded %d, opened %d; want nothing before the refusal", len(rec.calls), source.opened)
+			}
+		})
+	}
+}
+
+// TestATenantReadBindsTheTenantAlone: the read authentication makes binds app.tenant_id and nothing
+// else, and refuses a scope that is not a tenant's.
+func TestATenantReadBindsTheTenantAlone(t *testing.T) {
+	scope, _ := db.TenantScope(mustUUID(t), mustUUID(t), mustUUID(t))
+	source := &fakeTx{}
+	pool, _ := db.NewTenantPool(source)
+	if err := db.WithTenantRead(db.WithScope(context.Background(), scope), pool,
+		func(context.Context, db.Tx) error { return nil }); err != nil {
+		t.Fatalf("WithTenantRead: %v", err)
+	}
+	if got := source.bound(); len(got) != 1 || got[0] != "app.tenant_id" {
+		t.Errorf("bound settings = %v, want [app.tenant_id]", got)
+	}
+	if calls := source.tx.Calls(); len(calls) == 0 || !strings.Contains(calls[0].SQL, "READ ONLY") {
+		t.Errorf("first statement %v, want the transaction made read-only first", calls)
+	}
+
+	providerScope, _ := db.ProviderScope(mustUUID(t), mustUUID(t))
+	if err := db.WithTenantRead(db.WithScope(context.Background(), providerScope), pool,
+		func(context.Context, db.Tx) error { return nil }); !errors.Is(err, db.ErrWrongScope) {
+		t.Errorf("a provider scope: %v, want ErrWrongScope", err)
 	}
 }

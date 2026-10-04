@@ -78,6 +78,10 @@ type Scope struct {
 	consumer    bool
 	actor       id.UUID
 	correlation id.UUID
+
+	// actingProvider is a tenant scope WithProviderInTenant made for a provider's act on one Tenant.
+	// No exported constructor sets it, so a tenant caller cannot claim it.
+	actingProvider bool
 }
 
 // TenantScope resolves to exactly one Tenant.
@@ -132,6 +136,10 @@ func (s Scope) TenantID() id.UUID { return s.tenantID }
 
 // Actor returns the acting subject.
 func (s Scope) Actor() id.UUID { return s.actor }
+
+// ActingProvider reports whether this tenant scope is a provider's act on one Tenant, made by
+// WithProviderInTenant, rather than a tenant caller's.
+func (s Scope) ActingProvider() bool { return s.actingProvider }
 
 // Correlation returns the correlation identifier.
 func (s Scope) Correlation() id.UUID { return s.correlation }
@@ -265,21 +273,119 @@ func WithTenantScope(ctx context.Context, pool *TenantPool, fn Body) error {
 	}
 
 	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
-		// SET LOCAL, not SET. It reverts at commit or rollback, so a pooled connection cannot
-		// carry one request's Tenant into the next — the failure that makes connection pooling
-		// and Row-Level Security interact badly, and one that is invisible under low
-		// concurrency because the next request simply sees the previous Tenant.
-		//
-		// set_config with is_local = true rather than string interpolation: SET LOCAL takes no
-		// parameters, and building the statement by concatenation would put a value from the
-		// scope into SQL text.
-		if _, err := tx.Exec(ctx,
-			`SELECT set_config('app.tenant_id', $1, true)`, scope.tenantID.String()); err != nil {
-			return fmt.Errorf("db: bind tenant scope: %w", err)
+		if err := bindTenant(ctx, tx, scope); err != nil {
+			return err
 		}
 		// The idempotency claim, if the request carries one. Inside this transaction so it commits
 		// with whatever fn does and is released if fn fails; before fn so a replay costs one SELECT
 		// and repeats none of the work. A request carrying no claim returns from here immediately.
+		if err := claimWithin(ctx, tx); err != nil {
+			return err
+		}
+		return fn(ctx, tx)
+	})
+}
+
+// bindTenant binds the scope's Tenant, and its acting provider when it has one.
+func bindTenant(ctx context.Context, tx Tx, scope Scope) error {
+	// SET LOCAL, not SET. It reverts at commit or rollback, so a pooled connection cannot
+	// carry one request's Tenant into the next — the failure that makes connection pooling
+	// and Row-Level Security interact badly, and one that is invisible under low
+	// concurrency because the next request simply sees the previous Tenant.
+	//
+	// set_config with is_local = true rather than string interpolation: SET LOCAL takes no
+	// parameters, and building the statement by concatenation would put a value from the
+	// scope into SQL text.
+	if _, err := tx.Exec(ctx,
+		`SELECT set_config('app.tenant_id', $1, true)`, scope.tenantID.String()); err != nil {
+		return fmt.Errorf("db: bind tenant scope: %w", err)
+	}
+	if !scope.actingProvider {
+		return nil
+	}
+	// The restrictive policies on membership.tenant_admin_grant read this, so the database
+	// refuses a grant or a revocation from any transaction but a provider's act on the Tenant
+	// (TDD-organization-control-001 §The Tenant Administration Grant).
+	if _, err := tx.Exec(ctx,
+		`SELECT set_config('app.acting_provider', $1, true)`, scope.actor.String()); err != nil {
+		return fmt.Errorf("db: bind acting provider: %w", err)
+	}
+	return nil
+}
+
+// WithTenantRead runs fn in a read-only transaction bound to the Tenant of the tenant scope in ctx.
+//
+// Authentication reads a tenant caller's records with it (ADR-ORG-003 §5.3): the Membership, the
+// Tenant and the administration grant, under that Tenant's own policy. It makes no idempotency
+// claim, because it changes nothing, and READ ONLY says so to the database as well.
+func WithTenantRead(ctx context.Context, pool *TenantPool, fn Body) error {
+	if pool == nil {
+		return errors.New("db: a tenant pool is required")
+	}
+	scope, ok := ScopeFrom(ctx)
+	if !ok {
+		return ErrNoScope
+	}
+	if scope.IsProvider() || scope.IsConsumer() || scope.tenantID.IsNil() {
+		return fmt.Errorf("%w: only a tenant scope reads a Tenant", ErrWrongScope)
+	}
+	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+		if _, err := tx.Exec(ctx, `SET TRANSACTION READ ONLY`); err != nil {
+			return fmt.Errorf("db: enter read-only: %w", err)
+		}
+		if err := bindTenant(ctx, tx, scope); err != nil {
+			return err
+		}
+		return fn(ctx, tx)
+	})
+}
+
+// WithProviderInTenant runs fn as a provider acting inside one Tenant.
+//
+// It requires a provider scope and a reason, and records the access on the provider pool's recorder
+// before anything else, as every provider scope does. Then it runs fn on the tenant pool, bound to
+// tenantID, under that Tenant's policy, with a tenant scope in ctx whose actor is the provider.
+//
+// This is the one binding that takes a Tenant as an argument, and it takes it only from a provider,
+// who holds authority over every Tenant already: naming one narrows that authority to the Tenant's
+// policy and widens nothing. A tenant or consumer scope is refused, so a Tenant a tenant caller
+// names still never reaches a binding. The writes a provider makes in one Tenant — its first
+// administrator's Membership, the offboarding freeze — run here rather than on the provider pool,
+// whose policy does not constrain them to the Tenant they change.
+func WithProviderInTenant(ctx context.Context, provider *ProviderPool, tenants *TenantPool,
+	tenantID id.UUID, reason string, fn Body) error {
+	switch {
+	case provider == nil:
+		return errors.New("db: a provider pool is required")
+	case tenants == nil:
+		return errors.New("db: a tenant pool is required")
+	}
+	scope, ok := ScopeFrom(ctx)
+	if !ok {
+		return ErrNoScope
+	}
+	switch {
+	case !scope.IsProvider():
+		return fmt.Errorf("%w: only a provider scope acts inside a named Tenant", ErrWrongScope)
+	case tenantID.IsNil():
+		return errors.New("db: a provider acting in a Tenant must name the Tenant")
+	case reason == "":
+		return ErrReasonRequired
+	}
+	if err := provider.recorder.RecordProviderAccess(ctx, ProviderAccess{
+		Actor:       scope.actor,
+		Correlation: scope.correlation,
+		Reason:      reason,
+	}); err != nil {
+		return fmt.Errorf("db: record provider access: %w", err)
+	}
+
+	acting := Scope{tenantID: tenantID, actor: scope.actor, correlation: scope.correlation, actingProvider: true}
+	ctx = WithScope(ctx, acting)
+	return tenants.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+		if err := bindTenant(ctx, tx, acting); err != nil {
+			return err
+		}
 		if err := claimWithin(ctx, tx); err != nil {
 			return err
 		}
