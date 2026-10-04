@@ -130,8 +130,22 @@ POST /v1/projections/consumers
 {"consumer_id":"identity-control","principal_id":"<identity-control-workload's principal_id>",
  "projection_version":"v1","max_accepted_age_seconds":60,"stale_behavior":"fail_closed",
  "event_types":["com.scnehaux.organization.provider.lifecycle.granted","com.scnehaux.organization.provider.lifecycle.activated",
-                "com.scnehaux.organization.provider.security.ended","com.scnehaux.organization.provider.security.revoked"]}
+                "com.scnehaux.organization.provider.security.ended","com.scnehaux.organization.provider.security.revoked",
+                "com.scnehaux.organization.membership.lifecycle.granted","com.scnehaux.organization.membership.lifecycle.restored",
+                "com.scnehaux.organization.membership.security.suspended","com.scnehaux.organization.membership.security.revoked",
+                "com.scnehaux.organization.tenant.lifecycle.activated","com.scnehaux.organization.tenant.lifecycle.retired",
+                "com.scnehaux.organization.tenant.security.suspended","com.scnehaux.organization.tenant.security.restored",
+                "com.scnehaux.organization.projection.repair.reconciled"]}
 ```
+
+The Membership, Tenant and repair types are identity-control's Tenant context projection
+(identity-control `TDD-identity-control-002` 2.3.0, `ADR-IAM-006`): it projects each Tenant as a
+Keycloak Organization and its active Memberships as members.
+
+**A server registered before them** posts the registration again with this body. Re-registering
+with other types replaces the subscription and clears the recorded snapshot mark (`TDD-organization-
+control-002` §Consumer Registry), so identity-control then runs `provider-bootstrap` again (step 6):
+it takes both snapshots and records the lower mark. Until it does, its progress reports are refused.
 
 ### 5. Deliver to identity-control
 
@@ -159,3 +173,6 @@ IDENTITY_ORGANIZATION_BASE_URL=http://organization-control:8080
   authority used` with basis `emergency`, no longer `ceremony`.
 - Stopping this service makes identity-control log the projection stale within a minute. The
   emergency grant still authorizes, and an activation would not.
+- `provider-bootstrap` prints a `memberships` count, not `tenant context not bootstrapped`.
+- Granting a Membership here makes identity-control log `tenant converged` for its Tenant. The
+  kernel then holds an Organization named by the `tenant_id`, with the Principal as a member.
