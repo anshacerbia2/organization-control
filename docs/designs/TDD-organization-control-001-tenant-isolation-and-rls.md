@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.13.0
+  version: 1.14.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-02
+  last_reviewed: 2026-10-04
   parent_sad: SAD-004
 ---
 
@@ -138,6 +138,8 @@ runtime roles, removes the default privileges that would hand a later table to t
 then grants each table and privilege a statement in this repository needs. No runtime role
 holds `DELETE` on any business table, because nothing deletes a business row. The provider role
 reads and inserts `organization.provider_grant` and cannot change a grant (§Caller Authority). The tenant-scoped
+role reads `membership.tenant_admin_grant` and writes it only inside a provider's act on one Tenant,
+which a restrictive policy enforces (§The Tenant Administration Grant). The tenant-scoped
 role cannot create or change a Tenant, reach `organization`, `operation`, `projection` or
 `audit`, or read Membership history. The provider role reads Membership and cannot write
 it. `tools/grantcheck` keeps the grant list honest in both directions (§Grant Derivation):
@@ -251,11 +253,43 @@ func WithTenantScope(ctx context.Context, pool *TenantPool, fn Body) error
 // authenticated provider context, an operation reason, and a correlation identifier,
 // and it records privileged access before fn executes.
 func WithProviderScope(ctx context.Context, pool *ProviderPool, reason string, fn Body) error
+
+// WithProviderInTenant runs fn as a provider acting inside one Tenant. It requires a
+// provider scope and a reason, records privileged access before fn executes, and runs fn on
+// the tenant pool bound to tenantID, with the provider bound as the acting provider.
+func WithProviderInTenant(ctx context.Context, provider *ProviderPool, tenants *TenantPool,
+    tenantID id.UUID, reason string, fn Body) error
+
+// WithTenantRead runs fn in a read-only transaction bound to the Tenant of the tenant scope in
+// ctx. It makes no idempotency claim. Authentication reads a tenant caller's records with it.
+func WithTenantRead(ctx context.Context, pool *TenantPool, fn Body) error
 ```
 
-These two functions are the only code permitted to bind `app.tenant_id` or
-`app.provider_scope`. Both take the scope from the authenticated context rather than from
-an argument, so a handler cannot pass a Tenant it was told about by the caller.
+These functions are the only code permitted to bind `app.tenant_id`, `app.provider_scope` or
+`app.acting_provider`. `WithTenantScope` and `WithTenantRead` take the Tenant from the
+authenticated context rather than from an argument, so a handler cannot pass a Tenant it was
+told about by the caller.
+
+**`WithProviderInTenant` is the one that takes a Tenant as an argument, and only from a
+provider.** A provider already holds authority over every Tenant. Naming one Tenant narrows
+that authority to the Tenant's own policy; it never widens a caller's reach. The function
+refuses any scope that is not a provider's. A Tenant identifier from a tenant caller therefore
+still never reaches a binding.
+
+It exists because some provider acts change one Tenant's tenant-scoped rows:
+
+- making a Tenant's first administrator, which writes a Membership (§The Tenant Administration Grant);
+- the offboarding freeze, which suspends Memberships (`TDD-organization-control-004`).
+
+Running those writes on the provider pool would put them under the provider policy, which is
+not constrained to the Tenant being changed. Running them on the tenant pool bound to that
+Tenant puts them under the Tenant's policy, as the tenant role. The provider is still the
+actor, and the access record is written first, on the provider connections, as for every
+provider scope.
+
+The transaction also binds `app.acting_provider` to the provider's `principal_id`. Only this
+function sets it. A restrictive policy reads it, so the database refuses a tenant
+administration grant written by any other transaction.
 
 `TenantPool` and `ProviderPool` are distinct types rather than one type with a flag, so
 handing a tenant-scoped handler the cross-Tenant pool is a compile error rather than a
@@ -306,7 +340,11 @@ resolve(request):
         emit privileged-administration event
         return ProviderScope
 
-    resolved := active organization-administrative assignment for actor
+    resolved := the tenant_id the token selects
+    require actor administers resolved (§Caller Authority):
+        an active Membership, an active Tenant, a tenant administration grant
+    otherwise refuse with 403 before opening a transaction
+
     if requested is present and requested != resolved:
         refuse with 403 before opening a transaction
 
@@ -357,7 +395,7 @@ because its registration's audience names the resource.
 
 | Caller | Claims | Record read for each request | Refused when |
 | :-- | :-- | :-- | :-- |
-| Tenant administrator | `tenant_id` | — | `tenant_id` is not a UUID |
+| Tenant administrator | `subject_type` `human`, `tenant_id`, `acr` `aal2` or higher, `auth_time` | in that Tenant: an active Membership for the `principal_id`, the Tenant active, and a tenant administration grant in force (§The Tenant Administration Grant) | `tenant_id` is not a UUID; the token is a workload's, below `aal2`, or without `auth_time`; any of the three facts is absent |
 | Provider | `subject_type` `human`, `acr`, `auth_time`; no `tenant_id` | provider authority in force for the `principal_id`: an emergency grant, or an approved activation of an eligible grant (§Provider Activation) | no grant, or `acr` or `auth_time` absent |
 | Eligible provider | as a provider | an eligible grant with no activation in force | reaches only `/v1/provider-activations`; every other route answers `403` before a transaction opens |
 | Projection consumer | `subject_type` `workload`, `workload_owner`; no `tenant_id` | an active consumer registered with the `principal_id` | none registered, or consumer authority not configured |
@@ -368,6 +406,11 @@ authenticate(token):
     principal := principal_id, a UUID
     type      := subject_type, human or workload
     if tenant_id present:
+        require type is human, acr aal2 or higher, and auth_time
+        require, in tenant_id, read now in one read-only transaction:
+            an active Membership for principal
+            the Tenant active
+            a tenant administration grant for principal, not revoked
         return Tenant(principal, tenant_id)
     if type is human:
         require acr and auth_time
@@ -380,15 +423,18 @@ authenticate(token):
     return Consumer(principal, consumer)
 ```
 
-The claim rule runs inside the verifier, and the two records are read after it, on the provider
-connections, in one read-only transaction. The verifier sees only claims, so it cannot read a
+The claim rule runs inside the verifier, and the records are read after it, in one read-only
+transaction. A provider's and a consumer's are read on the provider connections. A Tenant
+administrator's are read on the tenant connections, bound to the Tenant its token selects, under
+that Tenant's policy (`WithTenantRead`). The verifier sees only claims, so it cannot read a
 record; a claim-shaped token reaches the record read and is refused there if it names nobody the
 records know. A record read that fails answers `503` and admits nobody.
 
 The read happens for every request rather than once per token. A token outlives the record it
-was issued against by up to its lifetime; a read per request makes a revoked grant or a retired
-consumer stop at the next request (`ADR-ORG-001 §5.11`). It is two indexed lookups by
-`principal_id`.
+was issued against by up to its lifetime; a read per request makes a revoked grant, a retired
+consumer, a revoked Membership or a suspended Tenant stop at the next request (`ADR-ORG-001
+§5.11`, `ADR-ORG-003 §5.3`). Each read is indexed lookups by `principal_id` and, for a Tenant
+administrator, `tenant_id`.
 
 **The provider grant.**
 
@@ -494,6 +540,148 @@ requires it, and re-registering a consumer under a different `principal_id` is r
 `ORGANIZATION_CONSUMER_CLAIM` are gone. Startup refuses a deployment that still sets one, because
 such a deployment expects authority to come from where it no longer does, and a silently ignored
 setting would leave it believing so.
+
+### The Tenant Administration Grant
+
+`ADR-ORG-003` makes a Tenant administrator a record. A token's `tenant_id` only selects a
+Tenant. It confers nothing: "Treat client-supplied tenant identifiers as selectors only. Verify
+that the authenticated principal is authorized to act in the selected tenant" (OWASP,
+_Multi-Tenant Application Security Cheat Sheet_). Since `ADR-IAM-006` the kernel issues a
+`tenant_id` to every member who signs in for a Tenant, so before this record existed every
+member administered their Tenant.
+
+**The record.**
+
+```sql
+CREATE TABLE membership.tenant_admin_grant (
+    grant_id      UUID        PRIMARY KEY,
+    tenant_id     UUID        NOT NULL REFERENCES tenant.tenant (tenant_id),
+    principal_id  UUID        NOT NULL,
+    granted_by    UUID        NOT NULL,
+    reason        TEXT        NOT NULL,
+    granted_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    revoked_at    TIMESTAMPTZ,
+    revoked_by    UUID,
+    revoke_reason TEXT,
+    CONSTRAINT tenant_admin_grant_reason_check CHECK (btrim(reason) <> ''),
+    CONSTRAINT tenant_admin_grant_revocation_check
+        CHECK ((revoked_at IS NULL) = (revoked_by IS NULL)
+           AND (revoked_at IS NULL) = (revoke_reason IS NULL)
+           AND (revoke_reason IS NULL OR btrim(revoke_reason) <> ''))
+);
+CREATE UNIQUE INDEX tenant_admin_grant_active ON membership.tenant_admin_grant (principal_id, tenant_id)
+    WHERE revoked_at IS NULL;
+```
+
+The record lives in `membership` because it names one Tenant. Row-Level Security therefore
+covers it like every other table there: a tenant-scoped transaction sees its own Tenant's grants
+only. One Principal holds at most one active grant per Tenant. After a revocation it may be
+granted again, as a new row. No event carries a grant, and no claim does (`ADR-ORG-003 §5.1`).
+
+**Who writes it, and how the database knows.** Only a provider grants and revokes
+(`ADR-ORG-003 §5.2`). The write changes one Tenant's rows, so it runs through
+`WithProviderInTenant` on the tenant pool, as the tenant role, under the Tenant's policy
+(§The Single Binding Path). The tenant role therefore holds the privileges, and two
+restrictive policies keep them a provider's:
+
+```sql
+CREATE POLICY tenant_admin_grant_granted_by_provider ON membership.tenant_admin_grant
+    AS RESTRICTIVE FOR INSERT TO organization_rt
+    WITH CHECK (granted_by = NULLIF(current_setting('app.acting_provider', true), '')::uuid);
+
+CREATE POLICY tenant_admin_grant_revoked_by_provider ON membership.tenant_admin_grant
+    AS RESTRICTIVE FOR UPDATE TO organization_rt
+    USING      (NULLIF(current_setting('app.acting_provider', true), '') IS NOT NULL)
+    WITH CHECK (revoked_by = NULLIF(current_setting('app.acting_provider', true), '')::uuid);
+```
+
+PostgreSQL 17, _CREATE POLICY_, <https://www.postgresql.org/docs/17/sql-createpolicy.html>,
+accessed 2026-10-04: "When a mix of permissive and restrictive policies are present, a record is
+only accessible if at least one of the permissive policies passes, in addition to all the
+restrictive policies." The Tenant's own policy still applies, and these narrow it. An `UPDATE`
+policy also covers the revocation's row lock: it applies to "`UPDATE`, `SELECT FOR UPDATE`, and
+`SELECT FOR SHARE` commands".
+
+- A grant must name the acting provider as `granted_by`.
+- A revocation must name it as `revoked_by`.
+- An ordinary tenant-scoped transaction never binds `app.acting_provider`. It reads the setting
+  as `NULL`, and the database refuses its write.
+
+This is the one setting read with `missing_ok` true, on purpose. Unset is the expected state
+for every tenant transaction, and the policy refuses that state, which a raise would also do
+less clearly.
+
+The tenant role holds `SELECT` and `INSERT` on the table, and `UPDATE` on the three revocation
+columns alone. It has no `DELETE`. The provider role holds nothing on it.
+
+**Granting, listing and revoking, through the API.**
+
+```text
+GET   /v1/tenants/{tenant_id}/administrators                       every grant in the Tenant, newest first
+POST  /v1/tenants/{tenant_id}/administrators                       {"principal_id": ...}
+POST  /v1/tenants/{tenant_id}/administrators/{grant_id}/revoke
+```
+
+Each is a provider route. It needs a provider caller and `X-Administrative-Reason`, and it runs
+through `WithProviderInTenant` for the Tenant in the path. The reason is also the grant's or the
+revocation's own.
+
+```text
+grant(tenant, principal):
+    in the Tenant, as the acting provider:
+        refuse unless the Tenant exists                          -- 404
+        refuse unless it is active                               -- 409
+        insert the grant, granted_by = caller,
+            doing nothing on conflict with the partial unique index
+        refuse when nothing was inserted: one is in force       -- 409
+        the Principal's Tenant-wide Membership, not revoked, locked:
+            active     -> kept
+            suspended  -> refuse                                 -- 409
+            none       -> granted: human, valid from now,
+                          provenance "tenant administration grant <grant_id>"
+
+revoke(tenant, grant):
+    in the Tenant, as the acting provider:
+        set revoked_at, revoked_by = caller, revoke_reason, where not revoked
+        refuse when no grant in the Tenant has the identifier   -- 404
+        refuse when it was revoked already                       -- 409
+```
+
+**The first administrator gets a Membership with the grant** (`ADR-ORG-003 §5.2`). The grant
+and the Membership commit in one transaction, with the Membership's event, through the
+Membership service's own `GrantWithin`. The Identity Control API projects that Membership into
+the kernel, so the new administrator can sign in for the Tenant.
+
+- A Principal who already holds an active Tenant-wide Membership keeps it.
+- A suspended one is refused rather than replaced. A second, active Membership would undo
+  the Tenant's suspension of that Principal without anyone restoring it.
+
+**Revoking a grant does not touch the Membership.** The Principal stays a member, and stops
+administering at the next request. Ending the Membership is the Membership service's act.
+
+The grant needs no lock: the partial unique index refuses a second active grant, against two
+concurrent requests as well. The grant is inserted before the Membership, so the second request
+stops there and never reaches the Membership's own unique index.
+
+**The check for each request** (`ADR-ORG-003 §5.3`). A token with a `tenant_id` is a Tenant
+administrator only when all of these hold.
+
+- It is a person's: `subject_type` `human`.
+- It carries `acr` `aal2` or higher, and `auth_time`. Tenant administration is privileged
+  access, and `ADR-IAM-004` requires two factors for it. The levels follow `STD-IAM-002 §3.2`'s
+  order: `aal1`, `aal2`, `phr`. Any other value, the kernel's unmapped `0` and `1` included,
+  is below `aal1`.
+- In that Tenant, read in one read-only transaction bound to it:
+  - an active Membership for the `principal_id`, inside its validity window;
+  - the Tenant's status is `active`;
+  - a tenant administration grant for the `principal_id` that is not revoked.
+
+The claims are checked in the verifier, so a token that fails them never reaches a read. Every
+failure is `403`, and one message covers the three facts: a caller learns that it does not
+administer the Tenant, not which record is missing.
+
+**Nothing is served to a plain member.** Every tenant route sits behind this check, so a
+member who is not an administrator reaches none (`ADR-ORG-003 §5.3`).
 
 ### Provider Activation
 
@@ -755,7 +943,8 @@ than called a proof:
 connection its transaction was opened on. In this repository that is decided in two kinds
 of place:
 
-- A scope wrapper in `internal/db`. `WithTenantScope` is `organization_rt`.
+- A scope wrapper in `internal/db`. `WithTenantScope`, `WithTenantRead` and
+  `WithProviderInTenant` are `organization_rt`.
   `WithProviderScope` and `WithProviderSnapshot` are `organization_provider_rt`.
   `WithResolutionScope` is `organization_resolution_rt`. `WithConsumerScope` and
   `WithConsumerSnapshot` are `organization_consumer_rt`.
@@ -915,6 +1104,29 @@ administrative connection is explicitly not accepted as evidence.
   refused; two consumers cannot share one.
 - Startup refuses each of the four removed settings.
 
+### Tenant Administration Grant
+
+- A tenant token is admitted only with an active Membership, an active Tenant and a grant in
+  force, read for that Tenant. Each fact missing alone is refused with `403`, with the same
+  message.
+- A tenant token from a workload, below `aal2`, or without `auth_time` is refused before any read.
+- A grant made, a Membership revoked, a Tenant suspended or a grant revoked takes effect at the
+  next request.
+- A provider grants an administrator in an active Tenant. A Principal with no Membership gets a
+  Tenant-wide one, with its event, in the same transaction, and the provenance names the grant.
+  An active one is kept, and a suspended one is refused with `409`.
+- A second active grant for the same Principal and Tenant is refused with `409`. A revoked
+  grant stays listed with who revoked it and why, and the Principal may be granted again.
+- A grant in a Tenant that is not active is refused with `409`, and in one that does not exist
+  with `404`.
+- A tenant-scoped transaction cannot insert or revoke a grant: the restrictive policies refuse
+  it as the tenant role (integration). The tenant role cannot delete a grant, or update a column
+  outside the three revocation columns.
+- The grant routes refuse a tenant or consumer caller, and a request without
+  `X-Administrative-Reason`, before a transaction opens.
+- `WithProviderInTenant` refuses a tenant or consumer scope, a nil Tenant and a blank reason,
+  and records the access before the transaction opens.
+
 ### Provider Activation
 
 - An eligible grant holder is refused on every route but `/v1/provider-activations`, before a
@@ -1039,6 +1251,7 @@ rejection triage, provider-access review, and suspected cross-tenant exposure.
 | Realizes capability | PAD-PLT-002 — Organization & Tenancy Platform |
 | Governed by | ADR-GLB-002 — Enterprise PostgreSQL Row-Level Security for Isolation |
 | Governed by | ADR-ORG-001 — Separate Organization Authority and Keycloak Projection; §5.11 provider and consumer authority |
+| Governed by | ADR-ORG-003 — Tenant Administration Is a Recorded Grant, Checked with Current Membership |
 | Conforms to | STD-IAM-002 §3.1.1, §3.2, §3.5 — the grant's holder checks its own record; `principal_id` is the persisted identifier |
 | Conforms to | STD-GLB-002 — `FORCE ROW LEVEL SECURITY`, non-owner runtime role, no `SUPERUSER`/`BYPASSRLS`, isolation proven as the runtime role |
 | Enterprise constraint | EAD-003 — private domain persistence; cross-domain database access is prohibited |

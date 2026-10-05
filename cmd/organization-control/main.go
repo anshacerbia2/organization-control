@@ -273,6 +273,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("provider grant administration: %w", err)
 	}
+	// A provider acting inside one Tenant: the access recorded on the provider pool, the work on the
+	// tenant pool under that Tenant's policy (TDD-organization-control-001 §The Single Binding Path).
+	tenantAdministrators, err := authority.NewTenantAdministration(providerPool, tenantPool, memberships)
+	if err != nil {
+		return fmt.Errorf("tenant administration: %w", err)
+	}
 	providerActivations, err := authority.NewActivations(providerPool, authority.ActivationPolicy{
 		Max: cfg.ProviderActivationMax, ApprovalRequired: cfg.ProviderActivationApproval})
 	if err != nil {
@@ -327,10 +333,11 @@ func run() error {
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 			Replayer: replayer, Resolver: resolver,
-			ProviderGrants:      providerGrants,
-			ProviderActivations: providerActivations,
-			Frontier:            frontier,
-			Consumer:            consumerServices,
+			ProviderGrants:       providerGrants,
+			ProviderActivations:  providerActivations,
+			TenantAdministrators: tenantAdministrators,
+			Frontier:             frontier,
+			Consumer:             consumerServices,
 		},
 		Database:         tenantConns,
 		Telemetry:        telemetry,
@@ -371,8 +378,14 @@ func run() error {
 			}
 		}
 	}
+	// A Tenant administrator's records, read on the tenant connections under that Tenant's own policy
+	// (ADR-ORG-003 §5.3), beside the provider and consumer records above.
+	tenantRecords, err := authority.NewTenantRecords(tenantPool)
+	if err != nil {
+		return fmt.Errorf("tenant caller records: %w", err)
+	}
 	authenticationConfig := httpapi.AuthenticationConfig{
-		Records:   records,
+		Records:   callerRecords{Reader: records, TenantRecords: tenantRecords},
 		Logger:    logger,
 		Consumers: consumerServices != nil,
 	}
@@ -566,4 +579,11 @@ func newLogger(level string) *slog.Logger {
 	// JSON to stdout with no vendor agent, per STD-GLB-003. Credential redaction is enforced inside
 	// foundation-platform's serializer rather than here, so a caller cannot forget it.
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parsed}))
+}
+
+// callerRecords is the three callers' records in one: a provider's and a consumer's on the provider
+// connections, a Tenant administrator's on the tenant connections.
+type callerRecords struct {
+	*authority.Reader
+	*authority.TenantRecords
 }

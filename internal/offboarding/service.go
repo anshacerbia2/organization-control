@@ -165,7 +165,12 @@ FOR UPDATE SKIP LOCKED`
 // `SKIP LOCKED` so two workers can freeze one Tenant without blocking on each other. Neither
 // double-suspends: the second sees the row locked and moves on, and if it did see it the state
 // machine refuses a suspension of a suspended Membership.
-func (s *Service) FreezeBatch(ctx context.Context, tenantID id.UUID, size int) (int, error) {
+//
+// The freeze is a provider's act inside the one Tenant (db.WithProviderInTenant): the access is
+// recorded with the reason first, and the suspensions run on the tenant pool under that Tenant's
+// policy. A provider scope reaching WithTenantScope is refused, so the route could not freeze
+// before this.
+func (s *Service) FreezeBatch(ctx context.Context, tenantID id.UUID, size int, reason string) (int, error) {
 	if tenantID.IsNil() {
 		return 0, fmt.Errorf("%w: a tenant identifier is required", ErrInvalid)
 	}
@@ -174,7 +179,7 @@ func (s *Service) FreezeBatch(ctx context.Context, tenantID id.UUID, size int) (
 	}
 
 	var frozen int
-	if err := db.WithTenantScope(ctx, s.tenantPool, func(ctx context.Context, tx db.Tx) error {
+	if err := db.WithProviderInTenant(ctx, s.provider, s.tenantPool, tenantID, reason, func(ctx context.Context, tx db.Tx) error {
 		rows, err := tx.Query(ctx, selectFreezeBatch, tenantID.String(), size)
 		if err != nil {
 			return fmt.Errorf("offboarding: select freeze batch: %w", err)

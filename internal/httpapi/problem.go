@@ -204,6 +204,14 @@ var mapping = []struct {
 	{authority.ErrActivationDecided, platform.StateTransitionRefused},
 	{authority.ErrSelfApproval, platform.Forbidden},
 	{authority.ErrActivationNotInForce, platform.StateTransitionRefused},
+	// Tenant administration grants.
+	{authority.ErrTenantAdminInvalid, platform.ValidationFailed},
+	{authority.ErrAdminTenantNotFound, platform.NotFound},
+	{authority.ErrAdminTenantNotActive, platform.StateTransitionRefused},
+	{authority.ErrAlreadyAdministrator, platform.StateTransitionRefused},
+	{authority.ErrMembershipSuspended, platform.StateTransitionRefused},
+	{authority.ErrAdminGrantNotFound, platform.NotFound},
+	{authority.ErrAdminGrantRevoked, platform.StateTransitionRefused},
 	{context.ErrNotRegistered, platform.Forbidden},
 	{context.ErrRequestRequired, platform.ValidationFailed},
 }

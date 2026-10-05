@@ -104,6 +104,8 @@ func testSurface(t *testing.T) Surface {
 	must(err, "provider grants")
 	providerActivations, err := authority.NewActivations(providerPool, authority.ActivationPolicy{Max: 8 * time.Hour, ApprovalRequired: true})
 	must(err, "provider activations")
+	tenantAdministrators, err := authority.NewTenantAdministration(providerPool, tenantPool, memberships)
+	must(err, "tenant administration")
 	// The raw transactor, as production wires it: the frontier reads outbox aggregates carrying no
 	// tenant column, so it takes no scope and writes no privileged-access record per poll.
 	frontier, err := projection.NewFrontierReader(transactor)
@@ -117,6 +119,7 @@ func testSurface(t *testing.T) Surface {
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 			Replayer: replayer, Resolver: resolver,
 			Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
+			TenantAdministrators: tenantAdministrators,
 		},
 		Database: okProber{},
 	})
@@ -528,6 +531,7 @@ func testSurfaceServices(t *testing.T) Services {
 	contexts, _ := occontext.New(providerPool)
 	providerGrants, _ := authority.NewAdministration(providerPool)
 	providerActivations, _ := authority.NewActivations(providerPool, authority.ActivationPolicy{Max: 8 * time.Hour, ApprovalRequired: true})
+	tenantAdministrators, _ := authority.NewTenantAdministration(providerPool, tenantPool, memberships)
 	// The raw transactor, as production wires it: the frontier reads outbox aggregates that carry no
 	// tenant column, so it takes no scope and writes no privileged-access record per poll.
 	frontier, _ := projection.NewFrontierReader(transactor)
@@ -539,6 +543,7 @@ func testSurfaceServices(t *testing.T) Services {
 		Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 		Replayer: replayer, Resolver: resolver,
 		Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
+		TenantAdministrators: tenantAdministrators,
 	}
 }
 

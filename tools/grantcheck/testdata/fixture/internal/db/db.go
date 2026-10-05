@@ -57,6 +57,29 @@ func WithTenantScope(ctx context.Context, pool *TenantPool, fn Body) error {
 	})
 }
 
+func WithTenantRead(ctx context.Context, pool *TenantPool, fn Body) error {
+	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, ""); err != nil {
+			return err
+		}
+		return fn(ctx, tx)
+	})
+}
+
+// WithProviderInTenant records the access on the provider pool's recorder and runs the body on the
+// tenant pool, as the real one does.
+func WithProviderInTenant(ctx context.Context, provider *ProviderPool, tenants *TenantPool, reason string, fn Body) error {
+	if err := provider.recorder.RecordProviderAccess(ctx); err != nil {
+		return err
+	}
+	return tenants.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, ""); err != nil {
+			return err
+		}
+		return fn(ctx, tx)
+	})
+}
+
 func WithProviderScope(ctx context.Context, pool *ProviderPool, reason string, fn Body) error {
 	return withProviderScope(ctx, pool, reason, false, fn)
 }

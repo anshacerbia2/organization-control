@@ -62,6 +62,9 @@ type Services struct {
 	// ProviderActivations requests, decides and ends provider activations (ADR-ORG-002).
 	ProviderActivations *authority.Activations
 
+	// TenantAdministrators grants, lists and revokes tenant administration grants (ADR-ORG-003).
+	TenantAdministrators *authority.TenantAdministration
+
 	// Consumer serves a registered consumer acting as itself, as organization_consumer_rt. Nil only
 	// when consumer authority is not configured, in which case authentication admits no consumer
 	// caller for it to serve.
@@ -194,6 +197,12 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/tenants/{tenant_id}/suspend", h.suspendTenant)
 	api.HandleFunc("POST /v1/tenants/{tenant_id}/restore", h.restoreTenant)
 
+	// Who administers a Tenant (ADR-ORG-003). Provider routes: the Tenant in the path is the one a
+	// provider acts in, never a tenant caller's.
+	api.HandleFunc("GET /v1/tenants/{tenant_id}/administrators", h.listTenantAdministrators)
+	api.HandleFunc("POST /v1/tenants/{tenant_id}/administrators", h.grantTenantAdministrator)
+	api.HandleFunc("POST /v1/tenants/{tenant_id}/administrators/{grant_id}/revoke", h.revokeTenantAdministrator)
+
 	// The provisioning correlation surface.
 	//
 	// Two of these are driven by the external system that owns the isolation boundary rather than by
@@ -300,6 +309,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the provider activation service is required")
 	case s.ProviderGrants == nil:
 		return errors.New("httpapi: the provider grant administration is required")
+	case s.TenantAdministrators == nil:
+		return errors.New("httpapi: the tenant administration is required")
 	case s.Consumer != nil && (s.Consumer.Access == nil || s.Consumer.Checks == nil || s.Consumer.Frontier == nil):
 		return errors.New("httpapi: the consumer services are incomplete")
 	}

@@ -81,8 +81,9 @@ run:
 # --fail-with-body, not -f: the issuer explains its own refusals in the body, and -f
 # discarded that. `make token ROLE=tenant` was answered "role=tenant needs a tenant_id"
 # and reported here as "Could not reach the issuer" -- a guess printed over the answer.
-# Only ROLE=tenant carries it.
-TENANT_QUERY = $(if $(filter tenant,$(ROLE)),&tenant_id=$(TENANT),)
+# Only ROLE=tenant carries it. A tenant token is admitted only for a Principal that administers the
+# Tenant (ADR-ORG-003): grant one at POST /v1/tenants/<id>/administrators, then pass PRINCIPAL=<it>.
+TENANT_QUERY = $(if $(filter tenant,$(ROLE)),&tenant_id=$(TENANT)$(if $(PRINCIPAL),&principal_id=$(PRINCIPAL),),)
 
 token:
 	@curl.exe -sS --fail-with-body "http://$(ISSUER)/token?role=$(ROLE)$(TENANT_QUERY)" -o $(TOKEN_FILE).raw || (echo Issuer refused, or is not running on http://$(ISSUER) -- start it with: make issuer && type $(TOKEN_FILE).raw 2>nul && del $(TOKEN_FILE).raw 2>nul && exit 1)

@@ -409,7 +409,7 @@ func (h *handlers) freezeOffboarding(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	affected, err := h.services.Offboardings.FreezeBatch(r.Context(), record.TenantID, body.Size)
+	affected, err := h.services.Offboardings.FreezeBatch(r.Context(), record.TenantID, body.Size, reason(r))
 	if err != nil {
 		writeError(w, r, err)
 		return

@@ -212,3 +212,28 @@ CREATE POLICY tenant_consumer_read ON tenant.tenant
     TO organization_consumer_rt
     USING (current_setting('app.provider_scope', false)::boolean);
 
+
+-- membership.tenant_admin_grant, written by a provider only (ADR-ORG-003 §5.2).
+--
+-- The loop above gives the tenant role its policy here, as on every table in the schema. The writes
+-- run as the tenant role because a provider makes them inside one Tenant, through
+-- db.WithProviderInTenant, which binds app.acting_provider to the provider's principal_id. These two
+-- policies are RESTRICTIVE, so PostgreSQL ANDs them with the tenant policy: a grant must name the
+-- acting provider as granted_by and a revocation as revoked_by. An ordinary tenant transaction never
+-- binds the setting, reads it as NULL, and is refused. missing_ok is true here, unlike every other
+-- policy, because unset is the expected state for every tenant transaction, and the policy refuses
+-- it rather than raising. SELECT is not restricted: the check every tenant request makes reads it.
+DROP POLICY IF EXISTS tenant_admin_grant_granted_by_provider ON membership.tenant_admin_grant;
+CREATE POLICY tenant_admin_grant_granted_by_provider ON membership.tenant_admin_grant
+    AS RESTRICTIVE
+    FOR INSERT
+    TO organization_rt
+    WITH CHECK (granted_by = NULLIF(current_setting('app.acting_provider', true), '')::uuid);
+
+DROP POLICY IF EXISTS tenant_admin_grant_revoked_by_provider ON membership.tenant_admin_grant;
+CREATE POLICY tenant_admin_grant_revoked_by_provider ON membership.tenant_admin_grant
+    AS RESTRICTIVE
+    FOR UPDATE
+    TO organization_rt
+    USING      (NULLIF(current_setting('app.acting_provider', true), '') IS NOT NULL)
+    WITH CHECK (revoked_by = NULLIF(current_setting('app.acting_provider', true), '')::uuid);
