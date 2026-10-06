@@ -69,13 +69,34 @@ never dropped.
 Use plain ASCII in every `X-Administrative-Reason`. Anything else is refused with `400`
 (STD-GLB-001 §Request Header Values).
 
-### 1. Two workload keys
+**Run it as a script.** `scripts/dev-wire.ps1` is steps 1 to 6 below, and `scripts/dev-wiring-proof.ps1`
+is step 7. They are the files CI runs against the three stacks on every change and every night
+(`.github/workflows/deploy-dev.yml`, STD-GLB-009 1.3.0), so the procedure on the server is the
+procedure that was tested:
 
-With the kernel's key tool, on this server. Only the public JWKs leave it:
+```sh
+export IDENTITY_CALLER_PASSWORD=...            # the bootstrap operator's, from identity-control's .env
+export IDENTITY_CALLER_KEY_FILE=...            # identity-control-caller.pem, from the same .env
+export IDENTITY_OPERATOR_TOTP_FILE=...         # the operator's TOTP file, if dev-token.ps1 keeps one
+pwsh ./scripts/dev-wire.ps1 -IdentityRepo /srv/identity-control -KernelDeployDir /srv/identity-kernel/deploy/dev \
+    -Operator "<you>" -State ~/scnehaux-wiring/state.json
+pwsh ./scripts/dev-wiring-proof.ps1 -IdentityRepo /srv/identity-control -State ~/scnehaux-wiring/state.json
+```
+
+Export those three alone. Sourcing identity-control's `.env` would also export its `POSTGRES_PASSWORD`,
+which overrides this stack's when the script runs `docker compose` here. The state file's directory
+receives the operator caller's private key, so keep it outside every directory a container mounts.
+The steps below say what each part does.
+
+### 1. Three keys
+
+With the kernel's key tool, on this server. Only the public JWKs leave it. The operator caller's key
+belongs to you, because you sign with it, and stays beside the state file:
 
 ```sh
 $KERNEL_DEPLOY_DIR/new-client-key.sh organization-control-workload "$PWD/keys" 65532:65532
 $KERNEL_DEPLOY_DIR/new-client-key.sh identity-control-workload /srv/identity-control/deploy/dev/keys 65532:65532
+$KERNEL_DEPLOY_DIR/new-client-key.sh dev-provider-caller ~/scnehaux-wiring "$(id -u):$(id -g)"
 ```
 
 ### 2. In identity-control: this API's resource, the two workloads, and the caller's audience
@@ -99,12 +120,17 @@ POST /v1/workloads
  "workload_type":"service","owner_principal_id":"<bootstrap-operator>","client_key":"identity-control-workload",
  "application_ref":"identity-control","audience":["organization-control-api"],"public_key":<identity-control-workload.jwk.json>}
 
-POST /v1/registrations/<identity-control-caller's registration_id>/changes
-{"audience":["identity-control-api","organization-control-api"],"expected_version":<its version>}
+POST /v1/registrations
+{"client_key":"dev-provider-caller","profile":"confidential","audience_class":"privileged",
+ "privileged_form":"provider-scope","application_ref":"development-operator",
+ "audience":["identity-control-api","organization-control-api"],
+ "redirect_uris":["http://127.0.0.1:8099/callback"],"public_key":<dev-provider-caller.jwk.json>}
 ```
 
-Note each workload's `principal_id`. The last request lets the caller's tokens name this API as well,
-so the same provider can call both. Both resources are `L0`, so the lifespan stays 240 seconds.
+Note each workload's `principal_id`. The last request registers the operator's caller of both APIs,
+so the same provider can call both. `identity-control-caller` cannot be given the second audience: it
+was made in the kernel by `create-kernel-clients.sh` before registration existed, so it has no
+registration to change. Both resources are `L0`, so the lifespan stays 240 seconds.
 
 ### 3. The first provider here
 
@@ -118,7 +144,7 @@ This is an emergency `provider:organization-control` grant, as every bootstrap g
 
 ### 4. Organization's grant and consumer for the Identity Control API
 
-With a fresh caller token, whose `aud` now names `organization-control-api`, against
+With a `dev-provider-caller` token, whose `aud` names `organization-control-api`, against
 `http://127.0.0.1:8083`. Each request carries an `X-Administrative-Reason` and an `Idempotency-Key`,
 so a retry is safe:
 
