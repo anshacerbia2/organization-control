@@ -1,0 +1,168 @@
+name: deploy-dev
+
+# The three development stacks wired together, the way a development server runs them
+# (STD-GLB-009 §Development Server Deployment): identity-kernel's stack and realm, identity-control's
+# stack with its bootstrap ceremony, and this repository's deploy/dev. Then deploy/dev/README.md
+# §Wiring to other services runs as scripts/dev-wire.ps1, the file the server's operator runs, and
+# scripts/dev-wiring-proof.ps1 asserts what its step 7 says should be seen.
+#
+# STD-GLB-009 1.3.0: a procedure step is a script CI runs. Each repository's own deploy-dev proves
+# its stack alone; only this job proves that the three meet: Organization's grant reaches
+# identity-control's projection, the ceremony's grant is retired by it, and an Organization outage
+# leaves the emergency grant honored (TDD-identity-control-006, ADR-ORG-002).
+#
+# The kernel and identity-control steps call their own repositories' scripts; the glue around them is
+# identity-control's deploy-dev's, kept the same. The daily run catches a change on either main that
+# breaks the wiring before this repository next changes.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  # Run by hand against branches, to prove the wiring against a change before it merges.
+  workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: identity-kernel branch, tag or commit
+        required: false
+        default: main
+      identity_ref:
+        description: identity-control branch, tag or commit
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  wiring:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: anshacerbia2/identity-kernel
+          ref: ${{ inputs.kernel_ref || 'main' }}
+          path: .kernel
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: anshacerbia2/identity-control
+          ref: ${{ inputs.identity_ref || 'main' }}
+          path: .identity
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      - name: start the kernel and apply its realm
+        working-directory: .kernel/deploy/dev
+        run: |
+          {
+            echo "KEYCLOAK_HOSTNAME=localhost"
+            echo "ADMIN_ALLOW_CIDRS=192.0.2.1/32"
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
+            echo "KC_BOOTSTRAP_ADMIN_USERNAME=admin"
+            echo "KC_BOOTSTRAP_ADMIN_PASSWORD=$(openssl rand -hex 16)"
+          } > .env
+          docker compose -f compose.yaml -f compose.ci.yaml up -d --wait --wait-timeout 300 postgres keycloak caddy
+          docker compose -f compose.yaml -f compose.ci.yaml up -d realm-apply
+          code="$(docker wait "$(docker compose -f compose.yaml -f compose.ci.yaml ps -aq realm-apply)")"
+          docker compose -f compose.yaml -f compose.ci.yaml logs --no-color realm-apply
+          [ "$code" = "0" ] || { echo "::error::the kernel's realm-apply job exited $code"; exit 1; }
+          bash ./new-client-key.sh realm-apply ./keys "$(id -u):$(id -g)"
+          bash ./create-apply-client.sh > "$RUNNER_TEMP/kernel-client.env"
+          set -a; . "$RUNNER_TEMP/kernel-client.env"; set +a
+          export KEYCLOAK_ADMIN_CLIENT_KEY_FILE="$PWD/keys/realm-apply.pem"
+          cd ../..
+          go run ./cmd/realm-apply -environment development -url http://localhost:8080 -apply
+
+      - name: start identity-control and perform its ceremony
+        working-directory: .identity/deploy/dev
+        run: |
+          kernel_password="$(grep '^KC_BOOTSTRAP_ADMIN_PASSWORD=' ../../../.kernel/deploy/dev/.env | cut -d= -f2-)"
+          {
+            echo "KEYCLOAK_ISSUER=https://localhost/realms/scnehaux"
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
+            echo "IDENTITY_APP_PASSWORD=$(openssl rand -hex 16)"
+            echo "IDENTITY_CALLER_PASSWORD=$(openssl rand -hex 16)"
+            echo "KERNEL_KEYCLOAK_CONTAINER=scnehaux-identity-dev-keycloak-1"
+            echo "KC_BOOTSTRAP_ADMIN_USERNAME=admin"
+            echo "KC_BOOTSTRAP_ADMIN_PASSWORD=$kernel_password"
+            echo "KERNEL_DEPLOY_DIR=$GITHUB_WORKSPACE/.kernel/deploy/dev"
+            echo "KEYS_OWNER=$(id -u):$(id -g)"
+          } > .env
+          bash ./create-kernel-clients.sh >> .env
+          bash ./create-registration-client.sh >> .env
+          bash ./create-security-ref-key.sh
+          docker compose up -d --build
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8082/readyz >/dev/null 2>&1 && break
+            [ "$i" = 60 ] && { echo "::error::identity-control did not report ready"; docker compose logs --no-color; exit 1; }
+            sleep 2
+          done
+          bash ./bootstrap.sh "ci@scnehaux.local" "deploy-dev workflow"
+
+      # The kernel's hostname is https://localhost behind Caddy's local CA, as identity-control's
+      # deploy-dev trusts it, so sign-in runs over TLS end to end.
+      - name: trust the kernel proxy's local certificate authority
+        run: |
+          docker cp scnehaux-identity-dev-caddy-1:/data/caddy/pki/authorities/local/root.crt "$RUNNER_TEMP/caddy-root.crt"
+          sudo cp "$RUNNER_TEMP/caddy-root.crt" /usr/local/share/ca-certificates/caddy-local-root.crt
+          sudo update-ca-certificates
+          curl -fsS https://localhost/realms/scnehaux/.well-known/openid-configuration >/dev/null
+
+      - name: start Organization Control
+        working-directory: deploy/dev
+        run: |
+          {
+            echo "KEYCLOAK_ISSUER=https://localhost/realms/scnehaux"
+            for name in POSTGRES_PASSWORD ORGANIZATION_RUNTIME_PASSWORD ORGANIZATION_PROVIDER_PASSWORD \
+                        ORGANIZATION_DISPATCH_PASSWORD ORGANIZATION_RESOLUTION_PASSWORD ORGANIZATION_CONSUMER_PASSWORD; do
+              echo "$name=$(openssl rand -hex 16)"
+            done
+            echo "KEYS_OWNER=$(id -u):$(id -g)"
+          } > .env
+          mkdir -p keys
+          docker compose up -d --build
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8083/readyz >/dev/null 2>&1 && break
+            [ "$i" = 60 ] && { echo "::error::organization-control did not report ready"; docker compose logs --no-color; exit 1; }
+            sleep 2
+          done
+
+      - name: wire the two services (README §Wiring to other services, steps 1 to 6)
+        run: |
+          # The caller's two secrets alone: the rest of identity-control's .env would override this
+          # stack's own when the script runs docker compose here.
+          export IDENTITY_CALLER_PASSWORD="$(grep '^IDENTITY_CALLER_PASSWORD=' .identity/deploy/dev/.env | cut -d= -f2-)"
+          export IDENTITY_CALLER_KEY_FILE="$(grep '^IDENTITY_CALLER_KEY_FILE=' .identity/deploy/dev/.env | cut -d= -f2-)"
+          export KC_BASE_URL=https://localhost
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          mkdir -p "$RUNNER_TEMP/wiring"
+          pwsh -NoProfile -File scripts/dev-wire.ps1 -IdentityRepo .identity -KernelDeployDir .kernel/deploy/dev \
+            -Operator "ci@scnehaux.local" -State "$RUNNER_TEMP/wiring/state.json" -ServiceKeysOwner "$(id -u):$(id -g)"
+
+      - name: what the wiring should show (README step 7)
+        run: |
+          # The caller's two secrets alone: the rest of identity-control's .env would override this
+          # stack's own when the script runs docker compose here.
+          export IDENTITY_CALLER_PASSWORD="$(grep '^IDENTITY_CALLER_PASSWORD=' .identity/deploy/dev/.env | cut -d= -f2-)"
+          export IDENTITY_CALLER_KEY_FILE="$(grep '^IDENTITY_CALLER_KEY_FILE=' .identity/deploy/dev/.env | cut -d= -f2-)"
+          export KC_BASE_URL=https://localhost
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          pwsh -NoProfile -File scripts/dev-wiring-proof.ps1 -IdentityRepo .identity -State "$RUNNER_TEMP/wiring/state.json"
+
+      - name: stack logs
+        if: failure()
+        run: |
+          (cd deploy/dev && docker compose logs --no-color --tail 200) || true
+          (cd .identity/deploy/dev && docker compose logs --no-color --tail 200 identity-control) || true
