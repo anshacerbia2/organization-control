@@ -385,9 +385,10 @@ func run() error {
 		return fmt.Errorf("tenant caller records: %w", err)
 	}
 	authenticationConfig := httpapi.AuthenticationConfig{
-		Records:   callerRecords{Reader: records, TenantRecords: tenantRecords},
-		Logger:    logger,
-		Consumers: consumerServices != nil,
+		Records:       callerRecords{Reader: records, TenantRecords: tenantRecords},
+		Logger:        logger,
+		EmergencyUses: records,
+		Consumers:     consumerServices != nil,
 	}
 
 	// The claim rule is this service's, because STD-IAM-002 §3.5 states it in terms of claims

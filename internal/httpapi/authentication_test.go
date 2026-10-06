@@ -652,3 +652,45 @@ func TestAnEmergencyGrantsEveryRequestIsReported(t *testing.T) {
 		t.Errorf("an activated provider was reported as emergency: %s", logs.String())
 	}
 }
+
+// fakeUses records the Principals whose emergency grant authorized a request.
+type fakeUses struct {
+	used []id.UUID
+	err  error
+}
+
+func (f *fakeUses) RecordEmergencyUse(_ context.Context, principal id.UUID) error {
+	f.used = append(f.used, principal)
+	return f.err
+}
+
+// Each request an emergency grant authorizes is its validation, recorded (ADR-ORG-002 §5.2); a
+// failure to record it is reported and does not refuse the break-glass path.
+func TestAnEmergencyGrantsUseIsRecordedAndNeverRefused(t *testing.T) {
+	s := newSigner(t)
+	breakGlass := id.MustParse("01a0f64a-c533-7000-a956-c3f095484a12")
+	records := testRecords()
+	records.emergency = map[id.UUID]bool{breakGlass: true}
+	uses := &fakeUses{}
+	var logs bytes.Buffer
+	cfg := AuthenticationConfig{Records: records, Consumers: true, EmergencyUses: uses,
+		Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))}
+
+	if _, called, _ := authenticated(t, s, cfg, s.sign(t, providerClaims(breakGlass))); !called {
+		t.Fatal("the emergency grant's request did not reach the handler")
+	}
+	if len(uses.used) != 1 || uses.used[0] != breakGlass {
+		t.Errorf("recorded uses %v, want one by %s", uses.used, breakGlass)
+	}
+	if _, _, _ = authenticated(t, s, cfg, s.sign(t, providerClaims(testProvider))); len(uses.used) != 1 {
+		t.Errorf("an activated provider's request was recorded as an emergency use: %v", uses.used)
+	}
+
+	uses.err = errors.New("the table is unreachable")
+	if _, called, _ := authenticated(t, s, cfg, s.sign(t, providerClaims(breakGlass))); !called {
+		t.Error("a failure to record the use refused the emergency grant's request")
+	}
+	if !strings.Contains(logs.String(), "an emergency grant's use could not be recorded") {
+		t.Errorf("the failure was not reported: %s", logs.String())
+	}
+}

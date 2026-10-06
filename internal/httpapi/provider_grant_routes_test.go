@@ -6,6 +6,7 @@ package httpapi
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -46,5 +47,20 @@ func TestAProviderGrantNeedsAReasonAndAPrincipal(t *testing.T) {
 		if recorder := post(t, handler, c.path, c.body, c.headers); recorder.Code != http.StatusBadRequest {
 			t.Errorf("%s answered %d, want 400: %s", c.name, recorder.Code, recorder.Body.String())
 		}
+	}
+}
+
+// The validation report is a provider's (ADR-ORG-002 §5.2).
+func TestTheEmergencyValidationReportIsProviderOnly(t *testing.T) {
+	t.Parallel()
+
+	tenant := tenantCaller(t)
+	handler := mounted(t, &tenant)
+	request := httptest.NewRequest(http.MethodGet, "/v1/provider-grants:emergency-validation", nil)
+	request.Header.Set(ReasonHeader, "an audit")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Errorf("a tenant caller answered %d, want 403", recorder.Code)
 	}
 }

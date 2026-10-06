@@ -450,6 +450,49 @@ table "provider_activation" {
   }
 }
 
+table "emergency_grant_use" {
+  schema  = schema.organization
+  comment = "The last use of each emergency provider grant of this service's scope, recorded by every request it authorizes. ADR-ORG-002 §5.2."
+
+  column "grant_id" {
+    null = false
+    type = uuid
+  }
+  column "first_used_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "last_used_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "uses" {
+    null    = false
+    type    = bigint
+    default = 1
+  }
+
+  primary_key {
+    columns = [column.grant_id]
+  }
+
+  foreign_key "emergency_grant_use_grant_fk" {
+    columns     = [column.grant_id]
+    ref_columns = [table.provider_grant.column.grant_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  check "emergency_grant_use_uses_check" {
+    expr = "uses > 0"
+  }
+  check "emergency_grant_use_order_check" {
+    expr = "first_used_at <= last_used_at"
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // tenant — RLS. A tenant-scoped caller sees exactly one row: its own.
 // ---------------------------------------------------------------------------------------------

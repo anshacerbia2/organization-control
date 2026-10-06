@@ -28,6 +28,7 @@ BEGIN
               ('organization.provider_grant'),
               ('organization.provider_activation'),
               ('organization.provider_grant_event'),
+              ('organization.emergency_grant_use'),
               ('tenant.tenant'),
               ('tenant.provisioning_request'),
               ('tenant.tenant_event'),
@@ -221,6 +222,13 @@ GRANT INSERT ON organization.provider_grant_event TO organization_provider_rt;
 GRANT SELECT, INSERT ON organization.provider_activation TO organization_provider_rt;
 GRANT UPDATE (decided_by, decision, decision_reason, decided_at, ends_at, ended_by, end_reason, ended_at)
     ON organization.provider_activation TO organization_provider_rt;
+
+-- organization.emergency_grant_use -- provider only: every request an emergency grant authorizes
+-- records the grant's use, and the validation report reads it (ADR-ORG-002 §5.2). INSERT for the
+-- first use, UPDATE of the last use and the count alone, SELECT for the report and for the count the
+-- update adds to. Nothing deletes one: it is the evidence that the grant was validated.
+GRANT SELECT, INSERT ON organization.emergency_grant_use TO organization_provider_rt;
+GRANT UPDATE (last_used_at, uses) ON organization.emergency_grant_use TO organization_provider_rt;
 
 -- projection.consumer -- provider only: the consumer registry, progress reports, the snapshot
 -- mark, and the fresh check's metering. The resolver reads it through its own role, below.

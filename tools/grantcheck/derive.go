@@ -91,6 +91,11 @@ var boundaries = map[string][]string{
 	// grants (ADR-ORG-002 §5.2).
 	"(*" + module + "/internal/authority.Reader).EmergencyGrants": {providerRole},
 	"(*" + module + "/internal/authority.Reader).ConsumerFor":     {providerRole},
+	// Each request an emergency grant authorizes records the grant's use, and the maintenance stage
+	// reads the validation report (ADR-ORG-002 §5.2). The stage runs as the owner; the server hands
+	// the reader the provider connections.
+	"(*" + module + "/internal/authority.Reader).RecordEmergencyUse":  {providerRole},
+	"(*" + module + "/internal/authority.Reader).EmergencyValidation": {providerRole},
 	// authority.NewGrants(conns) in cmd/organization-control/bootstrap.go, on
 	// ORGANIZATION_PROVIDER_DATABASE_URL: the bootstrap that makes the first provider grant.
 	"(*" + module + "/internal/authority.Grants).Bootstrap": {providerRole},

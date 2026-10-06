@@ -234,6 +234,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("GET /v1/provider-grants", h.listProviderGrants)
 	api.HandleFunc("POST /v1/provider-grants", h.grantProvider)
 	api.HandleFunc("POST /v1/provider-grants/{grant_id}/revoke", h.revokeProvider)
+	api.HandleFunc("GET /v1/provider-grants:emergency-validation", h.emergencyValidation)
 
 	// The routes an eligible caller reaches, and the only ones (ADR-ORG-002).
 	api.HandleFunc("GET /v1/provider-activations", h.listProviderActivations)

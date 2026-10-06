@@ -21,7 +21,12 @@
       "close (ROADMAP.md item 12). Duplicating the list in controldb would let the gate and the",
       "frontier disagree about which events are debt."
     ],
-    "cmd/organization-migrate": ["internal/controldb", "internal/projection"],
+    "_comment_migrate_authority": [
+      "It reaches internal/authority for the emergency grant validation report, which the daily",
+      "maintenance stage logs (ADR-ORG-002 §5.2): the same statement the provider route reads, so",
+      "the schedule and the route cannot disagree about which grant is overdue."
+    ],
+    "cmd/organization-migrate": ["internal/authority", "internal/controldb", "internal/projection"],
     "internal/controldb": [],
 
     "_comment_db": [
