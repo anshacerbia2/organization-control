@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.8.0
+  version: 1.8.1
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-04
+  last_reviewed: 2026-10-06
   parent_sad: SAD-004
 ---
 
@@ -341,11 +341,15 @@ POST   /v1/memberships
 POST   /v1/memberships/{membership_id}:suspend
 POST   /v1/memberships/{membership_id}:revoke
 POST   /v1/memberships/{membership_id}:restore
-GET    /v1/projections/organization/snapshot
-POST   /v1/projections/organization:reconcile
-GET    /v1/projections/organization/consumers/{consumer_id}
-PUT    /v1/projections/organization/consumers/{consumer_id}
+POST   /v1/projections/snapshot
+POST   /v1/projections/reconcile
+GET    /v1/projections/consumers/{consumer_id}
+POST   /v1/projections/consumers
 ```
+
+The projection routes are the ones this service serves. Until 1.8.1 this list named them under
+`/v1/projections/organization/`, a path that was never served. identity-control's client followed
+the list and was answered 404, which the three-stack `deploy-dev` found.
 
 `:verify` is the authoritative fresh check, reserved for high-risk operations and
 never placed on an ordinary request path. Its use is measured: a consumer whose
