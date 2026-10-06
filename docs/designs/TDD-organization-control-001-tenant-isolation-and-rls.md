@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.14.0
+  version: 1.15.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-04
+  last_reviewed: 2026-10-06
   parent_sad: SAD-004
 ---
 
@@ -791,10 +791,9 @@ POST  /v1/provider-activations/{id}/end
 
 Each command takes `X-Administrative-Reason`.
 
-**Built here, and left for its own change.** Activations are built for both registered scopes, and
-the projection of `provider:identity-control` is §Provider Authority Projection. The 90-day
-emergency validation report (`ADR-ORG-002 §5.2`) needs the last use of each emergency grant, which
-the access records hold and nothing reads yet. It follows on its own.
+**Built here.** Activations are built for both registered scopes, and the projection of
+`provider:identity-control` is §Provider Authority Projection. The 90-day validation of an
+emergency grant is §Emergency Grant Validation.
 
 | Ref | Source |
 | :-- | :-- |
@@ -809,6 +808,43 @@ emergency grant, which is reported. The emergency grants are standing authority:
 and still standing. A provider whose activation is in force acts alone for its duration, as
 Entra's activated administrator does. The duration bounds that, not a second approval on each
 action (`ADR-ORG-002` Alternative E).
+
+### Emergency Grant Validation
+
+`ADR-ORG-002 §5.2` (2026-10-06): an emergency grant is validated by using it. Microsoft's drill is
+to "Validate that the emergency access accounts can sign in and perform administrative tasks", "At
+least every 90 days" [R5]. A request the grant authorizes proves both, so the use is recorded.
+
+```sql
+CREATE TABLE organization.emergency_grant_use (
+    grant_id      UUID PRIMARY KEY REFERENCES organization.provider_grant (grant_id),
+    first_used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    uses          BIGINT      NOT NULL DEFAULT 1 CHECK (uses > 0),
+    CHECK (first_used_at <= last_used_at)
+);
+```
+
+- **Each use is recorded on the grant.** Authentication already logs every request an emergency
+  grant authorizes at `WARN`. The same request also writes the use, on the provider connections,
+  in its own transaction. The grant is looked up again in the write, so a grant revoked between the
+  standing read and the write records nothing. A failure to record is logged at `ERROR` and does
+  not refuse the request: the grant is in force, and a break-glass path that fails on its own
+  bookkeeping fails when it is needed.
+- **The record is evidence.** The provider role holds `SELECT`, `INSERT` and `UPDATE` of
+  `last_used_at` and `uses`, and nothing deletes one. The consumer role cannot read it.
+- **Overdue is ninety days.** The clock runs from the last use, or from the grant when it was never
+  used.
+- **The report is in two places.** `GET /v1/provider-grants:emergency-validation` lists every
+  unrevoked emergency grant of `provider:organization-control` with `last_used_at`, `uses`,
+  `due_at` and `overdue`, the oldest due first. It is a provider read with its reason, like the
+  grant list. The daily `maintenance` stage logs each overdue grant at `WARN`, from the same
+  statement, and does not fail on one: an overdue grant is still in force.
+- **A drill is a request made on purpose.** Its `X-Administrative-Reason` says it is a drill, so
+  the review Microsoft asks for after each use can tell "a planned drill" from "an actual
+  emergency" [R5].
+- **Only this scope.** The Identity Control API records and reports its own scope's grants, from
+  its own projection and requests (`ADR-ORG-002 §5.3`). This service cannot see their use.
 
 ### Provider Authority Projection
 
@@ -1141,6 +1177,16 @@ administrative connection is explicitly not accepted as evidence.
 - An emergency grant is in force without an activation, every request it authorizes logs the
   report, and fewer than two in production are reported.
 - A revoked grant ends its activation's authority at the next request.
+
+### Emergency Grant Validation
+
+- Each request an emergency grant authorizes records its use. An activated provider's request does
+  not, and a failure to record is reported and refuses nothing.
+- The report lists each emergency grant of this scope with its uses, the oldest due first, and
+  leaves eligible grants out. A grant never used and made more than 90 days ago is overdue, and so
+  is a used one 90 days after its last use.
+- The provider role cannot delete a recorded use; the consumer role cannot read one.
+- The report is a provider's.
 
 ### Provider Authority Projection
 

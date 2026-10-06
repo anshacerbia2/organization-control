@@ -52,6 +52,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/db"
 	"github.com/anshacerbia2/foundation-platform/migrations"
 
+	"github.com/anshacerbia2/organization-control/internal/authority"
 	"github.com/anshacerbia2/organization-control/internal/controldb"
 	"github.com/anshacerbia2/organization-control/internal/projection"
 )
@@ -252,8 +253,40 @@ func runMaintenance(ctx context.Context, pool *db.Pool, cfg controldb.Maintenanc
 		slog.Int64("dead_letters_disposed", report.DeadLettersDisposed),
 		slog.Int64("receipts_pruned", report.ReceiptsPruned),
 		slog.Int64("stale_unresolved", report.StaleUnresolved))
+	reportEmergencyValidation(ctx, pool, logger)
 	if report.StaleUnresolved > 0 {
 		return fmt.Errorf("%w: %d older than %s", errStale, report.StaleUnresolved, cfg.StaleAlert)
 	}
 	return nil
+}
+
+// reportEmergencyValidation logs every emergency grant of provider:organization-control unused for
+// longer than the validation period, at WARN (ADR-ORG-002 §5.2). A grant is validated by using it:
+// its holder signs in and makes a request on purpose, with a reason that says it is a drill. The
+// report does not fail the stage; a grant overdue for validation is still in force.
+func reportEmergencyValidation(ctx context.Context, pool *db.Pool, logger *slog.Logger) {
+	records, err := authority.NewReader(pool)
+	if err == nil {
+		var report []authority.EmergencyValidation
+		if report, err = records.EmergencyValidation(ctx, time.Now()); err == nil {
+			overdue := 0
+			for _, grant := range report {
+				if !grant.Overdue {
+					continue
+				}
+				overdue++
+				attrs := []any{slog.String("grant_id", grant.GrantID.String()),
+					slog.String("principal_id", grant.Principal.String()), slog.Time("due_at", grant.DueAt)}
+				if grant.LastUsedAt != nil {
+					attrs = append(attrs, slog.Time("last_used_at", *grant.LastUsedAt))
+				}
+				logger.Warn("an emergency provider grant has not been used in 90 days; its holder validates it "+
+					"by signing in and making a request with a reason that says it is a drill", attrs...)
+			}
+			logger.Info("emergency grant validation", slog.String("scope", authority.Scope),
+				slog.Int("emergency_grants", len(report)), slog.Int("overdue", overdue))
+			return
+		}
+	}
+	logger.Error("the emergency grant validation report could not be read", slog.String("error", err.Error()))
 }

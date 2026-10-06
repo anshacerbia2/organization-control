@@ -111,6 +111,7 @@ func TestTheConsumerCannotActAsTheControlPlane(t *testing.T) {
 		"read an activation's reason":        `SELECT reason, decided_by FROM organization.provider_activation`,
 		"grant provider authority":           `INSERT INTO organization.provider_grant (grant_id) VALUES (gen_random_uuid())`,
 		"read provider grant history":        `SELECT 1 FROM organization.provider_grant_event`,
+		"read emergency grant use":           `SELECT 1 FROM organization.emergency_grant_use`,
 	} {
 		if err := asConsumer(t, true, statement); err == nil {
 			t.Errorf("the consumer role can %s", what)

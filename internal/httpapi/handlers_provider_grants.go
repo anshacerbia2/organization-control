@@ -114,3 +114,41 @@ func (h *handlers) revokeProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	respond(w, http.StatusOK, viewProviderGrant(record))
 }
+
+// emergencyValidationView is one emergency grant of this service's scope and when it was last used
+// (ADR-ORG-002 §5.2).
+type emergencyValidationView struct {
+	GrantID     string     `json:"grant_id"`
+	PrincipalID string     `json:"principal_id"`
+	GrantedAt   time.Time  `json:"granted_at"`
+	LastUsedAt  *time.Time `json:"last_used_at"`
+	Uses        int64      `json:"uses"`
+	DueAt       time.Time  `json:"due_at"`
+	Overdue     bool       `json:"overdue"`
+}
+
+// emergencyValidation lists every unrevoked emergency grant of provider:organization-control with
+// its last use, the oldest due first. A grant is validated by using it, and one unused for 90 days
+// is overdue.
+func (h *handlers) emergencyValidation(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	report, err := h.services.ProviderGrants.EmergencyValidation(r.Context(), reason(r), time.Now())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	views := make([]emergencyValidationView, 0, len(report))
+	for _, v := range report {
+		views = append(views, emergencyValidationView{
+			GrantID: v.GrantID.String(), PrincipalID: v.Principal.String(), GrantedAt: v.GrantedAt,
+			LastUsedAt: v.LastUsedAt, Uses: v.Uses, DueAt: v.DueAt, Overdue: v.Overdue,
+		})
+	}
+	respond(w, http.StatusOK, map[string]any{
+		"scope":                  authority.Scope,
+		"validation_period_days": int(authority.ValidationPeriod.Hours() / 24),
+		"grants":                 views,
+	})
+}

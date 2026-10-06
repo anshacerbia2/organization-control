@@ -1,4 +1,4 @@
-h1:R2/nQ7e13gDKryQRshMpslnH/NzxjS7n+XfpIqiUT94=
+h1:2Q6rk//KkmH/0a0OdYBpv7naODd130+UM/0FtOZaBVc=
 20260821202322_baseline_organization_schema.sql h1:iLX771m6Nv6GkIXeIDTQcEmWAMlMd3Rod+l1e3GiydA=
 20260826071822_add_projection_snapshot_mark.sql h1:NEpR7ckeg3Cr3hLh0H8f6hUBkBanqkPuwiIIEoezmMQ=
 20260827143343_add_verify_rate_signal.sql h1:IoZCJOcErFuME9vNN+FzIr9elyLD+viqIkIu5V56ayA=
@@ -13,3 +13,4 @@ h1:R2/nQ7e13gDKryQRshMpslnH/NzxjS7n+XfpIqiUT94=
 20261002120000_drop_consumer_single_active.sql h1:lO03Ui4yGFG7Z6c9dR0lITLegQtwPm8d7WPCYu6xXnE=
 20261002140000_add_provider_grant_publication.sql h1:k5tT+8OAa40fjLuacNeujNvAaRVAG1wIvr3fG9GOG5Q=
 20261004120000_add_tenant_admin_grant.sql h1:vT3c6bf7Wkn4sSRP5zFL7cEk8MR4LEHucrZ26oC3r/I=
+20261006120000_add_emergency_grant_use.sql h1:ke3OnGCpenH/PJ1YGgW2SzsHDnILwfmk5DEiBiW/0BU=

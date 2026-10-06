@@ -31,6 +31,20 @@ func (r *Reader) ConsumerFor(ctx context.Context) error {
 	})
 }
 
+func (r *Reader) RecordEmergencyUse(ctx context.Context) error {
+	return r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE organization.emergency_grant_use SET uses = uses + 1 WHERE grant_id = $1`)
+		return err
+	})
+}
+
+func (r *Reader) EmergencyValidation(ctx context.Context) error {
+	return r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT last_used_at FROM organization.emergency_grant_use`)
+		return err
+	})
+}
+
 type Grants struct{ tx db.Transactor }
 
 func (g *Grants) Bootstrap(ctx context.Context) error {

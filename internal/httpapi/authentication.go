@@ -75,6 +75,11 @@ type CallerRecords interface {
 	TenantStanding(ctx context.Context, principal, tenant, correlation id.UUID) (authority.TenantStanding, error)
 }
 
+// EmergencyUseRecorder records that a request was authorized by the Principal's emergency grant.
+type EmergencyUseRecorder interface {
+	RecordEmergencyUse(ctx context.Context, principal id.UUID) error
+}
+
 // AuthenticationConfig is what authentication needs besides the verifier.
 type AuthenticationConfig struct {
 	// Records is where provider grants and consumer registrations are read. Required.
@@ -83,6 +88,10 @@ type AuthenticationConfig struct {
 	// Logger reports every request an emergency grant authorizes (ADR-ORG-002 §5.2). Nil uses
 	// slog.Default.
 	Logger *slog.Logger
+
+	// EmergencyUses records each request an emergency grant authorizes, which is how the grant is
+	// validated (ADR-ORG-002 §5.2). Nil records nothing.
+	EmergencyUses EmergencyUseRecorder
 
 	// Consumers is whether consumer authority exists: true when the consumer pool is configured.
 	// Without the pool no consumer route could be served, so a consumer token is refused instead
@@ -179,6 +188,15 @@ func Authenticate(verifier TokenVerifier, cfg AuthenticationConfig) (Middleware,
 				logger.WarnContext(r.Context(), "a provider acted on an emergency grant",
 					slog.String("principal_id", caller.Subject.String()), slog.String("method", r.Method),
 					slog.String("route", r.URL.Path))
+				// The use is the grant's validation. A failure to record it is reported and does not refuse
+				// the request: the grant is in force, and a break-glass path that fails on its own
+				// bookkeeping fails when it is needed.
+				if cfg.EmergencyUses != nil {
+					if err := cfg.EmergencyUses.RecordEmergencyUse(r.Context(), caller.Subject); err != nil {
+						logger.ErrorContext(r.Context(), "an emergency grant's use could not be recorded",
+							slog.String("principal_id", caller.Subject.String()), slog.String("error", err.Error()))
+					}
+				}
 			}
 
 			next.ServeHTTP(w, r.WithContext(WithCaller(r.Context(), caller)))
