@@ -96,9 +96,11 @@ function Set-EnvLine([string] $file, [string] $key, [string] $value) {
     Set-Content -Path $file -Value $lines
 }
 
-function Compose([string] $dir) {
-    & docker compose --project-directory $dir -f (Join-Path $dir "compose.yaml") @args
-    if ($LASTEXITCODE -ne 0) { throw "docker compose $args in $dir failed" }
+# Invoke-Compose takes the compose arguments as one array: passed loose, "up -d" would bind -d to a
+# parameter of this function.
+function Invoke-Compose([string] $Directory, [string[]] $Arguments) {
+    & docker compose --project-directory $Directory -f (Join-Path $Directory "compose.yaml") @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "docker compose $($Arguments -join ' ') in $Directory failed" }
 }
 
 function Wait-Ready([string] $url) {
@@ -147,8 +149,8 @@ $null = Require "dev-provider-caller registered" (Send-Json "POST" "$identityApi
         } | ConvertTo-Json -Compress -Depth 4) $identityToken "wire-caller") 201
 
 Write-Host "3. the first provider here"
-Compose $organizationDeploy run --rm bootstrap-provider -principal-id $operatorPrincipal -operator $Operator `
-    -reason "the first provider of Organization Control on the development server"
+Invoke-Compose $organizationDeploy @("run", "--rm", "bootstrap-provider", "-principal-id", $operatorPrincipal,
+    "-operator", $Operator, "-reason", "the first provider of Organization Control on the development server")
 
 Write-Host "4. Organization's grant and consumer for the Identity Control API"
 $token = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
@@ -175,13 +177,13 @@ $null = Require "identity-control registered as a consumer" (Send-Json "POST" "$
 
 Write-Host "5. deliver to identity-control"
 Set-EnvLine (Join-Path $organizationDeploy ".env") "ORGANIZATION_DELIVERY_TARGETS" "identity-control=http://identity-control:8090/v1/deliveries"
-Compose $organizationDeploy up -d organization-control
+Invoke-Compose $organizationDeploy @("up", "-d", "organization-control")
 Wait-Ready $organizationApi
 
 Write-Host "6. point identity-control here"
 Set-EnvLine (Join-Path $identityDeploy ".env") "IDENTITY_DELIVERY_PRINCIPAL_ID" $organizationWorkload.principal_id
 Set-EnvLine (Join-Path $identityDeploy ".env") "IDENTITY_ORGANIZATION_BASE_URL" "http://organization-control:8080"
-Compose $identityDeploy up -d identity-control
+Invoke-Compose $identityDeploy @("up", "-d", "identity-control")
 Wait-Ready $identityApi
 $bootstrap = & docker compose --project-directory $identityDeploy -f (Join-Path $identityDeploy "compose.yaml") run --rm provider-bootstrap 2>&1
 $bootstrap | ForEach-Object { Write-Host "        $_" }
