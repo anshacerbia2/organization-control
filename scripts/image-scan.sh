@@ -7,7 +7,7 @@
 # Each argument is an image this repository built, already in the local Docker daemon. Every image
 # a deploy/dev compose file names by digest is scanned as well, from its registry. For each image:
 #
-#   - a report of every finding, which never fails the run (rule 4: what has no fix is reported);
+#   - a report of every finding, ignored ones included, which never fails the run (rule 4);
 #   - the gate, which fails on a High or Critical vulnerability that has a fixed version.
 #
 # .grype.yaml holds the ignore rules (rule 5). Each rule's reason begins "review-by YYYY-MM-DD:",
@@ -67,7 +67,8 @@ grype() {
 status=0
 for target in "${targets[@]}"; do
   echo "::group::$target: every finding"
-  grype "$target" -o table || echo "::warning::the report for $target did not complete"
+  # --show-suppressed: a finding an ignore rule hides from the gate stays in the report, marked.
+  grype "$target" -o table --show-suppressed || echo "::warning::the report for $target did not complete"
   echo "::endgroup::"
   echo "== $target: the gate, High or Critical with a fix"
   # Grype exits 2 when it found a vulnerability at or above --fail-on, and 1 when the scan failed.
