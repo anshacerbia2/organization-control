@@ -305,6 +305,37 @@ rests on ordinary tenant traffic being unable to authenticate as the cross-Tenan
 reused for both would compile, pass every test that does not inspect `current_user`, and silently run
 the estate's tenant traffic under the role that can read every Tenant.
 
+### Lists, and the version a Membership transition names
+
+What an administrator lists (TDD-organization-control-002 1.9.0, -003 1.6.0, -004 1.6.0):
+
+```text
+Tenant administrator, the Tenant from the token:
+GET   /v1/workspaces       ?status=active|archived|retired
+GET   /v1/memberships      ?status=active|suspended|revoked&workspace_id=<uuid>&principal_id=<uuid>
+GET   /v1/memberships/{membership_id}
+GET   /v1/invitations      ?state=pending|identity_verified|accepted|expired|revoked
+
+Provider, with X-Administrative-Reason:
+GET   /v1/organizations    ?status=active|suspended|retired&classification=provider|customer|partner|publisher
+GET   /v1/tenants          ?status=<a Tenant state>&organization_id=<uuid>
+```
+
+Every list also takes `after=<the last id of the previous page>` and `limit` (50 when absent, 1 to
+100, anything else `400`) and answers `{"<items>": [...], "next": "<id>" | null}`, in creation order
+(STD-GLB-001 1.3.0 §Pagination). An unknown filter value is `400`.
+
+A Membership transition names the version it was shown, and a revocation says why:
+
+```text
+POST  /v1/memberships/{membership_id}/suspend   {"expected_version": 1}
+POST  /v1/memberships/{membership_id}/restore   {"expected_version": 2}
+POST  /v1/memberships/{membership_id}/revoke    {"expected_version": 3}   X-Administrative-Reason required
+```
+
+A stale version answers `409` and changes nothing. The actor, the correlation and the reason are kept
+on the transition's `membership.membership_event` row.
+
 ### Locally: `.env` and the Makefile
 
 Nothing above needs to be typed. `.env.example` carries a working local set; the `Makefile` loads

@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.8.1
+  version: 1.9.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-06
+  last_reviewed: 2026-10-07
   parent_sad: SAD-004
 ---
 
@@ -219,9 +219,20 @@ CREATE TABLE membership.membership_event (
     membership_version  BIGINT      NOT NULL,
     event_type          TEXT        NOT NULL,
     recorded_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT membership_event_version_unique UNIQUE (membership_id, membership_version)
+    actor_id            UUID,        -- the acting principal_id (1.9.0)
+    correlation_id      UUID,        -- the request that caused the transition (1.9.0)
+    reason              TEXT,        -- X-Administrative-Reason, or the freeze's reason (1.9.0)
+    CONSTRAINT membership_event_version_unique UNIQUE (membership_id, membership_version),
+    CONSTRAINT membership_event_reason_present CHECK (reason IS NULL OR btrim(reason) <> '')
 );
 ```
+
+The three columns added in 1.9.0 are the "record acting subject, reason, and correlation identifier"
+step of §Revocation, which until then had nowhere to land: a Membership transition is tenant-scoped,
+so it writes no `audit.privileged_access` row, and nothing else recorded who acted or why. They are
+nullable because rows written before them have no value to give; every row written since carries the
+actor, the correlation when the request had one, and the reason when one arrived. A revocation always
+has one, because the route refuses a revocation without it.
 
 It records which Membership, at which version, a published event concerns. A delivery receipt
 names only an event, and a stream position is reassigned by a replay, so neither can say whether
@@ -337,10 +348,12 @@ change.
 ```text
 GET    /v1/principals/{principal_id}/contexts
 GET    /v1/context/{tenant_id}/{principal_id}:verify
+GET    /v1/memberships                       ?after=&limit=&status=&workspace_id=&principal_id=
+GET    /v1/memberships/{membership_id}
 POST   /v1/memberships
-POST   /v1/memberships/{membership_id}:suspend
-POST   /v1/memberships/{membership_id}:revoke
-POST   /v1/memberships/{membership_id}:restore
+POST   /v1/memberships/{membership_id}/suspend   {"expected_version": n}
+POST   /v1/memberships/{membership_id}/revoke    {"expected_version": n}, X-Administrative-Reason
+POST   /v1/memberships/{membership_id}/restore   {"expected_version": n}
 POST   /v1/projections/snapshot
 POST   /v1/projections/reconcile
 GET    /v1/projections/consumers/{consumer_id}
@@ -350,6 +363,44 @@ POST   /v1/projections/consumers
 The projection routes are the ones this service serves. Until 1.8.1 this list named them under
 `/v1/projections/organization/`, a path that was never served. identity-control's client followed
 the list and was answered 404, which the three-stack `deploy-dev` found.
+
+The Membership routes are tenant-scoped: the Tenant is the caller's, from the token, and Row-Level
+Security confines every read and write to it, so a Membership in another Tenant answers `404`. Until
+1.9.0 the three transitions were written `:suspend`, `:revoke` and `:restore`. They are served as path
+segments, because a Go 1.22 `net/http` wildcard fills a whole segment, and that is the form a client
+uses (`TDD-organization-control-003` §API / Interface says the same of every lifecycle route).
+
+**The list** is `GET /v1/memberships`, in the form STD-GLB-001 1.3.0 §Pagination fixes for the estate
+and identity-control serves for `GET /v1/registrations`:
+
+| Part | Form |
+| :-- | :-- |
+| Cursor | `after`: the `membership_id` of the last item of the previous page. Absent, the list starts at the first. Not a UUID: `400` |
+| Page size | `limit`: 50 when absent; a whole number from 1 to 100. Anything else, `0` included: `400`, never coerced |
+| Order | `membership_id`, a UUIDv7, so creation order: the keyset `membership_id > $after ORDER BY membership_id LIMIT limit + 1` |
+| Filters | `status` = `active` \| `suspended` \| `revoked`; `workspace_id` and `principal_id`, each a UUID. Each optional, each holding for every page; any other value: `400` |
+| Response | `{"memberships": [...], "next": "<membership_id>" \| null}`, `next` null on the last page |
+
+Each item has the shape `GET /v1/memberships/{membership_id}` returns: the Membership with its
+`version`, which is the `membership_version` a transition must name. Without `status`, revoked
+Memberships are listed too, because a revocation is the record of access that existed.
+`workspace_id` matches only Memberships scoped to that Workspace; a Tenant-wide Membership has none.
+Both reads run in a read-only transaction on the tenant pool.
+
+**Every transition names the version the caller was shown.** Suspend, revoke and restore take the body
+`{"expected_version": n}`, required and positive. The service compares it with the locked row's
+`membership_version` inside the transaction, after the state machine has accepted the action, and a
+mismatch answers `409` `version-conflict` with nothing written, the way a Tenant or Workspace
+transition does (`TDD-organization-control-003` §The optimistic check lives in the service). Until
+1.9.0 these routes took no body, so two administrators acting on one Membership from two views had the
+second action land on a state neither had seen.
+
+**A revocation carries a reason.** It is irreversible, so `X-Administrative-Reason` is required on
+`/revoke` from a tenant caller as well as a provider, and its absence answers `400` before anything is
+read. Suspend and restore take the header when it is sent. Whatever reason arrives is recorded with
+the acting `principal_id` and the request's correlation identifier on the transition's
+`membership.membership_event` row, in the same transaction (§Event History). The offboarding freeze
+suspends each Membership at the version it locked and records the freeze's own reason.
 
 `:verify` is the authoritative fresh check, reserved for high-risk operations and
 never placed on an ordinary request path. Its use is measured: a consumer whose
@@ -523,11 +574,12 @@ cost of the original wording is a silently missing context.
 BEGIN
     load membership FOR UPDATE
     reject if the transition is not permitted by the state machine
+    reject if membership_version is not the caller's expected_version (409)
     set status = 'revoked'
     membership_version = membership_version + 1
     read tenant_security_version
     outbox.Append(priority, com.scnehaux.organization.membership.security.revoked)
-    record acting subject, reason, and correlation identifier
+    record acting subject, reason, and correlation identifier   (membership.membership_event)
 COMMIT
 ```
 
@@ -762,6 +814,7 @@ finding, and consumer misuse of the fresh-check path.
 | Conforms to | STD-IAM-001 §3.3 — one active Tenant context per token; the Membership set is never placed in a token |
 | Conforms to | STD-IAM-001 §3.4 — enforcement delay is propagation plus remaining token lifetime |
 | Conforms to | STD-GLB-001 — RFC 7807 problem details |
+| Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/memberships`: `after`, `limit` 1 to 100, key order, `next` |
 | Enterprise constraint | EAD-003 — projection contract with freshness, stale behavior, and reconciliation |
 | Enterprise constraint | EAD-006 — Membership, Entitlement, and Permission are distinct |
 | Enterprise constraint | EAD-002 — no universal synchronous control-plane fan-in |
