@@ -121,6 +121,10 @@ type pending struct {
 	// already complete and the update matches no row — an error on a correct request, logged on
 	// every retry a well-behaved client makes.
 	made atomic.Bool
+
+	// adopted records that the claim adopted an uncompleted earlier use of its key
+	// (AdoptInProgressClaim).
+	adopted atomic.Bool
 }
 
 type claimKey struct{}
@@ -144,6 +148,33 @@ func ClaimFrom(ctx context.Context) (Claim, bool) {
 		return Claim{}, false
 	}
 	return held.claim, true
+}
+
+// AdoptInProgressClaim lets the claim in this context adopt a key whose first use never completed,
+// instead of refusing it as in progress.
+//
+// A claim found uncompleted under the same caller, key and digest is the same request sent again:
+// either a concurrent duplicate, or a retry of an attempt whose process died before recording its
+// response. The two look identical from the key alone, so adoption hands the decision to the one
+// operation that can tell them apart from its own record -- today the batch execution, whose lease
+// says whether the earlier attempt is still running (TDD-organization-control-002 §Resuming an
+// execution). That operation must check ClaimAdopted and refuse when the earlier attempt may still be
+// live; one that ignored it would run a duplicate. An adopted claim is completed like a new one, so
+// the response the adopting request returns is what later retries replay.
+//
+// Without this, a batch left executing by a crash could never be finished under the key that started
+// it: every retry was refused as in progress, for ever.
+func AdoptInProgressClaim(ctx context.Context) context.Context {
+	return context.WithValue(ctx, adoptKey{}, true)
+}
+
+type adoptKey struct{}
+
+// ClaimAdopted reports whether the claim in this context adopted an uncompleted earlier use of its
+// key rather than reserving a new one.
+func ClaimAdopted(ctx context.Context) bool {
+	held, ok := ctx.Value(claimKey{}).(*pending)
+	return ok && held.adopted.Load()
 }
 
 // ClaimMade reports whether the claim in this context was newly reserved by a scoped transaction
@@ -180,6 +211,13 @@ func claimWithin(ctx context.Context, tx Tx) error {
 	}
 
 	result, err := idempotency.Claim(ctx, tx, held.claim.Scope, held.claim.Key, held.claim.Digest)
+	if adoptable, _ := ctx.Value(adoptKey{}).(bool); err != nil && adoptable && errors.Is(err, idempotency.ErrInProgress) {
+		// The same caller sent the same request under the same key, and the first use has not
+		// completed. The operation decides whether that use is still live (AdoptInProgressClaim).
+		held.adopted.Store(true)
+		held.made.Store(true)
+		return nil
+	}
 	if err != nil {
 		// The flag is released so a caller that retries within the same request — there is no such
 		// caller today — does not silently skip the claim it failed to make.

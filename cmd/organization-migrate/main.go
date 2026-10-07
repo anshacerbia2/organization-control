@@ -16,7 +16,7 @@
 //
 // A fourth stage is not part of a deploy. It is run on a schedule, daily, as the same role:
 //
-//	organization-migrate -stage=maintenance   # partitions, retention, the stale-incident count
+//	organization-migrate -stage=maintenance   # partitions, retention, batch previews, the stale-incident count
 //
 // It exits 3 when an unresolved dead letter is older than -stale-alert, after doing its work, so
 // the scheduler alerts on the one condition retention must never touch. controldb.RunMaintenance
@@ -75,6 +75,7 @@ func main() {
 	flag.DurationVar(&maintenance.DeadLetterRetention, "dead-letter-retention", maintenance.DeadLetterRetention, "maintenance: resolved dead letters lose their payload after this")
 	flag.DurationVar(&maintenance.ReceiptRetention, "receipt-retention", maintenance.ReceiptRetention, "maintenance: uncited receipts are pruned after this, while no incident is open")
 	flag.DurationVar(&maintenance.StaleAlert, "stale-alert", maintenance.StaleAlert, "maintenance: unresolved dead letters older than this exit 3")
+	flag.DurationVar(&maintenance.BatchPreviewRetention, "batch-preview-retention", maintenance.BatchPreviewRetention, "maintenance: Membership batch previews expired longer ago than this are purged")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -252,6 +253,7 @@ func runMaintenance(ctx context.Context, pool *db.Pool, cfg controldb.Maintenanc
 		slog.Any("partitions_dropped", report.PartitionsDropped),
 		slog.Int64("dead_letters_disposed", report.DeadLettersDisposed),
 		slog.Int64("receipts_pruned", report.ReceiptsPruned),
+		slog.Int64("batch_previews_purged", report.BatchPreviewsPurged),
 		slog.Int64("stale_unresolved", report.StaleUnresolved))
 	reportEmergencyValidation(ctx, pool, logger)
 	if report.StaleUnresolved > 0 {

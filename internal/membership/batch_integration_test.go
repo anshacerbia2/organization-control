@@ -7,6 +7,7 @@ package membership
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,6 +130,14 @@ func TestAPreviewIsTheSingleCommandsValidationAndWritesOnlyTheBatch(t *testing.T
 		t.Errorf("another Tenant's batch: error = %v, want ErrBatchNotFound", err)
 	}
 
+	// More items than a batch carries is its own refusal, so the surface answers it 413 naming the
+	// bound (RFC 7644 §3.7.4), and it is refused before an item is read.
+	_, err = service.PreviewBatch(ctx, BatchRequest{Action: ActionSuspend,
+		MembershipIDs: make([]id.UUID, MaxBatchItems+1)}, testClassifier)
+	if !errors.Is(err, ErrBatchTooLarge) || !strings.Contains(err.Error(), "at most 500 items") {
+		t.Errorf("too many items: error = %v, want ErrBatchTooLarge naming the bound", err)
+	}
+
 	// The request itself is refused whole when it is malformed.
 	for name, req := range map[string]BatchRequest{
 		"no items":                      {Action: ActionSuspend},
@@ -137,7 +146,8 @@ func TestAPreviewIsTheSingleCommandsValidationAndWritesOnlyTheBatch(t *testing.T
 		"a grant":                       {Action: ActionGrant, MembershipIDs: []id.UUID{active.MembershipID}},
 		"a revocation without a reason": {Action: ActionRevoke, MembershipIDs: []id.UUID{active.MembershipID}},
 	} {
-		if _, err := service.PreviewBatch(ctx, req, testClassifier); !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrReasonRequired) {
+		if _, err := service.PreviewBatch(ctx, req, testClassifier); !errors.Is(err, ErrInvalid) &&
+			!errors.Is(err, ErrReasonRequired) && !errors.Is(err, ErrBatchTooLarge) {
 			t.Errorf("%s: error = %v, want a refusal of the request", name, err)
 		}
 	}
@@ -374,5 +384,210 @@ func TestAnExecutionReplaysItsIdempotencyKey(t *testing.T) {
 	var replayed *db.Replayed
 	if !errors.As(err, &replayed) || replayed.Status != 200 {
 		t.Fatalf("the same key again: error = %v, want the stored response replayed", err)
+	}
+}
+
+// TestACrashedExecutionResumesWithoutReapplying is TDD-organization-control-002 §Resuming an
+// execution against a real engine. A request dies part way through an execution, mid-item, holding
+// an Idempotency-Key it never completed. Sent again while its lease is live, the execute is refused;
+// once the lease is stale, the same key adopts its own claim and finishes the batch. Every item
+// ends applied exactly once: the two finished before the crash keep their outcome and event, the one
+// in flight was rolled back and is applied now, and nothing is applied twice.
+func TestACrashedExecutionResumesWithoutReapplying(t *testing.T) {
+	service, ctx, pool := newFixture(t)
+	var members []Membership
+	for i := 0; i < 4; i++ {
+		members = append(members, grantOne(t, service, ctx).Membership)
+	}
+	var batchID id.UUID
+	cleanupBatches(t, ctx, &batchID)
+	ids := []id.UUID{members[0].MembershipID, members[1].MembershipID, members[2].MembershipID, members[3].MembershipID}
+	before := map[id.UUID]int{}
+	for _, m := range ids {
+		before[m] = outboxCount(t, service, ctx, m)
+	}
+	batch, err := service.PreviewBatch(ctx, BatchRequest{Action: ActionSuspend, MembershipIDs: ids}, testClassifier)
+	if err != nil {
+		t.Fatalf("PreviewBatch: %v", err)
+	}
+	batchID = batch.BatchID
+
+	claim := db.Claim{Scope: "tenant:" + tenantA + ":resume-suite", Key: "execute-" + batch.BatchID.String(), Digest: "digest-1"}
+	t.Cleanup(func() {
+		_ = ownerPool(t, ctx).InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
+			_, err := tx.Exec(ctx, `DELETE FROM platform.idempotency_key WHERE scope = $1 AND key = $2`, claim.Scope, claim.Key)
+			return err
+		})
+	})
+
+	base := service.now().UTC()
+	service.now = func() time.Time { return base }
+	crash := errors.New("the process died while applying the third item")
+	service.halt = func(_ context.Context, position int) error {
+		if position == 2 {
+			return crash
+		}
+		return nil
+	}
+	if _, err := service.ExecuteBatch(db.WithClaim(ctx, claim), batch.BatchID, nil, testClassifier); !errors.Is(err, crash) {
+		t.Fatalf("the crashed execution: error = %v, want the injected crash", err)
+	}
+	service.halt = nil
+
+	crashed, err := service.GetBatch(ctx, batch.BatchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if crashed.State != BatchExecuting || crashed.HeartbeatAt == nil {
+		t.Fatalf("after the crash the batch is %s with heartbeat %v, want executing", crashed.State, crashed.HeartbeatAt)
+	}
+	finished := map[int]id.UUID{}
+	for i, item := range crashed.Items {
+		switch {
+		case i < 2 && (item.Outcome == nil || item.Outcome.Status != OutcomeSucceeded):
+			t.Errorf("item %d finished before the crash and has outcome %+v", i, item.Outcome)
+		case i < 2:
+			finished[i] = *item.Outcome.EventID
+		case item.Outcome != nil:
+			t.Errorf("item %d was not finished before the crash and has outcome %+v", i, item.Outcome)
+		}
+	}
+	if status, _ := statusAndVersion(t, service, ctx, members[2].MembershipID); status != StateActive {
+		t.Errorf("the item in flight at the crash is %s; its transaction was not rolled back", status)
+	}
+
+	// The same key while the lease is live: the earlier request may still be running.
+	if _, err := service.ExecuteBatch(db.WithClaim(ctx, claim), batch.BatchID, nil, testClassifier); !errors.Is(err, ErrBatchExecuting) {
+		t.Fatalf("an execute inside the lease: error = %v, want ErrBatchExecuting", err)
+	}
+	if _, err := service.ExecuteBatch(ctx, batch.BatchID, nil, testClassifier); !errors.Is(err, ErrBatchExecuting) {
+		t.Fatalf("an execute without the key inside the lease: error = %v, want ErrBatchExecuting", err)
+	}
+	two := 2
+	service.now = func() time.Time { return base.Add(BatchLease + time.Second) }
+	if _, err := service.ExecuteBatch(ctx, batch.BatchID, &two, testClassifier); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a resume naming another allowance: error = %v, want ErrInvalid", err)
+	}
+
+	// Past the lease, the same key resumes, adopting the claim the crashed request left.
+	resuming := db.WithClaim(ctx, claim)
+	resumed, err := service.ExecuteBatch(resuming, batch.BatchID, nil, testClassifier)
+	if err != nil {
+		t.Fatalf("the resume: %v", err)
+	}
+	if !db.ClaimAdopted(resuming) || !db.ClaimMade(resuming) {
+		t.Error("the resume did not adopt the crashed request's claim, so its response cannot be recorded")
+	}
+	if resumed.State != BatchExecuted || resumed.ResumedAt == nil || resumed.ResumedBy == nil {
+		t.Errorf("the resumed batch is %s, resumed at %v by %v", resumed.State, resumed.ResumedAt, resumed.ResumedBy)
+	}
+	for i, item := range resumed.Items {
+		if item.Outcome == nil || item.Outcome.Status != OutcomeSucceeded {
+			t.Errorf("item %d after the resume: %+v, want succeeded", i, item.Outcome)
+			continue
+		}
+		if event, ok := finished[i]; ok && *item.Outcome.EventID != event {
+			t.Errorf("item %d finished before the crash and was applied again: event %s, then %s",
+				i, event, *item.Outcome.EventID)
+		}
+		status, version := statusAndVersion(t, service, ctx, item.MembershipID)
+		if status != StateSuspended || version != *item.VersionRead+1 {
+			t.Errorf("item %d is %s at version %d, want suspended at %d", i, status, version, *item.VersionRead+1)
+		}
+		if got := outboxCount(t, service, ctx, item.MembershipID) - before[item.MembershipID]; got != 1 {
+			t.Errorf("item %d published %d events, want exactly one", i, got)
+		}
+	}
+
+	// The key whose response was never recorded answers with the batch as it ended, and its
+	// completion now succeeds, so later retries replay.
+	again := db.WithClaim(ctx, claim)
+	if answered, err := service.ExecuteBatch(again, batch.BatchID, nil, testClassifier); err != nil || answered.State != BatchExecuted {
+		t.Fatalf("the key again after the resume: %s, %v; want the executed batch", answered.State, err)
+	}
+	store, err := db.NewClaimStore(pool)
+	if err != nil {
+		t.Fatalf("NewClaimStore: %v", err)
+	}
+	if err := store.Complete(ctx, claim, 200, []byte(`{"state":"executed"}`)); err != nil {
+		t.Fatalf("completing the adopted claim: %v", err)
+	}
+	if _, err := service.ExecuteBatch(db.WithClaim(ctx, claim), batch.BatchID, nil, testClassifier); err == nil {
+		t.Error("the completed key executed again instead of replaying")
+	}
+	// A different key on an executed batch is a second execution, refused as before.
+	if _, err := service.ExecuteBatch(ctx, batch.BatchID, nil, testClassifier); !errors.Is(err, ErrBatchNotPreviewed) {
+		t.Errorf("a new execution of an executed batch: error = %v, want ErrBatchNotPreviewed", err)
+	}
+}
+
+// TestAnExecutionWhoseLeaseWasTakenOverCommitsNothing: the fence. A request that went silent past
+// the lease and comes back after another took the batch over cannot apply an item: its transaction
+// finds its lease gone and rolls back.
+func TestAnExecutionWhoseLeaseWasTakenOverCommitsNothing(t *testing.T) {
+	service, ctx, _ := newFixture(t)
+	first := grantOne(t, service, ctx).Membership
+	second := grantOne(t, service, ctx).Membership
+	var batchID id.UUID
+	cleanupBatches(t, ctx, &batchID)
+	batch, err := service.PreviewBatch(ctx, BatchRequest{Action: ActionSuspend,
+		MembershipIDs: []id.UUID{first.MembershipID, second.MembershipID}}, testClassifier)
+	if err != nil {
+		t.Fatalf("PreviewBatch: %v", err)
+	}
+	batchID = batch.BatchID
+
+	readLease := func() id.UUID {
+		t.Helper()
+		var raw string
+		if err := ownerPool(t, ctx).InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
+			return tx.QueryRow(ctx, `SELECT lease_id::text FROM membership.membership_batch WHERE batch_id = $1`,
+				batch.BatchID.String()).Scan(&raw)
+		}); err != nil {
+			t.Fatalf("reading the lease: %v", err)
+		}
+		lease, err := id.Parse(raw)
+		if err != nil {
+			t.Fatalf("lease %q: %v", raw, err)
+		}
+		return lease
+	}
+
+	base := service.now().UTC()
+	service.now = func() time.Time { return base }
+	stop := errors.New("stop")
+	service.halt = func(context.Context, int) error { return stop }
+	if _, err := service.ExecuteBatch(ctx, batch.BatchID, nil, testClassifier); !errors.Is(err, stop) {
+		t.Fatalf("the first execution: error = %v, want the injected stop", err)
+	}
+	stale := readLease()
+
+	service.now = func() time.Time { return base.Add(BatchLease + time.Second) }
+	service.halt = func(_ context.Context, position int) error {
+		if position == 1 {
+			return stop
+		}
+		return nil
+	}
+	if _, err := service.ExecuteBatch(ctx, batch.BatchID, nil, testClassifier); !errors.Is(err, stop) {
+		t.Fatalf("the resume: error = %v, want the injected stop at the second item", err)
+	}
+	service.halt = nil
+	if readLease() == stale {
+		t.Fatal("the resume did not take the lease over")
+	}
+
+	current, err := service.GetBatch(ctx, batch.BatchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if err := service.executeItem(ctx, current, stale, current.Items[1], ""); !errors.Is(err, ErrBatchLeaseLost) {
+		t.Fatalf("the silent request coming back: error = %v, want ErrBatchLeaseLost", err)
+	}
+	if status, _ := statusAndVersion(t, service, ctx, second.MembershipID); status != StateActive {
+		t.Errorf("a request without the lease applied an item: the Membership is %s", status)
+	}
+	if status, _ := statusAndVersion(t, service, ctx, first.MembershipID); status != StateSuspended {
+		t.Errorf("the item the resume applied is %s, want suspended", status)
 	}
 }

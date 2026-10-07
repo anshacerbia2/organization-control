@@ -28,6 +28,12 @@ const (
 	// BatchTTL is how long a preview stays executable. Past it the preview describes a state the
 	// operator saw too long ago to commit, and execution is refused.
 	BatchTTL = 15 * time.Minute
+
+	// BatchLease is how long an execution may go without a heartbeat before the request executing it
+	// is taken to have ended (TDD-organization-control-002 §Resuming an execution). Every item's
+	// transaction writes one, and no request lives this long: the composition root refuses an
+	// HTTP_REQUEST_TIMEOUT at or above it, so a heartbeat this old belongs to a request that is gone.
+	BatchLease = 30 * time.Second
 )
 
 // BatchState is where a batch is. `expired` is never stored: it is a `previewed` batch read after
@@ -62,6 +68,18 @@ var (
 
 	// ErrBatchNotPreviewed refuses executing a batch that is executing or has executed.
 	ErrBatchNotPreviewed = errors.New("membership: the batch is not awaiting execution")
+
+	// ErrBatchTooLarge refuses a preview naming more than MaxBatchItems Memberships. SCIM answers it
+	// 413, and "the returned response MUST specify the limit exceeded in the body" (RFC 7644 §3.7.4),
+	// so its detail names the bound (ADR-ORG-004 §5.1).
+	ErrBatchTooLarge = errors.New("membership: the batch is too large")
+
+	// ErrBatchExecuting refuses an execute while another request holds a live lease on the batch.
+	ErrBatchExecuting = errors.New("membership: the batch is being executed")
+
+	// ErrBatchLeaseLost stops an execution whose lease another request took over after this one went
+	// silent for longer than BatchLease. What it had not committed is the other request's to do.
+	ErrBatchLeaseLost = errors.New("membership: the batch execution was taken over")
 )
 
 // Problem is the problem document the single command would return for an item: what the preview
@@ -148,6 +166,12 @@ type Batch struct {
 	ExecutedAt   *time.Time
 	CompletedAt  *time.Time
 
+	// HeartbeatAt is the last sign of life of the request executing the batch; ResumedBy and
+	// ResumedAt record the last time a later request took the execution over.
+	HeartbeatAt *time.Time
+	ResumedBy   *id.UUID
+	ResumedAt   *time.Time
+
 	Items []BatchItem
 }
 
@@ -191,8 +215,8 @@ func (r BatchRequest) validate() error {
 	case len(r.MembershipIDs) == 0:
 		return fmt.Errorf("%w: membership_ids must name at least one Membership", ErrInvalid)
 	case len(r.MembershipIDs) > MaxBatchItems:
-		return fmt.Errorf("%w: membership_ids names %d Memberships, and a batch holds at most %d",
-			ErrInvalid, len(r.MembershipIDs), MaxBatchItems)
+		return fmt.Errorf("%w: a batch carries at most %d items, and membership_ids names %d",
+			ErrBatchTooLarge, MaxBatchItems, len(r.MembershipIDs))
 	case r.Action == ActionRevoke && strings.TrimSpace(r.Reason) == "":
 		return ErrReasonRequired
 	}
@@ -403,7 +427,10 @@ const batchColumns = `batch_id::text,
        fail_on_errors,
        executed_by::text,
        executed_at,
-       completed_at`
+       completed_at,
+       heartbeat_at,
+       resumed_by::text,
+       resumed_at`
 
 const selectBatch = `SELECT ` + batchColumns + `
 FROM membership.membership_batch
@@ -429,17 +456,38 @@ FROM membership.membership_batch_item
 WHERE batch_id = $1
 ORDER BY position`
 
+// startExecution moves a preview to `executing` and gives the request executing it the lease.
 const startExecution = `UPDATE membership.membership_batch
-SET state = 'executing', executed_by = $2, executed_at = $3, fail_on_errors = $4
+SET state = 'executing', executed_by = $2, executed_at = $3, fail_on_errors = $4,
+    lease_id = $5, heartbeat_at = $3
 WHERE batch_id = $1`
+
+// resumeExecution hands the lease of an `executing` batch whose heartbeat is stale to the request
+// resuming it. The old lease_id stops fencing anything the moment this commits.
+const resumeExecution = `UPDATE membership.membership_batch
+SET lease_id = $2, heartbeat_at = $3, resumed_by = $4, resumed_at = $3
+WHERE batch_id = $1 AND state = 'executing'`
+
+// heartbeat is the fence. It renews the lease of the request holding it and matches nothing for a
+// request whose lease was taken over, which then rolls back the transaction it is in.
+const heartbeat = `UPDATE membership.membership_batch
+SET heartbeat_at = $3
+WHERE batch_id = $1 AND lease_id = $2 AND state = 'executing'`
+
+// lockItem takes the item's row lock and reports whether it still has no outcome. Read after the
+// lock, so a request that waited behind another one's commit sees that commit's outcome.
+const lockItem = `SELECT outcome IS NULL
+FROM membership.membership_batch_item
+WHERE batch_id = $1 AND position = $2
+FOR UPDATE`
 
 const recordSucceeded = `UPDATE membership.membership_batch_item
 SET outcome = 'succeeded', accepted_at = $3, event_id = $4, resulting_version = $5
-WHERE batch_id = $1 AND position = $2`
+WHERE batch_id = $1 AND position = $2 AND outcome IS NULL`
 
 const recordFailed = `UPDATE membership.membership_batch_item
 SET outcome = 'failed', problem = $3::jsonb
-WHERE batch_id = $1 AND position = $2`
+WHERE batch_id = $1 AND position = $2 AND outcome IS NULL`
 
 // settleUnattempted closes every item execution did not reach: refused at preview, or past the
 // error allowance.
@@ -449,18 +497,33 @@ SET outcome = 'not_attempted',
 WHERE batch_id = $1 AND outcome IS NULL`
 
 const completeExecution = `UPDATE membership.membership_batch
-SET state = 'executed', completed_at = $2
-WHERE batch_id = $1`
+SET state = 'executed', completed_at = $3, heartbeat_at = $3
+WHERE batch_id = $1 AND lease_id = $2 AND state = 'executing'`
 
-// ExecuteBatch commits a preview, item by item.
+// haltError is what the test seam's failure becomes: a stop, not an item failure.
+type haltError struct{ error }
+
+func (h haltError) Unwrap() error { return h.error }
+
+// ExecuteBatch commits a preview, item by item, or resumes an execution whose request ended.
 //
-// The first transaction moves the batch to `executing` under its row lock -- so a second execution
-// is refused rather than run twice -- and is the one an Idempotency-Key claim commits with. Each
-// item that would change then runs TransitionWithin in a transaction of its own, named with the
-// version its preview read, and records its outcome in that transaction; a Membership changed since
-// the preview fails with the single command's version conflict. A failure is recorded in a
-// transaction of its own. failOnErrors, when set, is the number of failures tolerated (SCIM's
-// failOnErrors): the next one stops the run, and the rest are not attempted.
+// The first transaction moves the batch to `executing` under its row lock and gives this request the
+// lease -- so a second execution is refused rather than run twice -- and is the one an
+// Idempotency-Key claim commits with. Each item that would change then runs TransitionWithin in a
+// transaction of its own, named with the version its preview read, and records its outcome in that
+// transaction; a Membership changed since the preview fails with the single command's version
+// conflict. A failure is recorded in a transaction of its own. failOnErrors, when set, is the number
+// of failures tolerated (SCIM's failOnErrors): the next one stops the run, and the rest are not
+// attempted.
+//
+// An execute on a batch already `executing` resumes it when its heartbeat is older than BatchLease,
+// and is refused with ErrBatchExecuting otherwise (TDD-organization-control-002 §Resuming an
+// execution). The resume takes the lease over and continues the items with no outcome, each still
+// held to the version its preview read; an item with an outcome is never applied again, because
+// each item's transaction locks the item, finds its outcome and writes nothing. Every item's
+// transaction renews the lease through the fence, so a request whose lease was taken over rolls its
+// item back and stops with ErrBatchLeaseLost. The same Idempotency-Key that started the execution
+// may resume it: its claim, never completed, is adopted, and completed with this response.
 func (s *Service) ExecuteBatch(ctx context.Context, batchID id.UUID, failOnErrors *int, classify Classifier) (Batch, error) {
 	switch {
 	case classify == nil:
@@ -474,32 +537,70 @@ func (s *Service) ExecuteBatch(ctx context.Context, batchID id.UUID, failOnError
 	if !ok {
 		return Batch{}, db.ErrNoScope
 	}
+	lease, err := s.newID()
+	if err != nil {
+		return Batch{}, fmt.Errorf("membership: mint execution lease: %w", err)
+	}
 	now := s.now().UTC()
+	ctx = db.AdoptInProgressClaim(ctx)
 
-	var batch Batch
+	var (
+		batch    Batch
+		answered bool
+	)
 	if err := db.WithTenantScope(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
 		var err error
 		batch, err = loadBatch(ctx, tx, selectBatchForUpdate, batchID)
 		if err != nil {
 			return err
 		}
-		if batch.State != BatchPreviewed {
+		switch batch.State {
+		case BatchPreviewed:
+			if now.After(batch.ExpiresAt) {
+				return fmt.Errorf("%w: %s expired at %s; preview it again",
+					ErrBatchExpired, batchID, batch.ExpiresAt.Format(time.RFC3339))
+			}
+			var allowance any
+			if failOnErrors != nil {
+				allowance = *failOnErrors
+			}
+			if _, err := tx.Exec(ctx, startExecution, batchID.String(), scope.Actor().String(), now,
+				allowance, lease.String()); err != nil {
+				return fmt.Errorf("membership: start batch execution: %w", err)
+			}
+			batch.State, batch.FailOnErrors = BatchExecuting, failOnErrors
+			return nil
+
+		case BatchExecuting:
+			if live := batch.HeartbeatAt; live != nil && !now.After(live.Add(BatchLease)) {
+				return fmt.Errorf("%w: %s was last heard from at %s; read it, or send execute again after %s",
+					ErrBatchExecuting, batchID, live.Format(time.RFC3339),
+					live.Add(BatchLease).Format(time.RFC3339))
+			}
+			if failOnErrors != nil && (batch.FailOnErrors == nil || *batch.FailOnErrors != *failOnErrors) {
+				return fmt.Errorf("%w: fail_on_errors was fixed when %s began executing; resume it without one or with the same value",
+					ErrInvalid, batchID)
+			}
+			if _, err := tx.Exec(ctx, resumeExecution, batchID.String(), lease.String(), now,
+				scope.Actor().String()); err != nil {
+				return fmt.Errorf("membership: resume batch execution: %w", err)
+			}
+			return nil
+
+		default:
+			// An adopted claim on an executed batch is a request whose execution committed and whose
+			// response was never recorded. Its answer is the batch as it ended.
+			if batch.State == BatchExecuted && db.ClaimAdopted(ctx) {
+				answered = true
+				return nil
+			}
 			return fmt.Errorf("%w: %s is %s", ErrBatchNotPreviewed, batchID, batch.State)
 		}
-		if now.After(batch.ExpiresAt) {
-			return fmt.Errorf("%w: %s expired at %s; preview it again",
-				ErrBatchExpired, batchID, batch.ExpiresAt.Format(time.RFC3339))
-		}
-		var allowance any
-		if failOnErrors != nil {
-			allowance = *failOnErrors
-		}
-		if _, err := tx.Exec(ctx, startExecution, batchID.String(), scope.Actor().String(), now, allowance); err != nil {
-			return fmt.Errorf("membership: start batch execution: %w", err)
-		}
-		return nil
 	}); err != nil {
 		return Batch{}, err
+	}
+	if answered {
+		return batch, nil
 	}
 
 	var reason string
@@ -508,28 +609,27 @@ func (s *Service) ExecuteBatch(ctx context.Context, batchID id.UUID, failOnError
 	}
 	failures := 0
 	for _, item := range batch.Items {
-		if item.Refusal != nil || item.VersionRead == nil {
+		if item.Outcome != nil && item.Outcome.Status == OutcomeFailed {
+			failures++
+		}
+	}
+	for _, item := range batch.Items {
+		if item.Refusal != nil || item.VersionRead == nil || item.Outcome != nil {
 			continue
 		}
-		if failOnErrors != nil && failures > *failOnErrors {
+		if batch.FailOnErrors != nil && failures > *batch.FailOnErrors {
 			break
 		}
 
-		err := db.WithTenantScope(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
-			result, err := s.TransitionWithin(ctx, tx, batch.Action, Command{
-				MembershipID: item.MembershipID, ExpectedVersion: *item.VersionRead, Reason: reason,
-			})
-			if err != nil {
-				return err
-			}
-			if _, err := tx.Exec(ctx, recordSucceeded, batchID.String(), item.Position,
-				result.AcceptedAt, result.EventID.String(), result.Membership.Version); err != nil {
-				return fmt.Errorf("membership: record batch item outcome: %w", err)
-			}
-			return nil
-		})
+		err := s.executeItem(ctx, batch, lease, item, reason)
 		if err == nil {
 			continue
+		}
+		// A request that ended, a lease taken over, or an injected halt stops here and records
+		// nothing for this item, which keeps it for whoever resumes the batch.
+		var halted haltError
+		if ctx.Err() != nil || errors.Is(err, ErrBatchLeaseLost) || errors.As(err, &halted) {
+			return Batch{}, err
 		}
 
 		failures++
@@ -539,6 +639,9 @@ func (s *Service) ExecuteBatch(ctx context.Context, batchID id.UUID, failOnError
 			return Batch{}, encodeErr
 		}
 		if err := db.WithTenantScope(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
+			if err := fence(ctx, tx, batchID, lease, s.now().UTC()); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, recordFailed, batchID.String(), item.Position, encoded); err != nil {
 				return fmt.Errorf("membership: record batch item failure: %w", err)
 			}
@@ -550,19 +653,68 @@ func (s *Service) ExecuteBatch(ctx context.Context, batchID id.UUID, failOnError
 
 	completed := s.now().UTC()
 	if err := db.WithTenantScope(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
+		tag, err := tx.Exec(ctx, completeExecution, batchID.String(), lease.String(), completed)
+		if err != nil {
+			return fmt.Errorf("membership: complete batch execution: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("%w: %s", ErrBatchLeaseLost, batchID)
+		}
 		if _, err := tx.Exec(ctx, settleUnattempted, batchID.String()); err != nil {
 			return fmt.Errorf("membership: settle unattempted batch items: %w", err)
 		}
-		if _, err := tx.Exec(ctx, completeExecution, batchID.String(), completed); err != nil {
-			return fmt.Errorf("membership: complete batch execution: %w", err)
-		}
-		var err error
 		batch, err = loadBatch(ctx, tx, selectBatch, batchID)
 		return err
 	}); err != nil {
 		return Batch{}, err
 	}
 	return batch, nil
+}
+
+// executeItem applies one item under the lease, in its own transaction: the fence first, so a request
+// that lost the lease does nothing; then the item's lock, so an item another request already settled
+// is left alone; then the single transition, held to the version the preview read, and its outcome.
+func (s *Service) executeItem(ctx context.Context, batch Batch, lease id.UUID, item BatchItem, reason string) error {
+	return db.WithTenantScope(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
+		if err := fence(ctx, tx, batch.BatchID, lease, s.now().UTC()); err != nil {
+			return err
+		}
+		var open bool
+		if err := tx.QueryRow(ctx, lockItem, batch.BatchID.String(), item.Position).Scan(&open); err != nil {
+			return fmt.Errorf("membership: lock batch item: %w", err)
+		}
+		if !open {
+			return nil
+		}
+		result, err := s.TransitionWithin(ctx, tx, batch.Action, Command{
+			MembershipID: item.MembershipID, ExpectedVersion: *item.VersionRead, Reason: reason,
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, recordSucceeded, batch.BatchID.String(), item.Position,
+			result.AcceptedAt, result.EventID.String(), result.Membership.Version); err != nil {
+			return fmt.Errorf("membership: record batch item outcome: %w", err)
+		}
+		if s.halt != nil {
+			if err := s.halt(ctx, item.Position); err != nil {
+				return haltError{err}
+			}
+		}
+		return nil
+	})
+}
+
+// fence renews the lease, or reports that it is no longer this request's.
+func fence(ctx context.Context, tx db.Tx, batchID, lease id.UUID, at time.Time) error {
+	tag, err := tx.Exec(ctx, heartbeat, batchID.String(), lease.String(), at)
+	if err != nil {
+		return fmt.Errorf("membership: renew batch lease: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("%w: %s", ErrBatchLeaseLost, batchID)
+	}
+	return nil
 }
 
 // GetBatch reads one batch of the bound Tenant. Another Tenant's is absent under its policy.
@@ -624,11 +776,13 @@ func scanBatch(r rowScanner) (Batch, error) {
 		rawBatch, rawTenant, action, state string
 		rawCorrelation, rawCreator         string
 		rawContinues, rawExecutor          *string
+		rawResumer                         *string
 		failOnErrors                       *int
 	)
 	if err := r.Scan(&rawBatch, &rawTenant, &action, &state, &batch.Reason, &rawCorrelation,
 		&rawContinues, &rawCreator, &batch.CreatedAt, &batch.ExpiresAt, &batch.WouldChange,
-		&batch.WouldNotChange, &failOnErrors, &rawExecutor, &batch.ExecutedAt, &batch.CompletedAt); err != nil {
+		&batch.WouldNotChange, &failOnErrors, &rawExecutor, &batch.ExecutedAt, &batch.CompletedAt,
+		&batch.HeartbeatAt, &rawResumer, &batch.ResumedAt); err != nil {
 		return Batch{}, fmt.Errorf("membership: scan batch: %w", err)
 	}
 	parsed, err := parseAll(rawBatch, rawTenant, rawCorrelation, rawCreator)
@@ -640,6 +794,9 @@ func scanBatch(r rowScanner) (Batch, error) {
 		return Batch{}, err
 	}
 	if batch.ExecutedBy, err = parseOptional(rawExecutor); err != nil {
+		return Batch{}, err
+	}
+	if batch.ResumedBy, err = parseOptional(rawResumer); err != nil {
 		return Batch{}, err
 	}
 	batch.Action, batch.State, batch.FailOnErrors = Action(action), BatchState(state), failOnErrors

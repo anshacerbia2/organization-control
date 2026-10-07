@@ -266,3 +266,29 @@ CREATE POLICY tenant_admin_grant_revoked_by_provider ON membership.tenant_admin_
     TO organization_rt
     USING      (NULLIF(current_setting('app.acting_provider', true), '') IS NOT NULL)
     WITH CHECK (revoked_by = NULLIF(current_setting('app.acting_provider', true), '')::uuid);
+
+-- membership.membership_batch and membership.membership_batch_item, purged by the maintenance stage.
+--
+-- A Membership batch preview past its expiry can never execute, and the maintenance stage deletes it
+-- (TDD-organization-control-002 1.13.0 §Membership Batches). That stage runs as the migration role,
+-- which owns both tables, and FORCE ROW LEVEL SECURITY binds an owner as it binds everyone else: with
+-- no policy naming it, its DELETE would match no row and report success. These two policies give it
+-- exactly the expired previews -- SELECT and DELETE, since a DELETE with a WHERE clause applies the
+-- SELECT policies too -- and WITH CHECK (false) refuses it every insert and update.
+DROP POLICY IF EXISTS membership_batch_purge ON membership.membership_batch;
+CREATE POLICY membership_batch_purge ON membership.membership_batch
+    FOR ALL
+    TO organization_migrator
+    USING      (state = 'previewed' AND expires_at < now())
+    WITH CHECK (false);
+
+DROP POLICY IF EXISTS membership_batch_item_purge ON membership.membership_batch_item;
+CREATE POLICY membership_batch_item_purge ON membership.membership_batch_item
+    FOR ALL
+    TO organization_migrator
+    USING      (EXISTS (SELECT 1
+                          FROM membership.membership_batch b
+                         WHERE b.batch_id = membership_batch_item.batch_id
+                           AND b.state = 'previewed'
+                           AND b.expires_at < now()))
+    WITH CHECK (false);

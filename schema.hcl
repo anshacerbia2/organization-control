@@ -1046,6 +1046,27 @@ table "membership_batch" {
     type = timestamptz
   }
 
+  // The execution lease (TDD-organization-control-002 1.13.0 §Resuming an execution). lease_id is
+  // the fencing token of the request executing the batch, replaced when a later execute takes over;
+  // heartbeat_at is written in every item's transaction, so a heartbeat older than the lease says the
+  // executing request has ended. resumed_by and resumed_at record the last takeover.
+  column "lease_id" {
+    null = true
+    type = uuid
+  }
+  column "heartbeat_at" {
+    null = true
+    type = timestamptz
+  }
+  column "resumed_by" {
+    null = true
+    type = uuid
+  }
+  column "resumed_at" {
+    null = true
+    type = timestamptz
+  }
+
   primary_key {
     columns = [column.batch_id]
   }
@@ -1752,6 +1773,23 @@ table "consumer" {
   column "last_reported_mark" {
     null = true
     type = bigint
+  }
+
+  // The last reconciliation run against this consumer's report (TDD-organization-control-002 1.13.0
+  // §Reconciliation): when it ran, the mark the report stated, and how many findings it produced.
+  // Written by this service, so unlike last_reported_* it is a measurement and not a claim; it is
+  // what the projection health screen shows as the consumer's reconciliation age.
+  column "last_reconciled_at" {
+    null = true
+    type = timestamptz
+  }
+  column "last_reconciled_mark" {
+    null = true
+    type = bigint
+  }
+  column "last_reconciled_findings" {
+    null = true
+    type = integer
   }
 
   // The three columns below carry the `:verify` misuse signal.
