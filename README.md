@@ -355,6 +355,14 @@ GET   /v1/membership-batches/{batch_id}
 GET   /v1/memberships/{membership_id}/enforcement   accepted | propagating | enforced | over_budget
 ```
 
+What a provider reads about projection health and provisioning (TDD-organization-control-002 1.11.0,
+-003 1.8.0):
+
+```text
+GET   /v1/projections/consumers              ?state=active|retired   each item adds state, retired_at, stale
+GET   /v1/tenants/{tenant_id}                adds provisioning: the latest request, unresolved included
+```
+
 ### Locally: `.env` and the Makefile
 
 Nothing above needs to be typed. `.env.example` carries a working local set; the `Makefile` loads

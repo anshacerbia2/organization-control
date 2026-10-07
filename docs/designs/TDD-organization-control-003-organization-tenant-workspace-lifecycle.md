@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.7.0
+  version: 1.8.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -382,6 +382,39 @@ Tenant in `offboarding` or `retired` to the process that put it there, without l
 offboarding. The list leaves both out because each is a further read per row, and the list is the
 screen that does not need them.
 
+From 1.8.0 the single Tenant read also carries `provisioning`: the Tenant's latest provisioning
+request (§Provisioning Correlation), or `null` when none was ever recorded.
+
+```json
+"provisioning": {
+  "request_id": "<uuid>",
+  "correlation_id": "<uuid>",
+  "state": "requested" | "realized" | "failed" | "unresolved",
+  "detail": "<text>" | null,
+  "requested_at": "<timestamp>",
+  "resolved_at": "<timestamp>" | null
+}
+```
+
+| Field | Value |
+| :-- | :-- |
+| `state` | The request's state, not the Tenant's. `unresolved` exists only here: the Tenant whose request timed out stays in `requested` or `provisioning` |
+| `detail` | The reason a failure was reported with, the sweep's note on an `unresolved` request, or whatever a realized status carried; `null` when nothing was |
+| `resolved_at` | When the outcome was recorded, or when the sweep declared it unknown; `null` while `requested` |
+
+Each field is a column of `tenant.provisioning_request`, read as stored. "Latest" is the request
+activation reads (§Tenant Activation): the provisioning direction only
+(`coalesce(desired_profile->>'operation', 'provision') = 'provision'`), newest `requested_at`, then
+`request_id`. A deprovisioning command is offboarding's and is read on the offboarding
+(`TDD-organization-control-004`). A retry from `failed` records a new request, so `provisioning`
+is the current attempt, and the earlier one stays in the table as the history.
+
+It is read in the same transaction as the record, so the request and the Tenant describe one instant.
+`TDD-organization-experience-002` §Tenant States Are Rendered Individually needs it: `unresolved`
+renders with retry disabled, because retrying an outcome nobody knows is how a Tenant is provisioned
+twice (§Provisioning Correlation), and `failed` renders with its reason. Neither is readable from the
+Tenant's own `status`. The list leaves `provisioning` out for the reason it leaves out the other two.
+
 | List | Filters |
 | :-- | :-- |
 | `GET /v1/organizations` | `status` = `active` \| `suspended` \| `retired`; `classification` = `provider` \| `customer` \| `partner` \| `publisher` |
@@ -661,6 +694,9 @@ at the transport.
 - An unresolved request is not retried automatically.
 - A realized status arriving after the timeout resolves the request by correlation.
 - A duplicate realized status produces one effect.
+- The single Tenant read carries the latest provisioning request with its state, detail and
+  resolution instant, `unresolved` included; a retry's newer request replaces the failed one there;
+  a deprovisioning command is not read as one; a Tenant with no request reads `null`.
 
 ### Concurrency
 
@@ -721,3 +757,4 @@ resolution, and Tenant activation refused.
 | Consumed by | `TDD-organization-control-002` — Membership references `tenant.tenant` and `workspace.workspace` |
 | Consumed by | `TDD-organization-control-004` — offboarding drives the Tenant terminal transitions |
 | Consumed by | `TDD-organization-experience-001` §Irreversible Operations — the affected-subject count, computed by the API |
+| Consumed by | `TDD-organization-experience-002` §Tenant States Are Rendered Individually — `provisioning` on the Tenant read (1.8.0) |
