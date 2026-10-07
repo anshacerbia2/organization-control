@@ -262,6 +262,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/provider-activations/{activation_id}/deny", h.denyProviderActivation)
 	api.HandleFunc("POST /v1/provider-activations/{activation_id}/end", h.endProviderActivation)
 
+	api.HandleFunc("GET /v1/projections/consumers", h.listConsumers)
 	api.HandleFunc("POST /v1/projections/consumers", h.registerConsumer)
 	api.HandleFunc("GET /v1/projections/consumers/{consumer_id}", h.getConsumer)
 	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/retire", h.retireConsumer)

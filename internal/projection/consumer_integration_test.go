@@ -374,3 +374,97 @@ func TestAConsumerKeepsItsWorkload(t *testing.T) {
 			err, consumerID)
 	}
 }
+
+// TestTheConsumerListIsAKeysetPageWithStaleComputed is TDD-organization-control-002 1.11.0 §The
+// Consumer List: consumer_id order, `next` on a full page, the state filter on every page, each page
+// recorded with the caller's reason, and `stale` from Consumer.Age at the registry's clock -- true for
+// a consumer that never reported or reported past its budget, false within it and for a retired one.
+func TestTheConsumerListIsAKeysetPageWithStaleComputed(t *testing.T) {
+	f := newFixture(t)
+
+	// A prefix no other row shares, so the page after it begins with these four. Only begins: rows
+	// other suites leave behind may sort after them.
+	prefix := "list-" + mustID(t).String() + "-"
+	fresh, late, never, retired := prefix+"a", prefix+"b", prefix+"c", prefix+"d"
+	for _, name := range []string{fresh, late, never, retired} {
+		if err := f.registerNamed(t, name, revoked); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+	}
+	// The budget registerNamed declares is 30 s, against the registry's fixed clock.
+	f.exec(t, `UPDATE projection.consumer SET snapshot_mark = 1, last_reported_mark = 1,
+		last_reported_at = $2 WHERE consumer_id = $1`, fresh, f.fixed.Add(-10*time.Second))
+	f.exec(t, `UPDATE projection.consumer SET snapshot_mark = 1, last_reported_mark = 1,
+		last_reported_at = $2 WHERE consumer_id = $1`, late, f.fixed.Add(-31*time.Second))
+	if err := f.registry.Retire(f.ctx, retired); err != nil {
+		t.Fatalf("Retire: %v", err)
+	}
+
+	before := len(f.recorder.reasons)
+	page, err := f.registry.List(f.ctx, ConsumerListQuery{After: prefix, Limit: 2}, "the projection health screen")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Consumers) != 2 || page.Consumers[0].ConsumerID != fresh || page.Consumers[1].ConsumerID != late {
+		t.Fatalf("the first page is not the first two consumers in key order: %+v", page.Consumers)
+	}
+	if page.Next == nil || *page.Next != late {
+		t.Fatalf("next = %v, want %s", page.Next, late)
+	}
+	if got := f.recorder.reasons[before:]; len(got) != 1 || got[0] != "the projection health screen" {
+		t.Errorf("the page recorded %q; want one access with the caller's reason", got)
+	}
+	if first := page.Consumers[0]; first.Stale || first.State != ConsumerActive || first.RetiredAt != nil ||
+		first.MaxAcceptedAge != 30*time.Second || first.StaleBehavior != StaleFailClosed ||
+		len(first.EventTypes) != 1 || first.EventTypes[0] != revoked {
+		t.Errorf("a consumer within its budget reads %+v", first)
+	}
+	if !page.Consumers[1].Stale {
+		t.Errorf("a consumer that reported 31 s ago against a 30 s budget is not stale")
+	}
+
+	rest, err := f.registry.List(f.ctx, ConsumerListQuery{After: *page.Next, Limit: 2}, "x")
+	if err != nil {
+		t.Fatalf("List after: %v", err)
+	}
+	if len(rest.Consumers) != 2 || rest.Consumers[0].ConsumerID != never || rest.Consumers[1].ConsumerID != retired {
+		t.Fatalf("the second page = %+v; want %s then %s", rest.Consumers, never, retired)
+	}
+	if !rest.Consumers[0].Stale {
+		t.Errorf("a consumer that never reported is not stale")
+	}
+	if gone := rest.Consumers[1]; gone.State != ConsumerRetired || gone.RetiredAt == nil || gone.Stale ||
+		len(gone.EventTypes) != 0 {
+		t.Errorf("a retired consumer reads %+v; want retired, retired_at set, not stale, no event types", gone)
+	}
+
+	active, err := f.registry.List(f.ctx, ConsumerListQuery{After: late, State: ConsumerActive}, "x")
+	if err != nil {
+		t.Fatalf("List active: %v", err)
+	}
+	for _, item := range active.Consumers {
+		if item.ConsumerID == retired || item.State != ConsumerActive {
+			t.Errorf("state=active returned %s in state %s", item.ConsumerID, item.State)
+		}
+	}
+	if len(active.Consumers) == 0 || active.Consumers[0].ConsumerID != never {
+		t.Errorf("state=active after %s = %+v; want it to start at %s", late, active.Consumers, never)
+	}
+	gone, err := f.registry.List(f.ctx, ConsumerListQuery{After: prefix, State: ConsumerRetired}, "x")
+	if err != nil {
+		t.Fatalf("List retired: %v", err)
+	}
+	if len(gone.Consumers) == 0 || gone.Consumers[0].ConsumerID != retired {
+		t.Errorf("state=retired after the prefix = %+v; want it to start at %s", gone.Consumers, retired)
+	}
+
+	if _, err := f.registry.List(f.ctx, ConsumerListQuery{State: "stale"}, "x"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("an unknown state: error = %v, want ErrInvalid", err)
+	}
+	if _, err := f.registry.List(f.ctx, ConsumerListQuery{Limit: 101}, "x"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("a limit above the bound: error = %v, want ErrInvalid", err)
+	}
+	if _, err := f.registry.List(f.ctx, ConsumerListQuery{}, ""); !errors.Is(err, db.ErrReasonRequired) {
+		t.Errorf("a list without a reason: error = %v, want db.ErrReasonRequired", err)
+	}
+}

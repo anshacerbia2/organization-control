@@ -119,22 +119,42 @@ func viewTenantRecord(t tenant.Record) tenantRecordView {
 	}
 }
 
-// tenantDetailView is `GET /v1/tenants/{tenant_id}`: the record and the two facts only the single read
-// computes (TDD-organization-control-003 1.7.0). Both are always present: `offboarding_id` is null
-// when no offboarding was begun, and `active_memberships` is a count, 0 included.
+// tenantDetailView is `GET /v1/tenants/{tenant_id}`: the record and the facts only the single read
+// computes (TDD-organization-control-003 1.7.0, 1.8.0). Each is always present: `offboarding_id` and
+// `provisioning` are null when there is none, and `active_memberships` is a count, 0 included.
 type tenantDetailView struct {
 	tenantRecordView
 
-	OffboardingID     *id.UUID `json:"offboarding_id"`
-	ActiveMemberships int      `json:"active_memberships"`
+	OffboardingID     *id.UUID                 `json:"offboarding_id"`
+	ActiveMemberships int                      `json:"active_memberships"`
+	Provisioning      *provisioningRequestView `json:"provisioning"`
+}
+
+// provisioningRequestView is the Tenant's latest provisioning request. `detail` and `resolved_at` are
+// null rather than absent, so a client reads "no reason recorded" and "not resolved" without testing
+// for a missing key.
+type provisioningRequestView struct {
+	RequestID     id.UUID    `json:"request_id"`
+	CorrelationID id.UUID    `json:"correlation_id"`
+	State         string     `json:"state"`
+	Detail        *string    `json:"detail"`
+	RequestedAt   time.Time  `json:"requested_at"`
+	ResolvedAt    *time.Time `json:"resolved_at"`
 }
 
 func viewTenantDetail(d tenant.Detail) tenantDetailView {
-	return tenantDetailView{
+	view := tenantDetailView{
 		tenantRecordView:  viewTenantRecord(d.Record),
 		OffboardingID:     d.OffboardingID,
 		ActiveMemberships: d.ActiveMemberships,
 	}
+	if p := d.Provisioning; p != nil {
+		view.Provisioning = &provisioningRequestView{
+			RequestID: p.RequestID, CorrelationID: p.CorrelationID, State: string(p.State),
+			Detail: p.Detail, RequestedAt: p.RequestedAt, ResolvedAt: p.ResolvedAt,
+		}
+	}
+	return view
 }
 
 // requestedView answers `POST /v1/tenants`.
@@ -373,6 +393,32 @@ func viewConsumer(c projection.Consumer) consumerView {
 		SnapshotMark: c.SnapshotMark, LastReportedMark: c.LastReportedMark,
 		LastReportedAt: c.LastReportedAt, EventTypes: eventTypes(c.EventTypes),
 	}
+}
+
+// listedConsumerView is one item of `GET /v1/projections/consumers`: the single read's shape and three
+// fields only the list carries (TDD-organization-control-002 1.11.0 §The Consumer List).
+type listedConsumerView struct {
+	consumerView
+
+	// State is active or retired; RetiredAt is absent while the consumer is active.
+	State     string     `json:"state"`
+	RetiredAt *time.Time `json:"retired_at,omitempty"`
+
+	// Stale is whether an active consumer never reported or last reported longer ago than its
+	// max_accepted_age, computed when the page was read. Always false for a retired consumer.
+	Stale bool `json:"stale"`
+}
+
+func viewListedConsumer(c projection.ListedConsumer) listedConsumerView {
+	return listedConsumerView{
+		consumerView: viewConsumer(c.Consumer),
+		State:        string(c.State), RetiredAt: c.RetiredAt, Stale: c.Stale,
+	}
+}
+
+type consumerPageView struct {
+	Consumers []listedConsumerView `json:"consumers"`
+	Next      *string              `json:"next"`
 }
 
 // eventTypes is never null in a response: a consumer subscribed to nothing reads as [], not as an

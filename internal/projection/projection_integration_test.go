@@ -24,10 +24,14 @@ import (
 
 const fixedNowText = "2026-08-24T06:07:08Z"
 
-type recorder struct{ calls int }
+type recorder struct {
+	calls   int
+	reasons []string
+}
 
-func (r *recorder) RecordProviderAccess(context.Context, db.ProviderAccess) error {
+func (r *recorder) RecordProviderAccess(_ context.Context, access db.ProviderAccess) error {
 	r.calls++
+	r.reasons = append(r.reasons, access.Reason)
 	return nil
 }
 

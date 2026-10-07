@@ -363,6 +363,76 @@ type Detail struct {
 	// ActiveMemberships is the count of the Tenant's Memberships whose status is `active`: the
 	// Memberships an offboarding's freeze would suspend.
 	ActiveMemberships int
+
+	// Provisioning is the Tenant's latest provisioning request; nil when none was ever recorded
+	// (TDD-organization-control-003 1.8.0).
+	Provisioning *ProvisioningRequest
+}
+
+// ProvisioningRequest is one row of tenant.provisioning_request as the single Tenant read reports it.
+//
+// Its State is the request's, not the Tenant's: `unresolved` exists only here, and a client that must
+// refuse to retry an unknown outcome has nowhere else to read it from.
+type ProvisioningRequest struct {
+	RequestID     id.UUID
+	CorrelationID id.UUID
+	State         RequestState
+
+	// Detail is the reason a failure was reported with, the sweep's note on an unresolved request, or
+	// what a realized status carried; nil when nothing was.
+	Detail *string
+
+	RequestedAt time.Time
+
+	// ResolvedAt is when the outcome was recorded, or when the sweep declared it unknown; nil while
+	// the request is still `requested`.
+	ResolvedAt *time.Time
+}
+
+// selectLatestProvisioning is the request activation reads (provisioningStatement), with every
+// column the read reports: the provisioning direction only, newest first.
+const selectLatestProvisioning = `SELECT request_id::text,
+       correlation_id::text,
+       state,
+       detail,
+       requested_at,
+       resolved_at
+FROM tenant.provisioning_request
+WHERE tenant_id = $1
+  AND coalesce(desired_profile->>'operation', 'provision') = 'provision'
+ORDER BY requested_at DESC, request_id DESC
+LIMIT 1`
+
+// latestProvisioning reads the Tenant's latest provisioning request, or nil when it has none.
+func latestProvisioning(ctx context.Context, tx db.Tx, tenantID id.UUID) (*ProvisioningRequest, error) {
+	rows, err := tx.Query(ctx, selectLatestProvisioning, tenantID.String())
+	if err != nil {
+		return nil, fmt.Errorf("tenant: read the latest provisioning request: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	var (
+		request                  ProvisioningRequest
+		rawRequest, rawCorrelate string
+		rawState                 string
+	)
+	if err := rows.Scan(&rawRequest, &rawCorrelate, &rawState, &request.Detail,
+		&request.RequestedAt, &request.ResolvedAt); err != nil {
+		return nil, fmt.Errorf("tenant: scan the latest provisioning request: %w", err)
+	}
+	if request.RequestID, err = id.Parse(rawRequest); err != nil {
+		return nil, fmt.Errorf("tenant: stored request identifier %q: %w", rawRequest, err)
+	}
+	if request.CorrelationID, err = id.Parse(rawCorrelate); err != nil {
+		return nil, fmt.Errorf("tenant: stored correlation identifier %q: %w", rawCorrelate, err)
+	}
+	request.State = RequestState(rawState)
+	if !request.State.Valid() {
+		return nil, fmt.Errorf("tenant: stored provisioning state %q is not declared", rawState)
+	}
+	return &request, rows.Err()
 }
 
 // selectSubjects reads what the single read adds to the record.
@@ -380,8 +450,8 @@ const selectSubjects = `SELECT
      FROM membership.membership m
      WHERE m.tenant_id = $1 AND m.status = 'active')`
 
-// Detail reads one whole Tenant, its offboarding and its active Membership count, in one
-// transaction, so the three describe one instant. The count is computed here because
+// Detail reads one whole Tenant, its offboarding, its active Membership count and its latest
+// provisioning request, in one transaction, so the four describe one instant. The count is computed here because
 // TDD-organization-experience-001 §Irreversible Operations requires the affected-subject count to
 // come from the API rather than from a client that could only count what it had paged.
 func (s *Service) Detail(ctx context.Context, tenantID id.UUID) (Detail, error) {
@@ -410,7 +480,9 @@ func (s *Service) Detail(ctx context.Context, tenantID id.UUID) (Detail, error) 
 				}
 				detail.OffboardingID = &parsed
 			}
-			return nil
+
+			detail.Provisioning, err = latestProvisioning(ctx, tx, tenantID)
+			return err
 		}); err != nil {
 		return Detail{}, err
 	}

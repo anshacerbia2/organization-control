@@ -461,6 +461,12 @@ func load(ctx context.Context, tx db.Tx, consumerID string, consumer *Consumer) 
 		&consumer.LastReportedMark, &consumer.LastReportedAt, &consumer.EventTypes); err != nil {
 		return fmt.Errorf("%w: %s", ErrNotRegistered, consumerID)
 	}
+	return decodeStored(consumer, principal, behavior)
+}
+
+// decodeStored checks and sets the two stored values a row carries as text. A value that fails either
+// check is this service's own defect, and carries no ErrInvalid.
+func decodeStored(consumer *Consumer, principal, behavior string) error {
 	parsed, err := id.Parse(principal)
 	if err != nil {
 		return fmt.Errorf("projection: stored principal_id %q is not an identifier", principal)
@@ -471,6 +477,141 @@ func load(ctx context.Context, tx db.Tx, consumerID string, consumer *Consumer) 
 		return fmt.Errorf("projection: stored stale_behavior %q is not a declared behavior", behavior)
 	}
 	return nil
+}
+
+// ConsumerState is whether a registry row is a consumer's live registration or the record of a
+// retired one. It is derived from `retired_at`, which is the only thing that separates the two.
+type ConsumerState string
+
+const (
+	// ConsumerActive is a registration whose consumer may act: retired_at is NULL.
+	ConsumerActive ConsumerState = "active"
+
+	// ConsumerRetired is a row kept for investigation after its consumer was retired.
+	ConsumerRetired ConsumerState = "retired"
+)
+
+// Valid reports whether the state is one the list filters on.
+func (s ConsumerState) Valid() bool {
+	return s == ConsumerActive || s == ConsumerRetired
+}
+
+// ListedConsumer is one item of the consumer list: the registration, whether it is retired, and
+// whether its report is stale (TDD-organization-control-002 1.11.0 §The Consumer List).
+type ListedConsumer struct {
+	Consumer
+
+	State     ConsumerState
+	RetiredAt *time.Time
+
+	// Stale is Consumer.Age's verdict at the instant the page was read, for an active consumer. A
+	// retired one is never stale: it enforces nothing and is owed nothing.
+	Stale bool
+}
+
+// ConsumerListQuery selects one page of the registry (STD-GLB-001 1.3.0 §Pagination).
+type ConsumerListQuery struct {
+	// After is the consumer_id of the last item of the previous page; empty starts at the first.
+	After string
+
+	// Limit is the page size, 1 to db.MaxListLimit; zero takes db.DefaultListLimit.
+	Limit int
+
+	// State narrows the list to active or retired consumers; empty is both.
+	State ConsumerState
+}
+
+// ConsumerPage is one page of the registry in consumer_id order. Next is the After of the following
+// page, and nil on the last.
+type ConsumerPage struct {
+	Consumers []ListedConsumer
+	Next      *string
+}
+
+// listStatement is one keyset page of the registry, in consumer_id order, with the columns
+// selectConsumer reads and retired_at. The subscription join is the same one: a retired consumer's
+// subscription is retired with it, so its event types read as none.
+const listStatement = `SELECT c.consumer_id,
+       c.principal_id::text,
+       c.projection_version,
+       c.max_accepted_age,
+       c.stale_behavior,
+       c.registered_at,
+       c.snapshot_mark,
+       c.last_reported_mark,
+       c.last_reported_at,
+       coalesce(s.event_types, '{}'),
+       c.retired_at
+FROM projection.consumer c
+LEFT JOIN platform.subscription s ON s.consumer = c.consumer_id AND s.retired_at IS NULL
+WHERE ($1::text = ''
+       OR ($1::text = 'active' AND c.retired_at IS NULL)
+       OR ($1::text = 'retired' AND c.retired_at IS NOT NULL))
+  AND ($2::text IS NULL OR c.consumer_id > $2::text)
+ORDER BY c.consumer_id
+LIMIT $3`
+
+// List reads one page of the registry, retired consumers included unless the query names a state.
+//
+// Provider-scoped like every registry read, with the caller's reason recorded before the page is read.
+// Stale is computed here, on the registry's clock, which is the clock RecordProgress stamps
+// last_reported_at with; one instant serves the whole page.
+func (r *Registry) List(ctx context.Context, query ConsumerListQuery, reason string) (ConsumerPage, error) {
+	limit, err := db.ListLimit(query.Limit)
+	if err != nil {
+		return ConsumerPage{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	if query.State != "" && !query.State.Valid() {
+		return ConsumerPage{}, fmt.Errorf("%w: state must be active or retired", ErrInvalid)
+	}
+	var after any
+	if query.After != "" {
+		after = query.After
+	}
+
+	page := ConsumerPage{Consumers: []ListedConsumer{}}
+	if err := db.WithProviderScope(ctx, r.pool, reason, func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, listStatement, string(query.State), after, limit+1)
+		if err != nil {
+			return fmt.Errorf("projection: list consumers: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				item              ListedConsumer
+				principal, behavior string
+			)
+			if err := rows.Scan(&item.ConsumerID, &principal, &item.ProjectionVersion, &item.MaxAcceptedAge,
+				&behavior, &item.RegisteredAt, &item.SnapshotMark, &item.LastReportedMark,
+				&item.LastReportedAt, &item.EventTypes, &item.RetiredAt); err != nil {
+				return fmt.Errorf("projection: scan consumer list: %w", err)
+			}
+			if err := decodeStored(&item.Consumer, principal, behavior); err != nil {
+				return err
+			}
+			page.Consumers = append(page.Consumers, item)
+		}
+		return rows.Err()
+	}); err != nil {
+		return ConsumerPage{}, err
+	}
+
+	now := r.now()
+	for i := range page.Consumers {
+		item := &page.Consumers[i]
+		if item.RetiredAt != nil {
+			item.State = ConsumerRetired
+			continue
+		}
+		item.State = ConsumerActive
+		_, item.Stale = item.Age(now)
+	}
+	if len(page.Consumers) > limit {
+		page.Consumers = page.Consumers[:limit]
+		next := page.Consumers[limit-1].ConsumerID
+		page.Next = &next
+	}
+	return page, nil
 }
 
 const recordSnapshotMark = `UPDATE projection.consumer

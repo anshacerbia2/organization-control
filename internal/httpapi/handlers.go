@@ -249,6 +249,10 @@ type listParams struct {
 	// After is the last identifier of the previous page; nil starts at the first item.
 	After id.UUID
 
+	// Key is `after` as given, for a list whose key is not a UUID (readKeyedList); empty starts at the
+	// first item.
+	Key string
+
 	// Limit is the page size, 1 to db.MaxListLimit, or zero for the service's default of
 	// db.DefaultListLimit.
 	Limit int
@@ -268,6 +272,16 @@ type listParams struct {
 // be honoured. `limit` written as 0 is refused: zero is how the service is asked for its default, so
 // a caller who writes it is asking for nothing, not for fifty.
 func readList(w http.ResponseWriter, r *http.Request, filters []string, ids []string) (listParams, bool) {
+	return readListOf(w, r, filters, ids, true)
+}
+
+// readKeyedList is readList for a list keyed on text rather than a UUID, such as the consumer
+// registry's `consumer_id`: `after` is taken as given, in Key, and never refused for its form.
+func readKeyedList(w http.ResponseWriter, r *http.Request, filters []string) (listParams, bool) {
+	return readListOf(w, r, filters, nil, false)
+}
+
+func readListOf(w http.ResponseWriter, r *http.Request, filters []string, ids []string, uuidKey bool) (listParams, bool) {
 	params := listParams{Filters: map[string]string{}, IDs: map[string]id.UUID{}}
 	known := map[string]bool{"after": true, "limit": true}
 	for _, name := range filters {
@@ -291,7 +305,9 @@ func readList(w http.ResponseWriter, r *http.Request, filters []string, ids []st
 		}
 	}
 
-	if raw := query.Get("after"); raw != "" {
+	if raw := query.Get("after"); raw != "" && !uuidKey {
+		params.Key = raw
+	} else if raw != "" {
 		after, err := id.Parse(raw)
 		if err != nil {
 			platform.Problem(w, r, platform.ValidationFailed, "after is not a valid identifier")

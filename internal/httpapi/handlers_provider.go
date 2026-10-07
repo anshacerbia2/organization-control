@@ -777,6 +777,34 @@ func (h *handlers) retireConsumer(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// listConsumers serves `GET /v1/projections/consumers?after=&limit=&state=`, the registry for the
+// projection health view (TDD-organization-control-002 1.11.0 §The Consumer List). Provider-only: a
+// consumer reads its own record, and the others' are not its concern. Each page records the access with
+// the caller's reason before it reads.
+func (h *handlers) listConsumers(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	params, ok := readKeyedList(w, r, []string{"state"})
+	if !ok {
+		return
+	}
+	page, err := h.services.Registry.List(r.Context(), projection.ConsumerListQuery{
+		After: params.Key,
+		Limit: params.Limit,
+		State: projection.ConsumerState(params.Filters["state"]),
+	}, reason(r))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	view := consumerPageView{Consumers: make([]listedConsumerView, 0, len(page.Consumers)), Next: page.Next}
+	for _, record := range page.Consumers {
+		view.Consumers = append(view.Consumers, viewListedConsumer(record))
+	}
+	respond(w, http.StatusOK, view)
+}
+
 func (h *handlers) getConsumer(w http.ResponseWriter, r *http.Request) {
 	// A consumer reading its own record is how it learns its snapshot and reported marks, which is
 	// the input to its own freshness. Provider authority to read that would make every consumer as

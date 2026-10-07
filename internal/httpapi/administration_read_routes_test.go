@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/anshacerbia2/organization-control/internal/offboarding"
+	"github.com/anshacerbia2/organization-control/internal/projection"
 	"github.com/anshacerbia2/organization-control/internal/tenant"
 )
 
@@ -65,6 +66,11 @@ func TestAListRefusesWhatItCannotHonour(t *testing.T) {
 		{"an offboarding limit of zero", provider, "/v1/offboardings?limit=0", audit, "limit"},
 		{"a parameter the offboarding list does not take", provider, "/v1/offboardings?status=freeze", audit, "status"},
 		{"an offboarding filter given twice", provider, "/v1/offboardings?stage=freeze&stage=release", audit, "more than once"},
+		{"an unknown consumer state", provider, "/v1/projections/consumers?state=stale", audit, "state"},
+		{"a consumer limit of zero", provider, "/v1/projections/consumers?limit=0", audit, "limit"},
+		{"a consumer limit above the bound", provider, "/v1/projections/consumers?limit=101", audit, "limit"},
+		{"a parameter the consumer list does not take", provider, "/v1/projections/consumers?status=active", audit, "status"},
+		{"a consumer cursor given twice", provider, "/v1/projections/consumers?after=a&after=b", audit, "more than once"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,6 +114,8 @@ func TestTheListsKeepTheirScopes(t *testing.T) {
 		{"the Tenant list without a reason", provider, "/v1/tenants", nil, http.StatusBadRequest},
 		{"a tenant caller on the offboarding list", tenant, "/v1/offboardings", audit, http.StatusForbidden},
 		{"the offboarding list without a reason", provider, "/v1/offboardings", nil, http.StatusBadRequest},
+		{"a tenant caller on the consumer list", tenant, "/v1/projections/consumers", audit, http.StatusForbidden},
+		{"the consumer list without a reason", provider, "/v1/projections/consumers", nil, http.StatusBadRequest},
 		{"a tenant caller on an obligation board", tenant, "/v1/offboardings/" + mustID(t).String() + "/obligations", audit, http.StatusForbidden},
 		{"a Membership named by something other than a UUID", tenant, "/v1/memberships/not-a-uuid", nil, http.StatusBadRequest},
 	}
@@ -207,9 +215,34 @@ func TestTheReadSideShapesNameWhatIsNotYetReached(t *testing.T) {
 
 	tenantID := mustID(t)
 	read := marshal(viewTenantDetail(tenant.Detail{Record: tenant.Record{TenantID: tenantID}, ActiveMemberships: 847}))
-	for _, want := range []string{`"tenant_id":"` + tenantID.String() + `"`, `"offboarding_id":null`, `"active_memberships":847`} {
+	for _, want := range []string{`"tenant_id":"` + tenantID.String() + `"`, `"offboarding_id":null`, `"active_memberships":847`,
+		`"provisioning":null`} {
 		if !strings.Contains(read, want) {
 			t.Errorf("the Tenant read lacks %s:\n%s", want, read)
 		}
+	}
+
+	requestID, correlationID := mustID(t), mustID(t)
+	pending := marshal(viewTenantDetail(tenant.Detail{Record: tenant.Record{TenantID: tenantID},
+		Provisioning: &tenant.ProvisioningRequest{RequestID: requestID, CorrelationID: correlationID,
+			State: tenant.RequestUnresolved, Detail: &detail, RequestedAt: frozenAt, ResolvedAt: &frozenAt}}))
+	want := `"provisioning":{"request_id":"` + requestID.String() + `","correlation_id":"` + correlationID.String() +
+		`","state":"unresolved","detail":"no status","requested_at":"2026-10-07T12:00:00Z","resolved_at":"2026-10-07T12:00:00Z"}`
+	if !strings.Contains(pending, want) {
+		t.Errorf("the Tenant read lacks %s:\n%s", want, pending)
+	}
+	waiting := marshal(provisioningRequestView{State: "requested"})
+	if !strings.Contains(waiting, `"detail":null`) || !strings.Contains(waiting, `"resolved_at":null`) {
+		t.Errorf("an unresolved field is omitted rather than null:\n%s", waiting)
+	}
+
+	listed := marshal(viewListedConsumer(projection.ListedConsumer{State: projection.ConsumerActive, Stale: true}))
+	for _, want := range []string{`"state":"active"`, `"stale":true`, `"event_types":[]`, `"max_accepted_age_seconds":0`} {
+		if !strings.Contains(listed, want) {
+			t.Errorf("a listed consumer lacks %s:\n%s", want, listed)
+		}
+	}
+	if strings.Contains(listed, `"retired_at"`) {
+		t.Errorf("an active consumer names a retirement:\n%s", listed)
 	}
 }
