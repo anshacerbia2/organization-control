@@ -598,14 +598,14 @@ the provider connections, by `projection.SignalsReader`:
 | `organization_projection_consumer_max_accepted_age_seconds{consumer}` | its declared budget |
 | `organization_projection_consumer_verify_ratio{consumer}` | its last measured fresh-check ratio |
 
-`deploy/alerts/organization-control.rules.yml` holds the alert rules, with each threshold's source
+`observability/alerts/organization-control.rules.yml` holds the alert rules, with each threshold's source
 noted beside it (SAD-004 §9.3.2 and the TDDs). CI checks the rules and runs their unit tests with a
 pinned `promtool`, and a mutation that moves one threshold must fail those tests.
 `internal/telemetry`'s test fails if a rule reads a series no instrument exports. Locally:
 
 ```text
-promtool check rules deploy/alerts/organization-control.rules.yml
-promtool test rules deploy/alerts/organization-control.test.yml
+promtool check rules observability/alerts/organization-control.rules.yml
+promtool test rules observability/alerts/organization-control.test.yml
 ```
 
 ## Row-Level Security is not in `schema.hcl`, and that is a vendor limitation rather than a design choice

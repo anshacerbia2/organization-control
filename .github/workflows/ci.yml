@@ -369,7 +369,7 @@ jobs:
           echo "$sum  $RUNNER_TEMP/$archive" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
           promtool="$RUNNER_TEMP/prometheus-$version.linux-amd64/promtool"
-          cd deploy/alerts
+          cd observability/alerts
           "$promtool" check rules organization-control.rules.yml
           "$promtool" test rules organization-control.test.yml
           # A threshold that can drift without a test noticing is not a threshold. Move the

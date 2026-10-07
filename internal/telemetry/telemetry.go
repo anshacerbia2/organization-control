@@ -3,7 +3,7 @@
 // ROADMAP item 14: there was no metric for dispatcher lag, projection age or security-debt depth,
 // and an operator learned that a dead letter was refusing every projection-backed check by reading
 // refusal reasons. These gauges are read from the database on each collection, and the alert rules
-// in deploy/alerts evaluate them against SAD-004 §9.3.2's thresholds.
+// in observability/alerts evaluate them against SAD-004 §9.3.2's thresholds.
 package telemetry
 
 import (

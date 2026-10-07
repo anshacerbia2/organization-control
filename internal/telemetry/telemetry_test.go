@@ -121,7 +121,7 @@ var ruleSeries = regexp.MustCompile(`\borganization_[a-z_]+\b`)
 // either side would leave an alert that can never fire, so every series a rule reads must be one
 // this package exports.
 func TestEveryRuleReadsASeriesThisPackageExports(t *testing.T) {
-	rules, err := os.ReadFile("../../deploy/alerts/organization-control.rules.yml")
+	rules, err := os.ReadFile("../../observability/alerts/organization-control.rules.yml")
 	if err != nil {
 		t.Fatalf("reading the rules: %v", err)
 	}
