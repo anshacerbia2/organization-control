@@ -1,4 +1,4 @@
-# promtool test rules deploy/alerts/organization-control.test.yml
+# promtool test rules observability/alerts/organization-control.test.yml
 #
 # Each alert is shown firing on a value past its threshold and silent on one below it, so a rule
 # that can never fire, or always fires, fails here.

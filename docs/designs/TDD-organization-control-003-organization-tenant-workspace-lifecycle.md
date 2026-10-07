@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.9.0
+  version: 1.10.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -452,12 +452,57 @@ pool, so each page writes the privileged-access record with the caller's
 runs on the tenant pool in a read-only transaction, and Row-Level Security confines it to the
 caller's Tenant: there is no parameter that could name another.
 
-Every mutation requires an `Idempotency-Key`, the optimistic `version` of the record the
+Every command requires an `Idempotency-Key` (§The `Idempotency-Key` Is Required on Commands), the optimistic `version` of the record the
 caller was shown, an authenticated actor, and a reason where the operation is
 provider-scoped. A version mismatch returns `409` rather than retrying, because the
 caller acted on a view that has since changed.
 
 Errors are RFC 7807 problem documents from `foundation-platform`.
+
+### The `Idempotency-Key` Is Required on Commands
+
+From 1.10.0 the key is required, not only honoured. Until then a command sent without one was
+executed, and a client that retried it after a lost response executed it twice: a second Workspace,
+a second grant, a second offboarding begun. This section is the service-wide statement; the routes
+of `TDD-organization-control-001`, `-002`, `-004` and `-005` refer to it.
+
+**A command requires it.** A command is a `POST` a person or an operator sends to change
+authoritative state: a Tenant administrator acting on Memberships, Workspaces and invitations, or a
+provider acting on Organizations, Tenants, offboardings, grants, activations, Tenant administrators
+and the consumer registry. Sent without the header, or with a blank one, it is refused `400`
+`validation-failed` with a detail naming the header and what it is for, before anything is decoded
+or read. The IETF draft that standardises the header gives that answer: "If the `Idempotency-Key`
+request header is missing for a documented idempotent operation requiring this header, the resource
+SHOULD reply with an HTTP `400` status code" (draft-ietf-httpapi-idempotency-key-header-07 §2.7). The
+check runs in the caller check every handler opens with, after the caller's authority and reason, so
+a caller the route does not admit is told `403` rather than about a header.
+
+| Required | Routes |
+| :-- | :-- |
+| Memberships (`-002`) | `POST /v1/memberships`; `/{membership_id}/suspend`, `/restore`, `/revoke`; `POST /v1/membership-batches`; `/{batch_id}/execute` |
+| Workspaces (this design) | `POST /v1/workspaces`; `/{workspace_id}/archive`, `/restore`, `/retire` |
+| Organizations and Tenants (this design) | `POST /v1/organizations`; `/{organization_id}/suspend`, `/restore`, `/retire`; `POST /v1/tenants`; `/{tenant_id}/activate`, `/suspend`, `/restore`, `/provisioning` |
+| Invitations (`-004`) | `POST /v1/invitations`; `/{invitation_id}/revoke`; `/accept`; `/verify-identity` |
+| Offboardings and obligations (`-004`) | `POST /v1/offboardings`; `/{offboarding_id}/freeze`, `/complete-freeze`, `/release`, `/retire`, `/cancel`, `/legal-hold`, `/obligations`; `POST /v1/obligations/{obligation_id}/resolve` |
+| Provider authority (`-001`) | `POST /v1/provider-grants`; `/{grant_id}/revoke`; `POST /v1/provider-activations`; `/{activation_id}/approve`, `/deny`, `/end`; `POST /v1/tenants/{tenant_id}/administrators`; `/{grant_id}/revoke` |
+| Consumer registry (`-002`) | `POST /v1/projections/consumers`; `/{consumer_id}/retire` |
+
+**Every other `POST` honours a key and does not require one**, each for a reason of its own. None is
+a person's command:
+
+| Optional | Why |
+| :-- | :-- |
+| `POST /v1/projections/snapshot`, `/provider-authority/snapshot`, `/v1/context/verify`, `/v1/context/switch-eligible` | Reads carried in a body. They change nothing, and a snapshot page can be larger than the 1 MiB a recorded response may be |
+| `POST /v1/projections/consumers/{id}/progress`, `/bootstrap` | A consumer's report of its own position: the same position is accepted again, and the mark moves forward only (`-002` §Projection) |
+| `POST /v1/context/rate` | A consumer's measurement report. A repeat closes an empty interval; the meter is a signal, not authority |
+| `POST /v1/projections/reconcile` | A comparison. Against the same report a repeat finds the same findings, and the repair it publishes is applied by version (`-002` §Reconciliation) |
+| `POST /v1/provisioning/realized`, `/failed`, `POST /v1/offboardings/{id}/deprovisioning` | The provisioning system's reports, identified by the correlation identifier they carry: a duplicate is answered as a replay (§Provisioning Correlation), or records the same state again |
+| `POST /v1/provisioning/sweep-unresolved`, `POST /v1/invitations/expire-lapsed` | Sweeps: a repeat finds nothing left to do |
+| `POST /v1/dead-letters/{event_id}/consumers/{consumer}/replay`, `/resolve`, `/waive` | Honoured and not required by `TDD-organization-control-005`: a replay re-sends a delivery the consumer deduplicates by `event_id`, and a second resolve or waiver is refused `409` by the incident's own state |
+
+`internal/httpapi/commands.go` holds the second table, with the reasons, and the routes wrap every
+command in `command`; a test fails on a `POST` that is in neither. A key is refused on a `GET` or
+`HEAD`, as before, because a key spent on a read would answer the caller's later command.
 
 ### Every Tenant transition is provider-scoped
 
@@ -790,3 +835,4 @@ resolution, and Tenant activation refused.
 | Consumed by | `TDD-organization-experience-001` §Irreversible Operations — the affected-subject count, computed by the API |
 | Consumed by | `TDD-organization-experience-002` §Tenant States Are Rendered Individually — `provisioning` on the Tenant read (1.8.0) |
 | Governed by | ADR-ORG-006 §5.2 — a cancelled offboarding returns the Tenant to its prior status (1.9.0) |
+| Conforms to | draft-ietf-httpapi-idempotency-key-header-07 §2.7 — a missing key on an operation requiring it is `400` (1.10.0) |

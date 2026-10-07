@@ -39,3 +39,5 @@ Thumbs.db
 # deploy/dev/.env.example is committed, and only public JWKs leave the server.
 deploy/dev/.env
 deploy/dev/keys/
+# A server's own Compose overrides (deploy/dev/compose.override.example.yaml is the template).
+deploy/dev/compose.override.yaml

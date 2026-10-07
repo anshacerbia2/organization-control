@@ -141,6 +141,9 @@ func requireProvider(w http.ResponseWriter, r *http.Request) (db.Scope, bool) {
 			"A cross-Tenant request must carry the "+ReasonHeader+" header")
 		return db.Scope{}, false
 	}
+	if !requireKey(w, r) {
+		return db.Scope{}, false
+	}
 	return scope, true
 }
 
@@ -205,6 +208,9 @@ func requireTenant(w http.ResponseWriter, r *http.Request) (db.Scope, bool) {
 	if scope.IsProvider() || scope.IsConsumer() {
 		platform.Problem(w, r, platform.Forbidden,
 			"This route acts within one Tenant, and a provider or consumer caller carries none")
+		return db.Scope{}, false
+	}
+	if !requireKey(w, r) {
 		return db.Scope{}, false
 	}
 	return scope, true

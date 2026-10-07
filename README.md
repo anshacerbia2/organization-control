@@ -181,7 +181,7 @@ same migration role:
 go run ./cmd/organization-migrate -stage=maintenance
 ```
 
-It does five things, each in its own transaction and each timed from the database clock:
+It does six things, each in its own transaction and each timed from the database clock:
 
 - creates the outbox partitions for today and the next seven days;
 - drops published partitions older than 30 days;
@@ -189,6 +189,10 @@ It does five things, each in its own transaction and each timed from the databas
   its resolution;
 - deletes delivery receipts older than 90 days that no closure cites, and only while no incident
   is open;
+- purges Membership batch previews that expired more than a day ago and never executed, with their
+  items (`-batch-preview-retention`; TDD-organization-control-002 §Membership Batches). The two
+  tables are under `FORCE ROW LEVEL SECURITY`, so the migration role reaches only expired previews,
+  through the purge policies `rls.sql` gives it;
 - counts unresolved dead letters older than 24 hours.
 
 It exits 3 when that count is not zero, after the rest of its work is done, so the scheduler
@@ -347,11 +351,14 @@ GET   /v1/tenants/{tenant_id}                adds offboarding_id and active_memb
 ```
 
 A Tenant administrator acts on Memberships in bulk, and reads whether a transition is enforced
-(TDD-organization-control-002 1.10.0, ADR-ORG-004):
+(TDD-organization-control-002 1.10.0, ADR-ORG-004). An execution whose request ended (a crash, or
+the request timeout) is left `executing`; the next execute resumes it once its heartbeat is 30 seconds
+old, applying only the items with no outcome, and the same `Idempotency-Key` may be the one that
+resumes it (1.13.0):
 
 ```text
-POST  /v1/membership-batches                 {"action":"revoke","membership_ids":[...]}   preview, 1 to 500
-POST  /v1/membership-batches/{batch_id}/execute   {"fail_on_errors": n}   Idempotency-Key
+POST  /v1/membership-batches                 {"action":"revoke","membership_ids":[...]}   preview, 1 to 500; 501 or more is 413
+POST  /v1/membership-batches/{batch_id}/execute   {"fail_on_errors": n}   Idempotency-Key; resumes an execution whose request ended
 GET   /v1/membership-batches/{batch_id}
 GET   /v1/memberships/{membership_id}/enforcement   accepted | propagating | enforced | over_budget
 ```
@@ -361,6 +368,7 @@ What a provider reads about projection health and provisioning (TDD-organization
 
 ```text
 GET   /v1/projections/consumers              ?state=active|retired   each item adds state, retired_at, stale
+GET   /v1/projections/consumers/{id}         with the list, last_reconciled_at, _mark, _findings and reconciliation_age_seconds
 GET   /v1/tenants/{tenant_id}                adds provisioning: the latest request, unresolved included
 ```
 
@@ -383,7 +391,7 @@ make issuer   terminal 1: the dev token issuer on 127.0.0.1:8098
 make run      terminal 2: the service on 127.0.0.1:8099
 make token    save a provider token to .token
 make api P=/v1/tenants/<id>
-make api M=POST P=/v1/organizations B=body.json
+make api M=POST P=/v1/organizations B=body.json KEY=org-1
 make gates    everything CI runs: fmt vet build arch tidy test
 ```
 
@@ -440,7 +448,7 @@ make issuer                    # terminal 1, leave it open
 make run                       # terminal 2
 make token                     # terminal 3: saves a provider token to .token
 make api P=/v1/tenants/<id>
-make api M=POST P=/v1/organizations B=body.json
+make api M=POST P=/v1/organizations B=body.json KEY=org-1
 make token ROLE=tenant         # a Tenant-scoped token, refused 403 on a provider route
 make token ROLE=stranger       # a person holding no provider grant, refused 403
 ```
@@ -451,7 +459,8 @@ for `role=provider&principal_id=<it>`.
 
 `make api` sends `X-Administrative-Reason` because every provider-scoped call writes a row to
 `audit.privileged_access` and the service answers 400 rather than recording an unexplained one.
-`KEY=<anything>` adds an `Idempotency-Key`. The body is a **file**, not an argument: quoting JSON on
+`KEY=<value>` adds the `Idempotency-Key` every command requires: a value of its own per command, and
+the same value to repeat one. The body is a **file**, not an argument: quoting JSON on
 a `cmd` line means escaping every double quote, and one missed backslash produces a 400 that looks
 like the service rejecting a valid request.
 
@@ -542,24 +551,28 @@ claim, which is what stops one of them being written without honouring it.
 
 | Situation | Answer |
 | :-- | :-- |
-| No header | Passes through untouched |
+| No header, or a blank one, on a command | 400 `validation-failed`, naming the header, before anything is read |
+| No header on a route that does not require one | Passes through untouched |
 | Identical retry of a completed request | The stored response, `Idempotent-Replay: true` |
 | Same key, different request | 409 `idempotency-key-conflict` |
 | Same key, first use not yet completed | 409 `request-in-progress` |
 | Header on a `GET` or `HEAD` | 400 — a key spent on a read would answer the caller's later mutation |
 | Body over 1 MiB | 400 — refused rather than silently unclaimed |
 
-**Two things it does not do.**
+**Which routes require it.** Every command does: a `POST` a person or an operator sends to change
+authoritative state. The routes that honour a key without requiring one are reads carried in a body,
+machine reports that carry their own identity, sweeps, and the dead-letter acts, each with its reason
+in `internal/httpapi/commands.go` and TDD-organization-control-003 §The `Idempotency-Key` Is Required
+on Commands. The key is checked after the caller's authority, so a caller the route does not admit is
+answered 403.
 
-The header is honoured when present and not yet *required*. TDD-organization-control-003 §"API /
-Interface" says every mutation requires it; making it mandatory changes the client contract rather
-than this mechanism, and belongs in one deliberate step.
-
-There is a window. `Complete` needs the status and body, which do not exist until the handler has
-rendered them, so the response is recorded after the domain transaction commits. A process dying in
-between leaves a key claimed and uncompleted, and later retries are refused rather than replayed. The
-mutation still happened exactly once; what is lost is being told what it returned. Closing it
-entirely is the thirty-method refactor above.
+There is a window, and it is the one thing the mechanism does not do. `Complete` needs the status and
+body, which do not exist until the handler has rendered them, so the response is recorded after the
+domain transaction commits. A process dying in between leaves a key claimed and uncompleted, and later
+retries are refused rather than replayed. The mutation still happened exactly once; what is lost is
+being told what it returned. Closing it entirely is the thirty-method refactor above. A batch
+execution is the exception: a retry with its key adopts the uncompleted claim and is answered from the
+batch (TDD-organization-control-002 §Resuming an execution).
 
 **A replay returns the same response, not the same bytes.**
 `platform.idempotency_key.response_body` is `jsonb`, so PostgreSQL sorts object keys and drops
@@ -585,14 +598,14 @@ the provider connections, by `projection.SignalsReader`:
 | `organization_projection_consumer_max_accepted_age_seconds{consumer}` | its declared budget |
 | `organization_projection_consumer_verify_ratio{consumer}` | its last measured fresh-check ratio |
 
-`deploy/alerts/organization-control.rules.yml` holds the alert rules, with each threshold's source
+`observability/alerts/organization-control.rules.yml` holds the alert rules, with each threshold's source
 noted beside it (SAD-004 §9.3.2 and the TDDs). CI checks the rules and runs their unit tests with a
 pinned `promtool`, and a mutation that moves one threshold must fail those tests.
 `internal/telemetry`'s test fails if a rule reads a series no instrument exports. Locally:
 
 ```text
-promtool check rules deploy/alerts/organization-control.rules.yml
-promtool test rules deploy/alerts/organization-control.test.yml
+promtool check rules observability/alerts/organization-control.rules.yml
+promtool test rules observability/alerts/organization-control.test.yml
 ```
 
 ## Row-Level Security is not in `schema.hcl`, and that is a vendor limitation rather than a design choice

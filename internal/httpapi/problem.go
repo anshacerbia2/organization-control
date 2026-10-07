@@ -85,11 +85,18 @@ var mapping = []struct {
 	{membership.ErrUnknownAction, platform.Internal},
 	{membership.ErrVersionMismatch, platform.VersionConflict},
 	{membership.ErrReasonRequired, platform.ValidationFailed},
-	// Batches (ADR-ORG-004). A batch already executing or executed, or past its expiry, cannot move
+	// Batches (ADR-ORG-004). A batch already executed, or a preview past its expiry, cannot move
 	// to execution, and no retry changes that: preview again.
 	{membership.ErrBatchNotFound, platform.NotFound},
+	// More items than a batch carries: 413, with the bound in the detail (RFC 7644 §3.7.4).
+	{membership.ErrBatchTooLarge, platform.PayloadTooLarge},
 	{membership.ErrBatchNotPreviewed, platform.StateTransitionRefused},
 	{membership.ErrBatchExpired, platform.StateTransitionRefused},
+	// An execution another request is running, or took over: the request is in progress elsewhere,
+	// and the answer is to read the batch rather than act again (TDD-organization-control-002
+	// §Resuming an execution).
+	{membership.ErrBatchExecuting, platform.RequestInProgress},
+	{membership.ErrBatchLeaseLost, platform.RequestInProgress},
 	// NotFound: there is no transition to report on, which is the resource the route names.
 	{membership.ErrNoTransition, platform.NotFound},
 

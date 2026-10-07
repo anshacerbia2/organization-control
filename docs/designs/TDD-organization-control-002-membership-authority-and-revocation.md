@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.12.0
+  version: 1.13.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -268,6 +268,10 @@ CREATE TABLE membership.membership_batch (
     executed_by       UUID,
     executed_at       TIMESTAMPTZ,
     completed_at      TIMESTAMPTZ,
+    lease_id          UUID,                   -- 1.13.0: the executing request's fencing token
+    heartbeat_at      TIMESTAMPTZ,            -- 1.13.0: renewed in every item's transaction
+    resumed_by        UUID,                   -- 1.13.0: who last took the execution over
+    resumed_at        TIMESTAMPTZ,
     CONSTRAINT membership_batch_tenant_scope_unique UNIQUE (tenant_id, batch_id)
 );
 
@@ -301,7 +305,21 @@ else. The item carries `tenant_id` and a composite foreign key for the reason
 The batch is stored rather than recomputed because the preview is binding. Execution is held to the
 version each item was read at, and the only place that version survives between two requests is
 here. An expired batch (`expires_at` passed while `previewed`) is reported as `expired` and refused
-at execution; nothing purges it yet (ROADMAP item 30).
+at execution.
+
+**An expired preview is purged** (1.13.0). The daily maintenance stage (`organization-migrate
+-stage=maintenance`, which already runs the platform's retention) deletes every batch still
+`previewed` whose `expires_at` is more than `-batch-preview-retention` (24 hours) in the past, with
+its items, in one transaction. A batch that began executing is never purged: it is the record of what
+a bulk action did. A day past the 15-minute expiry lets an administrator who left the screen open read
+the preview as `expired` rather than as absent. No runtime role holds `DELETE` on either table
+(`TDD-organization-control-001` §Roles), which is why the purge runs as the migration role, like the
+rest of retention. Both tables are under `FORCE ROW LEVEL SECURITY`, which binds their owner too, so
+`rls.sql` gives `organization_migrator` one policy on each, `membership_batch_purge` and
+`membership_batch_item_purge`: `USING` an expired preview, `WITH CHECK (false)`. That admits the
+delete and the read a `DELETE ... WHERE` needs ("the appropriate `SELECT` or `ALL` policies will be
+applied in addition to the `DELETE` policies", PostgreSQL 17, `CREATE POLICY`) and refuses every
+insert and update.
 
 ### Consumer Registry
 
@@ -319,6 +337,9 @@ CREATE TABLE projection.consumer (
     snapshot_mark      BIGINT,
     last_reported_at   TIMESTAMPTZ,
     last_reported_mark BIGINT,
+    last_reconciled_at       TIMESTAMPTZ,   -- 1.13.0: when this service last reconciled its report
+    last_reconciled_mark     BIGINT,        -- 1.13.0: the mark that report stated
+    last_reconciled_findings INTEGER,       -- 1.13.0: how many findings the run produced
     CONSTRAINT stale_behavior_check
         CHECK (stale_behavior IN ('use_with_marker', 'revalidate', 'fail_closed'))
 );
@@ -326,7 +347,9 @@ CREATE TABLE projection.consumer (
 
 A consumer that has not registered receives no projection. `last_reported_*` records
 what the consumer said about its own progress; it is a report, not an authority, and
-the publisher never infers a position from it.
+the publisher never infers a position from it. `last_reconciled_*` is the opposite kind of
+fact: a measurement this service made, written by every reconciliation run against the consumer's
+report (§Reconciliation).
 
 `snapshot_mark` is what §"Bootstrap Contract" reads to refuse a progress report from a
 consumer that never took a snapshot. Version 0.4.0 of this design stated that refusal and
@@ -413,12 +436,12 @@ GET    /v1/principals/{principal_id}/contexts       ?after=&limit=
 GET    /v1/context/{tenant_id}/{principal_id}:verify
 GET    /v1/memberships                       ?after=&limit=&status=&workspace_id=&principal_id=
 GET    /v1/memberships/{membership_id}
-POST   /v1/memberships
-POST   /v1/memberships/{membership_id}/suspend   {"expected_version": n}
-POST   /v1/memberships/{membership_id}/revoke    {"expected_version": n}, X-Administrative-Reason
-POST   /v1/memberships/{membership_id}/restore   {"expected_version": n}
+POST   /v1/memberships                            Idempotency-Key
+POST   /v1/memberships/{membership_id}/suspend   {"expected_version": n}, Idempotency-Key
+POST   /v1/memberships/{membership_id}/revoke    {"expected_version": n}, X-Administrative-Reason, Idempotency-Key
+POST   /v1/memberships/{membership_id}/restore   {"expected_version": n}, Idempotency-Key
 GET    /v1/memberships/{membership_id}/enforcement
-POST   /v1/membership-batches                     X-Administrative-Reason (required for revoke)
+POST   /v1/membership-batches                     X-Administrative-Reason (required for revoke), Idempotency-Key
 GET    /v1/membership-batches/{batch_id}
 POST   /v1/membership-batches/{batch_id}/execute  Idempotency-Key
 POST   /v1/projections/snapshot
@@ -427,6 +450,11 @@ GET    /v1/projections/consumers                 ?after=&limit=&state=
 GET    /v1/projections/consumers/{consumer_id}
 POST   /v1/projections/consumers
 ```
+
+Every command above requires an `Idempotency-Key` from 1.13.0, as do registering and retiring a
+consumer; the projection protocol routes, snapshot, progress, bootstrap and reconcile, honour one and
+do not require it. `TDD-organization-control-003` §The `Idempotency-Key` Is Required on Commands is
+the service-wide statement and gives each optional route its reason.
 
 The projection routes are the ones this service serves. Until 1.8.1 this list named them under
 `/v1/projections/organization/`, a path that was never served. identity-control's client followed
@@ -511,6 +539,19 @@ Each item is the shape `GET /v1/projections/consumers/{consumer_id}` returns, wh
 | `retired_at` | When the consumer was retired; absent while it is active |
 | `stale` | `true` when an active consumer has never reported, or when its last report is older than `max_accepted_age` |
 
+From 1.13.0 both the single read and each item also carry the consumer's last reconciliation
+(§Reconciliation), each absent until one has run:
+
+| Field | Value |
+| :-- | :-- |
+| `last_reconciled_at` | When this service last reconciled the consumer's report |
+| `last_reconciled_mark` | The mark that report stated |
+| `last_reconciled_findings` | How many findings the run produced; `0` for a clean run |
+| `reconciliation_age_seconds` | Whole seconds since `last_reconciled_at`, computed when the response is built |
+
+This is the reconciliation age `TDD-organization-experience-002` §Projection Health renders. Until
+1.13.0 nothing recorded a run per consumer, so it could not be served (ROADMAP item 31).
+
 `stale` is computed by this service when the page is read, on the service's clock, which is the clock
 `last_reported_at` was written with. It is the rule of `Consumer.Age`: a consumer that has never
 reported is stale by definition, because nothing is known about its copy. The report-age metric
@@ -589,10 +630,11 @@ consumer caller is refused `403`, as on the single transition.
  "continues": "<batch_id>"}
 ```
 
-- `membership_ids` holds 1 to 500 identifiers, each a UUID and none repeated. An empty list, a
-  repeat, or more than 500 is `400`. SCIM answers too many operations with `413` (RFC 7644
-  §3.7.4); foundation-platform's problem registry is closed and has no `413` type, so the bound is
-  refused as `validation-failed` and the detail names it.
+- `membership_ids` holds 1 to 500 identifiers, each a UUID and none repeated. An empty list or a
+  repeat is `400`. More than 500 is `413` `payload-too-large` (1.13.0), as SCIM answers too many
+  operations, and the detail names the limit: "The returned response MUST specify the limit exceeded
+  in the body" (RFC 7644 §3.7.4; `ADR-ORG-004` §5.1). Until 1.13.0 it was `400`, because
+  foundation-platform's closed problem registry had no `413` type; v0.4.1 added `PayloadTooLarge`.
 - `X-Administrative-Reason` is required for `revoke` (`400` before anything is read, as on the single
   route) and recorded on the batch whenever it is sent.
 - `continues`, optional, names an executed batch of the same Tenant whose failed items this
@@ -610,11 +652,13 @@ one `state-transition-refused`. A preview writes no Membership, no event and no 
 
 **The execution.** `POST /v1/membership-batches/{batch_id}/execute`, with an optional body
 `{"fail_on_errors": n}` (a whole number, `0` or more; absent, every item is attempted), and an
-`Idempotency-Key`, honoured as on every mutation.
+`Idempotency-Key`, required as on every command.
 
 - The batch moves from `previewed` to `executing` in a first transaction, under its row lock; the
-  idempotency claim commits with it. A second execute is `409` `state-transition-refused`; a replay
-  of the same key answers the stored response with `Idempotent-Replay: true`.
+  idempotency claim commits with it, and so does the execution's lease (§Resuming an execution). A
+  second execute of an executed batch is `409` `state-transition-refused`; of a batch executing under
+  a live lease, `409` `request-in-progress`; a replay of the same key answers the stored response with
+  `Idempotent-Replay: true`.
 - A batch past `expires_at` is refused `409` `state-transition-refused`, with nothing written. Its
   view reports `expired`, and every item `not_attempted` with reason `expired`.
 - Each item that would change runs `TransitionWithin` in its own transaction, named with the
@@ -631,9 +675,57 @@ one `state-transition-refused`. A preview writes no Membership, no event and no 
   outcomes, as SCIM and Graph report per-operation status inside a successful batch response
   (`ADR-ORG-004` [R1][R7]).
 
-A process that dies mid-execution leaves the batch `executing`, with the items it finished
-recorded and the rest without an outcome; it is not resumed, and a retry with the same key is
-refused as in progress rather than replayed (the window `internal/httpapi/idempotency.go` names).
+#### Resuming an execution
+
+From 1.13.0 an execution its request did not finish is resumed by the next execute. Until then a
+request that ended mid-execution, a crashed process or simply the request timeout, left the batch
+`executing` for ever: the items it finished had outcomes, the rest had none, and every retry with the
+same key was refused as in progress.
+
+**The lease.** The first transaction gives the executing request a lease: `lease_id`, a fresh UUID,
+and `heartbeat_at`. Every item's transaction begins by renewing it,
+`UPDATE ... SET heartbeat_at = now WHERE batch_id = $1 AND lease_id = $mine AND state = 'executing'`.
+A lease is "a contract that gives its holder specified rights over property for a limited period of
+time" (Gray and Cheriton, *Leases*, SOSP 1989), and here the period is `BatchLease`, 30 seconds.
+
+**"Gone", concretely.** The executing request is taken to have ended when `heartbeat_at` is more than
+30 seconds old on the service's clock, or absent (a batch left `executing` before 1.13.0). The
+execution runs inside its HTTP request and stops when the request's context ends, and the composition
+root refuses to start with an `HTTP_REQUEST_TIMEOUT` at or above the lease (5 seconds by default). The
+gap between two heartbeats is at most one item's transactions, bounded by the request timeout, so a
+heartbeat 30 seconds old belongs to a request that has ended.
+
+**The resume.** An execute on an `executing` batch:
+
+- with a live lease is refused `409` `request-in-progress`, writing nothing: the earlier request may
+  still be running, and the answer is to read the batch;
+- with a stale lease takes the lease over, in one transaction under the batch's row lock: a new
+  `lease_id`, `heartbeat_at`, and `resumed_by` and `resumed_at` naming who resumed it. It then
+  continues the items that have no outcome, in position order, each still held to the version its
+  preview read. The allowance is the one fixed when execution began: a resume naming a different
+  `fail_on_errors` is `400`, and the failures already recorded count against it;
+- may carry the same `Idempotency-Key` as the request that began the execution. That key's claim was
+  committed and never completed, so it is adopted rather than refused as in progress
+  (`db.AdoptInProgressClaim`), and completed with the resume's response. The same caller, key and
+  body name the same request; only the lease can tell a retry of a dead request from a concurrent
+  duplicate, which is why the batch decides and not the key. A new key resumes it too, so a client
+  that lost its key is not stuck. On a batch already `executed`, the adopted key is answered with the
+  batch as it ended: the request committed everything and died before recording its response.
+
+**No item is applied twice.** Each item's transaction takes, in order: the fence (the lease
+renewal), the item's row lock with `outcome IS NULL` read after it, the Membership's row lock, the
+transition, and the outcome. The transition and its outcome commit together, so an item with no
+outcome was not applied by this batch, and an item with one is skipped. A request whose lease was
+taken over finds the fence matching no row and rolls back the item it was on, so it can do nothing
+after the takeover: the `lease_id` is a fencing token (Kleppmann, *How to do distributed
+locking*, 2016: "the storage server remembers that it has already processed a write with a higher
+token number (34), and so it rejects the request with token 33"), compared for equality rather than
+order, because the row holds the one current lease. The final transaction, which settles the unattempted items and marks the batch
+`executed`, is fenced the same way.
+
+A request that ends records nothing for the item it was on, so the item stays for the resume. The
+recorded response of a request that dies after the final commit is lost as before; a retry with its
+key is answered from the batch.
 
 **The view.** `GET /v1/membership-batches/{batch_id}`, and the body of both commands:
 
@@ -644,6 +736,7 @@ refused as in progress rather than replayed (the window `internal/httpapi/idempo
   "reason": "..." | null, "correlation_id": "<uuid>", "continues": "<uuid>" | null,
   "created_by": "<uuid>", "created_at": "<ts>", "expires_at": "<ts>",
   "executed_at": "<ts>" | null, "completed_at": "<ts>" | null, "fail_on_errors": 2 | null,
+  "heartbeat_at": "<ts>" | null, "resumed_by": "<uuid>" | null, "resumed_at": "<ts>" | null,
   "counts": {"would_change": 2, "would_not_change": 1,
              "succeeded": 1, "failed": 1, "not_attempted": 1},
   "items": [
@@ -785,8 +878,10 @@ nothing it is entitled to. A refusal also carries no Membership identifier and n
 those describe a context the caller may not assert, and a caller that logged them would be
 recording the shape of the access it was denied.
 
-Errors are RFC 7807 problem documents from `foundation-platform`. Mutations require an
-`Idempotency-Key`, an optimistic version, an actor, and a reason.
+Errors are RFC 7807 problem documents from `foundation-platform`. Commands require an
+`Idempotency-Key`, an optimistic version, an actor, and a reason; the routes, and why the projection
+protocol routes and the fresh check do not require the key, are in `TDD-organization-control-003`
+§The `Idempotency-Key` Is Required on Commands.
 
 ### Published Events
 
@@ -996,6 +1091,14 @@ corruption of the consumer, and it stays a finding and an alert.
 Until this, findings carried versions alone. A consumer could not apply them, so every sweep that
 found something dead-lettered at the consumer as poison.
 
+**Every run is recorded against its consumer** (1.13.0). The transaction that publishes the repair
+event also writes `last_reconciled_at` (the run's instant), `last_reconciled_mark` (the report's mark)
+and `last_reconciled_findings` on the consumer's registry row, and a clean run, which publishes
+nothing, writes them all the same: a clean sweep is the evidence that the copy was compared and
+agreed. A retired consumer's row is left as it was. The consumer view serves them with the age
+(§The Consumer List). The "Consumer reconciliation age" signal in §Operational Notes is still alerted
+from the report age, because no reconciliation cadence is declared per consumer to alert against.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -1046,6 +1149,15 @@ the sum, because that is the number incident response works from.
   succeed, each with its event.
 - Past `fail_on_errors`, the remaining items are `not_attempted`; an expired batch is refused at
   execution; a second execution is refused and the same `Idempotency-Key` replays.
+- More than 500 items is refused as too large, naming the limit, before any item is read.
+- An execution halted mid-item leaves the batch `executing`, the items before it with their outcome
+  and the one in flight rolled back. An execute inside the lease is refused; past it, the same key
+  adopts its claim and finishes the batch, and every item is applied exactly once: the earlier
+  outcomes and events are kept, each Membership's version moves by one, and each publishes one event.
+- A request whose lease was taken over applies nothing: its item's transaction finds the fence gone.
+- The maintenance stage, run as `organization_migrator` under the purge policies, deletes an expired
+  preview and its items past the retention, and keeps a preview inside it, an executing batch and an
+  executed one; the policy lets that role rewrite no batch.
 - Another Tenant's Membership is `not-found` in a preview, and another Tenant's batch is `404`.
 - The enforcement state follows the receipts and dead letters: `accepted` before publication,
   `propagating` on transport acceptance, `enforced` on every subscribed consumer's
@@ -1089,6 +1201,8 @@ the sum, because that is the number incident response works from.
   `extra`, repaired, and alerted as a security finding.
 - A dropped event produces a `missing` finding the next sweep repairs.
 - Reconciliation is idempotent across repeated runs against a consistent state.
+- A clean run and a run with findings are both recorded on the consumer, with their mark and
+  count, and the single read and the list serve them with the age.
 
 ### Negative
 
@@ -1140,7 +1254,7 @@ that makes the model workable for cross-client operators.
 | `:verify` rate per consumer | above threshold | ten times threshold |
 
 This side exports these signals from `internal/telemetry` over OTLP, together with the outbox lag
-and security debt of TDD-foundation-platform-001 and TDD-005. `deploy/alerts` evaluates them at
+and security debt of TDD-foundation-platform-001 and TDD-005. `observability/alerts` evaluates them at
 these thresholds. "Consumer reconciliation age" is alerted critical when a consumer's report age
 exceeds its own `max_accepted_age`. The one-interval warning is not alerted, because no reporting
 interval is declared per consumer.
@@ -1169,6 +1283,10 @@ finding, and consumer misuse of the fresh-check path.
 | Governed by | ADR-ORG-004 §5.1 — a bulk action is a batch the server previews, then executes; §5.2 — revocation is shown by its evidence |
 | Conforms to | SAD-004 §8.3 — bulk operations validate each item independently and return a per-item outcome |
 | Conforms to | STD-GLB-001 1.3.0 — the batch is bounded (500 items) and versioned under `/v1/` |
+| Conforms to | RFC 7644 §3.7.4 — more operations than the bound is `413`, the limit named in the body (1.13.0) |
+| Depends on | `TDD-organization-control-003` §The `Idempotency-Key` Is Required on Commands — which routes require the key (1.13.0) |
+| Related reference | Gray and Cheriton, *Leases: An Efficient Fault-Tolerant Mechanism for Distributed File Cache Consistency*, SOSP 1989; Kleppmann, *How to do distributed locking*, 2016 — the execution lease and its fencing token (1.13.0) |
+| Depends on | foundation-platform v0.4.1 — `PayloadTooLarge` (1.13.0) |
 | Consumed by | `TDD-organization-experience-001` §Bulk Operations, §Presenting Revocation Honestly |
 | Enterprise constraint | EAD-003 — projection contract with freshness, stale behavior, and reconciliation |
 | Enterprise constraint | EAD-006 — Membership, Entitlement, and Permission are distinct |

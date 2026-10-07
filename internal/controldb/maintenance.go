@@ -36,6 +36,10 @@ type MaintenanceConfig struct {
 	DeadLetterRetention time.Duration // resolved dead letters lose envelope and payload after this
 	ReceiptRetention    time.Duration // uncited receipts are pruned after this, while no incident is open
 	StaleAlert          time.Duration // unresolved dead letters older than this are reported
+
+	// BatchPreviewRetention is how long a Membership batch preview is kept past its expiry before it
+	// is purged (TDD-organization-control-002 §Membership Batches).
+	BatchPreviewRetention time.Duration
 }
 
 // DefaultMaintenance is foundation-platform TDD-001 §Configuration.
@@ -45,6 +49,10 @@ var DefaultMaintenance = MaintenanceConfig{
 	DeadLetterRetention: 90 * 24 * time.Hour,
 	ReceiptRetention:    90 * 24 * time.Hour,
 	StaleAlert:          24 * time.Hour,
+
+	// A day past the 15-minute expiry: an administrator who left the screen open overnight still
+	// reads the preview as expired rather than as absent, and nothing is executable meanwhile.
+	BatchPreviewRetention: 24 * time.Hour,
 }
 
 // MaintenanceReport is what one run did, for the log line a scheduler keeps.
@@ -54,6 +62,9 @@ type MaintenanceReport struct {
 	PartitionsDropped   []string
 	DeadLettersDisposed int64
 	ReceiptsPruned      int64
+
+	// BatchPreviewsPurged counts expired Membership batch previews deleted, with their items.
+	BatchPreviewsPurged int64
 
 	// StaleUnresolved counts incidents open longer than StaleAlert. They are never disposed; the
 	// count exists so a scheduler can alert, and the stage reports it rather than failing on it,
@@ -65,7 +76,8 @@ func (c MaintenanceConfig) validate() error {
 	switch {
 	case c.PartitionsAhead < 1:
 		return fmt.Errorf("controldb: at least one partition ahead is required, got %d", c.PartitionsAhead)
-	case c.OutboxRetention <= 0, c.DeadLetterRetention <= 0, c.ReceiptRetention <= 0, c.StaleAlert <= 0:
+	case c.OutboxRetention <= 0, c.DeadLetterRetention <= 0, c.ReceiptRetention <= 0, c.StaleAlert <= 0,
+		c.BatchPreviewRetention <= 0:
 		return fmt.Errorf("controldb: every retention boundary must be positive: %+v", c)
 	}
 	return nil
@@ -114,6 +126,11 @@ func RunMaintenance(ctx context.Context, pool *db.Pool, cfg MaintenanceConfig) (
 			report.ReceiptsPruned, err = outbox.PruneDeliveryReceipts(ctx, tx, now.Add(-cfg.ReceiptRetention))
 			return err
 		}},
+		{"purge expired membership batch previews", func(ctx context.Context, tx db.Tx) error {
+			var err error
+			report.BatchPreviewsPurged, err = PurgeExpiredBatchPreviews(ctx, tx, now.Add(-cfg.BatchPreviewRetention))
+			return err
+		}},
 		{"count stale unresolved dead letters", func(ctx context.Context, tx db.Tx) error {
 			var err error
 			report.StaleUnresolved, err = outbox.CountStaleUnresolvedDeadLetters(ctx, tx, now.Add(-cfg.StaleAlert))
@@ -126,4 +143,37 @@ func RunMaintenance(ctx context.Context, pool *db.Pool, cfg MaintenanceConfig) (
 		}
 	}
 	return report, nil
+}
+
+// purgeBatchItems and purgeBatches delete the previews that expired before the boundary and were
+// never executed, items first for the foreign key. An executing or executed batch is never touched:
+// it is the record of what a bulk action did.
+const purgeBatchItems = `DELETE FROM membership.membership_batch_item i
+USING membership.membership_batch b
+WHERE b.batch_id = i.batch_id
+  AND b.state = 'previewed'
+  AND b.expires_at < $1`
+
+const purgeBatches = `DELETE FROM membership.membership_batch
+WHERE state = 'previewed'
+  AND expires_at < $1`
+
+// PurgeExpiredBatchPreviews deletes Membership batch previews whose expiry passed before the
+// boundary, and returns how many.
+//
+// A preview past its expiry can never execute (TDD-organization-control-002 §Membership Batches), so
+// keeping it keeps nothing but the Memberships and versions it read. No runtime role holds DELETE on
+// either table, so this runs here, as the migration role, like the platform's retention. The two
+// tables are under FORCE ROW LEVEL SECURITY, which binds their owner too; the migration role reaches
+// expired previews through the membership_batch_purge and membership_batch_item_purge policies
+// rls.sql gives it, which admit nothing else and refuse every insert and update.
+func PurgeExpiredBatchPreviews(ctx context.Context, tx db.Tx, before time.Time) (int64, error) {
+	if _, err := tx.Exec(ctx, purgeBatchItems, before); err != nil {
+		return 0, fmt.Errorf("controldb: purge expired batch items: %w", err)
+	}
+	tag, err := tx.Exec(ctx, purgeBatches, before)
+	if err != nil {
+		return 0, fmt.Errorf("controldb: purge expired batches: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }

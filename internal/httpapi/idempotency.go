@@ -8,14 +8,14 @@ package httpapi
 // the claim: `internal/db` does that, inside the scoped transaction the service opens, because the
 // claim has to commit with the effect it guards. A claim made here would commit separately, and a
 // key held by a mutation that then rolled back refuses every retry of a request that never happened
-// â€” reported as "already in progress", which sends whoever is debugging to look for a concurrent
+// — reported as "already in progress", which sends whoever is debugging to look for a concurrent
 // request that does not exist. `TestAFailedMutationReleasesItsKey` in `internal/db` fails if the
 // claim is moved out of that transaction.
 //
 // # The window this design leaves
 //
 // `idempotency.Complete` needs the status and body, and neither exists until the handler has
-// rendered them â€” so the completion happens here, after the domain transaction has committed. A
+// rendered them — so the completion happens here, after the domain transaction has committed. A
 // process dying in between leaves a key claimed and uncompleted, and later retries of it are refused
 // rather than replayed. The mutation happened exactly once, which is the half that matters; what is
 // lost is being told what it returned. Closing the window entirely would mean the handler owning the
@@ -46,7 +46,7 @@ const IdempotencyHeader = "Idempotency-Key"
 // the length of the request. A bound rather than none: without it, a caller supplying an
 // `Idempotency-Key` and a large body would decide how much memory this process uses.
 //
-// It sits above any legitimate request on this surface â€” every body here is a small JSON command â€”
+// It sits above any legitimate request on this surface — every body here is a small JSON command —
 // and a body past it is refused rather than silently unclaimed, because a caller that supplied a key
 // and had it ignored would believe its retries were safe.
 const maxIdempotentBody = 1 << 20 // 1 MiB
@@ -61,15 +61,14 @@ type ClaimCompleter interface {
 
 // Idempotent honours the `Idempotency-Key` header.
 //
-// A request without the header passes through untouched, which is what keeps every read path and
-// every existing caller unaffected. TDD-organization-control-003 Â§"API / Interface" states that every
-// mutation *requires* the header; enforcing that is a change to the client contract rather than to
-// this mechanism, and it belongs in one deliberate step rather than as a side effect of adding the
-// mechanism. See ROADMAP.md.
+// A request without the header passes through untouched. Whether the route may be sent without one is
+// not decided here: a command route refuses the request in its caller check (commands.go), after the
+// caller's authority is known, and the routes named in keyOptional accept it. This middleware only
+// honours a key that is present.
 //
 // It must run after authentication and scope resolution: the claim is scoped per authenticated
-// caller, so a claim built before the caller is known would either be global â€” one caller's key
-// usable by another â€” or absent.
+// caller, so a claim built before the caller is known would either be global — one caller's key
+// usable by another — or absent.
 func Idempotent(store ClaimCompleter, telemetry *observability.Telemetry) (Middleware, error) {
 	if store == nil {
 		return nil, errors.New("httpapi: a claim completer is required")
@@ -148,7 +147,7 @@ func Idempotent(store ClaimCompleter, telemetry *observability.Telemetry) (Middl
 // claimScope identifies the authenticated caller the key belongs to.
 //
 // The subject is included, not only the authority. Two provider operators sharing a key namespace
-// would let one replay the other's response, and a key is a value a client chooses â€” so it is
+// would let one replay the other's response, and a key is a value a client chooses — so it is
 // guessable by construction.
 func claimScope(caller Caller) string {
 	if caller.Provider {

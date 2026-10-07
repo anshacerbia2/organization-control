@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.8.0
+  version: 1.9.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -319,6 +319,11 @@ Unauthenticated
 POST   /v1/invitations/lookup
 ```
 
+From 1.9.0 issuing, revoking, accepting and recording a verified identity each require an
+`Idempotency-Key`; the expiry sweep honours one and does not require it, because a repeat finds
+nothing left to expire (`TDD-organization-control-003` §The `Idempotency-Key` Is Required on
+Commands).
+
 The list above names `GET /v1/tenants/{tenant_id}/invitations`. The served path is
 `GET /v1/invitations`, as issuing is `POST /v1/invitations`, because a tenant-scoped route takes
 its Tenant from the token (`TDD-organization-control-001` §Scope Resolution): a Tenant in the path
@@ -362,6 +367,11 @@ POST   /v1/offboardings/{offboarding_id}/deprovisioning
 POST   /v1/offboardings/{offboarding_id}/cancel      {"expected_version": n}   (1.8.0)
 POST   /v1/obligations/{obligation_id}/resolve
 ```
+
+From 1.9.0 every `POST` above requires an `Idempotency-Key` but one:
+`/{offboarding_id}/deprovisioning` is the provisioning system's report of an outcome, and the same
+outcome sent again records the same state, so it honours a key and does not require one
+(`TDD-organization-control-003` §The `Idempotency-Key` Is Required on Commands).
 
 The list near the top of this section is the shape the flow was designed in; the block above is
 what a client calls. Beginning names its Tenant in the body, the four stage advances are

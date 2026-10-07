@@ -80,6 +80,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
+	// A batch execution's heartbeat older than membership.BatchLease is read as its request having
+	// ended, and the execution is resumed by the next execute (TDD-organization-control-002 §Resuming
+	// an execution). That reading is true only while no request outlives the lease.
+	if cfg.HTTPRequestTimeout >= membership.BatchLease {
+		return fmt.Errorf("configuration: HTTP_REQUEST_TIMEOUT (%s) must be shorter than the batch "+
+			"execution lease (%s), or a live execution could be read as abandoned",
+			cfg.HTTPRequestTimeout, membership.BatchLease)
+	}
 
 	logger := newLogger(cfg.LogLevel)
 

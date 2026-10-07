@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 2.2.0
+  version: 2.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-09-17
-  last_reviewed: 2026-10-02
+  last_reviewed: 2026-10-07
   parent_sad: SAD-004
 ---
 
@@ -352,6 +352,13 @@ unknown field is `400`, never a fallback to `REPLAYED`.
 Both honour `Idempotency-Key`. The claim is made inside the operation's own transaction, and a
 retry after a lost response replays the stored answer. Without the key, a retried `resolve` would
 read the incident as already resolved and answer `409` to a request that succeeded.
+
+**Honoured, not required** (2.3.0). When `TDD-organization-control-003` 1.10.0 made the key required
+on every command, replay, resolve and waive stayed optional. None can act twice: a replay re-sends a
+delivery the consumer deduplicates by `event_id`, and a second resolve or a second waiver is refused
+`409` by the incident's own state, so a retry without a key is safe and only its answer is less
+helpful. Requiring it would change the client contract of the incident tooling, the system proof
+included, for no property gained.
 
 The `412` for missing evidence names the dead letter's consumer and lists the receipts it did find as
 `consumer (evidence)`. A receipt under another consumer name therefore reads as a

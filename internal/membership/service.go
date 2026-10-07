@@ -40,6 +40,11 @@ type Service struct {
 	// honest way to assert it is to fail in the window it protects. Without a seam a test can
 	// prove the two statements run, never that they roll back together.
 	beforeAppend func(context.Context) error
+
+	// halt runs inside a batch item's transaction after its outcome is recorded, and is nil outside
+	// tests. An error from it rolls that item back and stops the execution where it stands, as a
+	// process dying mid-item would, so a test can leave a batch `executing` and prove the resume.
+	halt func(ctx context.Context, position int) error
 }
 
 // New constructs the service.

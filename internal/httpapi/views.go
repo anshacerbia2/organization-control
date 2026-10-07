@@ -398,16 +398,35 @@ type consumerView struct {
 
 	// EventTypes are what its subscription names: the events it is owed a delivery of.
 	EventTypes []string `json:"event_types"`
+
+	// The last reconciliation of the consumer's report, absent until one has run
+	// (TDD-organization-control-002 1.13.0 §Reconciliation). ReconciliationAgeSeconds is the time
+	// since it ran, computed when the response is built.
+	LastReconciledAt         *time.Time `json:"last_reconciled_at,omitempty"`
+	LastReconciledMark       *int64     `json:"last_reconciled_mark,omitempty"`
+	LastReconciledFindings   *int       `json:"last_reconciled_findings,omitempty"`
+	ReconciliationAgeSeconds *int64     `json:"reconciliation_age_seconds,omitempty"`
 }
 
-func viewConsumer(c projection.Consumer) consumerView {
-	return consumerView{
+// viewConsumer renders a consumer as of now, the instant its reconciliation age is measured at.
+func viewConsumer(c projection.Consumer, now time.Time) consumerView {
+	view := consumerView{
 		ConsumerID: c.ConsumerID, PrincipalID: c.PrincipalID.String(), ProjectionVersion: c.ProjectionVersion,
 		MaxAcceptedAgeSeconds: int64(c.MaxAcceptedAge / time.Second),
 		StaleBehavior:         string(c.StaleBehavior), RegisteredAt: c.RegisteredAt,
 		SnapshotMark: c.SnapshotMark, LastReportedMark: c.LastReportedMark,
 		LastReportedAt: c.LastReportedAt, EventTypes: eventTypes(c.EventTypes),
+		LastReconciledAt: c.LastReconciledAt, LastReconciledMark: c.LastReconciledMark,
+		LastReconciledFindings: c.LastReconciledFindings,
 	}
+	if age := c.ReconciliationAge(now); age != nil {
+		seconds := int64(*age / time.Second)
+		if seconds < 0 {
+			seconds = 0
+		}
+		view.ReconciliationAgeSeconds = &seconds
+	}
+	return view
 }
 
 // listedConsumerView is one item of `GET /v1/projections/consumers`: the single read's shape and three
@@ -424,9 +443,9 @@ type listedConsumerView struct {
 	Stale bool `json:"stale"`
 }
 
-func viewListedConsumer(c projection.ListedConsumer) listedConsumerView {
+func viewListedConsumer(c projection.ListedConsumer, now time.Time) listedConsumerView {
 	return listedConsumerView{
-		consumerView: viewConsumer(c.Consumer),
+		consumerView: viewConsumer(c.Consumer, now),
 		State:        string(c.State), RetiredAt: c.RetiredAt, Stale: c.Stale,
 	}
 }

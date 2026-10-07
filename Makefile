@@ -46,7 +46,7 @@ help:
 	@echo   make token ROLE=tenant a Tenant-scoped token: 403 on a provider route
 	@echo   make token ROLE=stranger  a person holding no provider grant: also 403
 	@echo   make api P=/v1/tenants/ID              GET a path with that token
-	@echo   make api M=POST P=/v1/organizations B=body.json    send a body
+	@echo   make api M=POST P=/v1/organizations B=body.json KEY=org-1    send a command; KEY is its Idempotency-Key
 	@echo   make stop              free $(ISSUER) and $(ADDR) after a stale run
 	@echo   make gates             everything CI runs: fmt vet build arch tidy test
 	@echo   make test-ci           the suite against a CI-shaped database, not the dev one
@@ -99,8 +99,12 @@ B ?=
 # absent rather than recording an unexplained one.
 REASON ?= driving the service by hand
 
+# KEY is the Idempotency-Key. Every command requires one and is refused 400 without it
+# (TDD-organization-control-003 §The Idempotency-Key Is Required on Commands): give each command
+# its own value, and the same value to repeat that command safely.
+
 api:
-	@if "$(P)"=="" (echo Usage: make api P=/v1/tenants/ID  ^|^|  make api M=POST P=/v1/organizations B=body.json && exit 1)
+	@if "$(P)"=="" (echo Usage: make api P=/v1/tenants/ID  ^|^|  make api M=POST P=/v1/organizations B=body.json KEY=org-1 && exit 1)
 	@if not exist $(TOKEN_FILE) (echo No token yet. Run: make token && exit 1)
 	@curl.exe -s -i -X $(M) \
 	  -H @$(TOKEN_FILE) \

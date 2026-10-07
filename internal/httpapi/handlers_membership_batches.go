@@ -62,7 +62,8 @@ type executeBatchRequest struct {
 
 // executeMembershipBatch serves `POST /v1/membership-batches/{batch_id}/execute`. The body is
 // optional: absent, every item is attempted. 200 whatever the items' outcomes, which the body
-// carries one by one.
+// carries one by one. On a batch left `executing` by a request that ended, it resumes the execution
+// (TDD-organization-control-002 §Resuming an execution).
 func (h *handlers) executeMembershipBatch(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireTenant(w, r); !ok {
 		return
@@ -205,6 +206,9 @@ type batchView struct {
 	ExecutedAt    *time.Time      `json:"executed_at"`
 	CompletedAt   *time.Time      `json:"completed_at"`
 	FailOnErrors  *int            `json:"fail_on_errors"`
+	HeartbeatAt   *time.Time      `json:"heartbeat_at"`
+	ResumedBy     *id.UUID        `json:"resumed_by"`
+	ResumedAt     *time.Time      `json:"resumed_at"`
 	Counts        batchCountsView `json:"counts"`
 	Items         []batchItemView `json:"items"`
 }
@@ -224,6 +228,7 @@ func viewBatch(b membership.Batch) batchView {
 		CorrelationID: b.CorrelationID, Continues: b.Continues, CreatedBy: b.CreatedBy,
 		CreatedAt: b.CreatedAt, ExpiresAt: b.ExpiresAt, ExecutedAt: b.ExecutedAt,
 		CompletedAt: b.CompletedAt, FailOnErrors: b.FailOnErrors,
+		HeartbeatAt: b.HeartbeatAt, ResumedBy: b.ResumedBy, ResumedAt: b.ResumedAt,
 		Counts: batchCountsView{WouldChange: b.WouldChange, WouldNotChange: b.WouldNotChange,
 			Succeeded: succeeded, Failed: failed, NotAttempted: notAttempted},
 		Items: make([]batchItemView, 0, len(b.Items)),

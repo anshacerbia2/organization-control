@@ -64,6 +64,9 @@ func requireGrantHolder(w http.ResponseWriter, r *http.Request) (Caller, bool) {
 		platform.Problem(w, r, platform.ValidationFailed, "This request must carry the "+ReasonHeader+" header")
 		return Caller{}, false
 	}
+	if !requireKey(w, r) {
+		return Caller{}, false
+	}
 	return caller, true
 }
 

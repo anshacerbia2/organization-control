@@ -42,7 +42,7 @@ func TestABatchIsRefusedBeforeTheDatabase(t *testing.T) {
 		{"a revocation without a reason", tenant, "/v1/membership-batches", `{"action":"revoke","membership_ids":[` + one + `]}`, nil, http.StatusBadRequest, ReasonHeader},
 		{"no items", tenant, "/v1/membership-batches", `{"action":"suspend","membership_ids":[]}`, nil, http.StatusBadRequest, "at least one"},
 		{"a repeated item", tenant, "/v1/membership-batches", `{"action":"suspend","membership_ids":[` + one + `,` + one + `]}`, nil, http.StatusBadRequest, "more than once"},
-		{"more than the bound", tenant, "/v1/membership-batches", `{"action":"suspend","membership_ids":[` + strings.Join(tooMany, ",") + `]}`, nil, http.StatusBadRequest, "at most 500"},
+		{"more than the bound", tenant, "/v1/membership-batches", `{"action":"suspend","membership_ids":[` + strings.Join(tooMany, ",") + `]}`, nil, http.StatusRequestEntityTooLarge, "a batch carries at most 500 items"},
 		{"a grant", tenant, "/v1/membership-batches", `{"action":"grant","membership_ids":[` + one + `]}`, nil, http.StatusBadRequest, "action"},
 		{"an identifier that is not a UUID", tenant, "/v1/membership-batches", `{"action":"suspend","membership_ids":["m-1"]}`, nil, http.StatusBadRequest, ""},
 		{"an unknown field", tenant, "/v1/membership-batches", `{"action":"suspend","membership_ids":[` + one + `],"dry_run":true}`, nil, http.StatusBadRequest, "dry_run"},

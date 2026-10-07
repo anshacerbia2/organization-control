@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.17.0
+  version: 1.18.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -532,7 +532,9 @@ The reason is visible US-ASCII on every route: a value holding any other octet i
 `400` before a handler reads it (STD-GLB-001 §Request Header Values, RFC 9110 §5.5), because such
 octets carry no encoding the access record could rely on.
 The reason is also the grant's or the revocation's own. A grant names the calling provider as
-`granted_by`; a revocation names it as `revoked_by`.
+`granted_by`; a revocation names it as `revoked_by`. From 1.18.0 both `POST` routes require an
+`Idempotency-Key`, as every command does (`TDD-organization-control-003` §The `Idempotency-Key` Is
+Required on Commands): a grant retried after a lost response without one would be a second grant.
 
 ```text
 grant(principal):
@@ -668,7 +670,7 @@ POST  /v1/tenants/{tenant_id}/administrators/{grant_id}/revoke
 
 Each is a provider route. It needs a provider caller and `X-Administrative-Reason`, and it runs
 through `WithProviderInTenant` for the Tenant in the path. The reason is also the grant's or the
-revocation's own.
+revocation's own. Both `POST` routes require an `Idempotency-Key` from 1.18.0.
 
 ```text
 grant(tenant, principal):
@@ -834,7 +836,9 @@ POST  /v1/provider-activations/{id}/deny
 POST  /v1/provider-activations/{id}/end
 ```
 
-Each route takes `X-Administrative-Reason`.
+Each route takes `X-Administrative-Reason`, and from 1.18.0 each `POST` requires an
+`Idempotency-Key` (`TDD-organization-control-003` §The `Idempotency-Key` Is Required on Commands): a
+request for an activation, an approval or an end retried without one would act twice.
 
 **The holder reads its own grants.** A request names a `grant_id`, and `GET /v1/provider-grants`
 is a provider's, so without this an eligible holder could not learn what it can activate. Entra

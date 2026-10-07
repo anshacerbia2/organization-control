@@ -1,0 +1,16 @@
+# Local overrides for one server, copied to compose.override.yaml beside compose.yaml, which Compose
+# reads automatically and git ignores. Nothing here is a credential.
+#
+#   cp compose.override.example.yaml compose.override.yaml
+#
+# The development server's facts are in scnehaux-architecture's environment page for it: the subnets
+# already in use there, and the one reserved for this stack.
+
+networks:
+  # Pin this stack's own network to the subnet reserved for it, so Docker never picks one that
+  # collides with the host's LAN, VPN pool or Kubernetes overlay. 172.28.244.0/24 is reserved for
+  # organization-control's internal network on the development server.
+  internal:
+    ipam:
+      config:
+        - subnet: 172.28.244.0/24
