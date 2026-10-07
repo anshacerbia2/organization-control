@@ -43,8 +43,11 @@ var registry = map[string]error{
 	"db.ErrNoScope":        db.ErrNoScope,
 	"db.ErrWrongScope":     db.ErrWrongScope,
 	"db.ErrReasonRequired": db.ErrReasonRequired,
+	"db.ErrListLimit":      db.ErrListLimit,
 
 	"membership.ErrUnknownAction":     membership.ErrUnknownAction,
+	"membership.ErrVersionMismatch":   membership.ErrVersionMismatch,
+	"membership.ErrReasonRequired":    membership.ErrReasonRequired,
 	"membership.ErrTransitionRefused": membership.ErrTransitionRefused,
 	"membership.ErrInvalid":           membership.ErrInvalid,
 	"membership.ErrNotFound":          membership.ErrNotFound,

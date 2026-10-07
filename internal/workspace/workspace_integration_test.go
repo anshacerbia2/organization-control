@@ -503,3 +503,64 @@ func TestCreateRefusesAnIncompleteWorkspace(t *testing.T) {
 		t.Errorf("an unbound create returned %v, want ErrNoScope", err)
 	}
 }
+
+// TestTheListIsAKeysetPageOfTheBoundTenant is STD-GLB-001 1.3.0 §Pagination over Workspaces: key
+// order, `next` on a full page and null on the last, a status filter holding for every page, and
+// Row-Level Security confining the list to the caller's Tenant.
+func TestTheListIsAKeysetPageOfTheBoundTenant(t *testing.T) {
+	f := newFixture(t)
+	tenantID := f.seedTenant(t)
+	otherTenant := f.seedTenant(t)
+	ctx := f.scopeFor(tenantID)
+
+	first, second, third := f.create(t, tenantID), f.create(t, tenantID), f.create(t, tenantID)
+	f.create(t, otherTenant)
+	if _, err := f.service.Archive(ctx, Command{WorkspaceID: second.WorkspaceID, ExpectedVersion: second.Version}); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	page, err := f.service.List(ctx, ListQuery{Limit: 2})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Workspaces) != 2 || page.Workspaces[0].WorkspaceID != first.WorkspaceID ||
+		page.Workspaces[1].WorkspaceID != second.WorkspaceID {
+		t.Fatalf("first page = %+v, want the first two Workspaces in creation order", page.Workspaces)
+	}
+	if page.Next == nil || *page.Next != second.WorkspaceID {
+		t.Fatalf("next = %v, want the last item of the page", page.Next)
+	}
+
+	last, err := f.service.List(ctx, ListQuery{Limit: 2, After: *page.Next})
+	if err != nil {
+		t.Fatalf("List after: %v", err)
+	}
+	if len(last.Workspaces) != 1 || last.Workspaces[0].WorkspaceID != third.WorkspaceID || last.Next != nil {
+		t.Fatalf("last page = %+v, next %v; want the third Workspace and no cursor", last.Workspaces, last.Next)
+	}
+
+	// A full page that happens to be the last still says so with a null cursor, not a short page.
+	exact, err := f.service.List(ctx, ListQuery{Limit: 3})
+	if err != nil {
+		t.Fatalf("List exact: %v", err)
+	}
+	if len(exact.Workspaces) != 3 || exact.Next != nil {
+		t.Errorf("a page holding the whole list: %d items, next %v; want 3 and null", len(exact.Workspaces), exact.Next)
+	}
+
+	archived, err := f.service.List(ctx, ListQuery{Status: StateArchived})
+	if err != nil {
+		t.Fatalf("List archived: %v", err)
+	}
+	if len(archived.Workspaces) != 1 || archived.Workspaces[0].WorkspaceID != second.WorkspaceID ||
+		archived.Workspaces[0].Version != second.Version+1 {
+		t.Errorf("the archived filter returned %+v", archived.Workspaces)
+	}
+
+	if _, err := f.service.List(ctx, ListQuery{Status: "deleted"}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("an unknown status: error = %v, want ErrInvalid", err)
+	}
+	if _, err := f.service.List(ctx, ListQuery{Limit: 101}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("limit 101: error = %v, want ErrInvalid", err)
+	}
+}

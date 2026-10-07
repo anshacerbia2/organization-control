@@ -103,6 +103,15 @@ var (
 	// "never again". Restoring a revoked Membership is refused permanently, and a client that
 	// retries a suspension has a different problem from one that retries a revocation.
 	ErrRevoked = errors.New("membership: a revoked Membership is terminal; grant a new one")
+
+	// ErrVersionMismatch reports that the caller acted on a view of the Membership that has since
+	// changed. Maps to a 409: the caller re-reads and decides again, because the state it decided
+	// on is no longer the state it would change.
+	ErrVersionMismatch = errors.New("membership: the expected version does not match the stored one")
+
+	// ErrReasonRequired refuses a revocation that does not say why. A revocation is irreversible,
+	// and the record of one that names no reason cannot answer the first question a review asks.
+	ErrReasonRequired = errors.New("membership: a revocation requires a reason")
 )
 
 // Resolve reports the state an action moves to, or why it cannot.

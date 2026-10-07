@@ -242,3 +242,96 @@ func (s *seconds) UnmarshalJSON(raw []byte) error {
 }
 
 func (s seconds) Duration() time.Duration { return time.Duration(s) }
+
+// listParams is the cursor and page size every list takes (STD-GLB-001 1.3.0 §Pagination), in the
+// form identity-control serves for `GET /v1/registrations`.
+type listParams struct {
+	// After is the last identifier of the previous page; nil starts at the first item.
+	After id.UUID
+
+	// Limit is the page size, 1 to db.MaxListLimit, or zero for the service's default of
+	// db.DefaultListLimit.
+	Limit int
+
+	// Filters holds each named filter's value, empty when absent.
+	Filters map[string]string
+
+	// IDs holds each identifier filter, nil when absent.
+	IDs map[string]id.UUID
+}
+
+// readList reads `after`, `limit` and the named filters, and refuses everything else with 400.
+//
+// A parameter it does not know is refused rather than ignored, for the reason `decode` refuses an
+// unknown field: a caller that misspells `status` and receives every state has been told the list
+// was narrowed when it was not. A parameter given twice is refused too, since only one value could
+// be honoured. `limit` written as 0 is refused: zero is how the service is asked for its default, so
+// a caller who writes it is asking for nothing, not for fifty.
+func readList(w http.ResponseWriter, r *http.Request, filters []string, ids []string) (listParams, bool) {
+	params := listParams{Filters: map[string]string{}, IDs: map[string]id.UUID{}}
+	known := map[string]bool{"after": true, "limit": true}
+	for _, name := range filters {
+		known[name] = true
+	}
+	for _, name := range ids {
+		known[name] = true
+	}
+
+	query := r.URL.Query()
+	for name, values := range query {
+		if !known[name] {
+			platform.Problem(w, r, platform.ValidationFailed,
+				fmt.Sprintf("Query parameter %q is not accepted by this list", name))
+			return listParams{}, false
+		}
+		if len(values) > 1 {
+			platform.Problem(w, r, platform.ValidationFailed,
+				fmt.Sprintf("Query parameter %q is given more than once", name))
+			return listParams{}, false
+		}
+	}
+
+	if raw := query.Get("after"); raw != "" {
+		after, err := id.Parse(raw)
+		if err != nil {
+			platform.Problem(w, r, platform.ValidationFailed, "after is not a valid identifier")
+			return listParams{}, false
+		}
+		params.After = after
+	}
+	if raw, present := query["limit"]; present {
+		limit, err := strconv.Atoi(raw[0])
+		if err != nil || limit < 1 || limit > db.MaxListLimit {
+			platform.Problem(w, r, platform.ValidationFailed,
+				fmt.Sprintf("limit must be a whole number from 1 to %d", db.MaxListLimit))
+			return listParams{}, false
+		}
+		params.Limit = limit
+	}
+	for _, name := range filters {
+		params.Filters[name] = query.Get(name)
+	}
+	for _, name := range ids {
+		raw := query.Get(name)
+		if raw == "" {
+			continue
+		}
+		parsed, err := id.Parse(raw)
+		if err != nil {
+			platform.Problem(w, r, platform.ValidationFailed,
+				fmt.Sprintf("%s is not a valid identifier", name))
+			return listParams{}, false
+		}
+		params.IDs[name] = parsed
+	}
+	return params, true
+}
+
+// nextCursor renders a page's continuation: the identifier, or null on the last page.
+func nextCursor(next *id.UUID) *string {
+	if next == nil {
+		return nil
+	}
+	value := next.String()
+	return &value
+}

@@ -61,6 +61,7 @@ var mapping = []struct {
 	{db.ErrNoScope, platform.Internal},
 	{db.ErrWrongScope, platform.Internal},
 	{db.ErrReasonRequired, platform.ValidationFailed},
+	{db.ErrListLimit, platform.ValidationFailed},
 
 	// Idempotency. Both are 409 and they are different conflicts, so they get the two problem types
 	// foundation-platform declares for exactly this pair rather than being folded into
@@ -82,6 +83,8 @@ var mapping = []struct {
 	{membership.ErrRevoked, platform.StateTransitionRefused},
 	{membership.ErrTransitionRefused, platform.StateTransitionRefused},
 	{membership.ErrUnknownAction, platform.Internal},
+	{membership.ErrVersionMismatch, platform.VersionConflict},
+	{membership.ErrReasonRequired, platform.ValidationFailed},
 
 	// Tenant.
 	{tenant.ErrInvalid, platform.ValidationFailed},

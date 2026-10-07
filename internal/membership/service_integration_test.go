@@ -135,6 +135,14 @@ func cleanup(t *testing.T, service *Service, ctx context.Context, membershipID i
 	})
 }
 
+// at is a transition command at the Membership's current version, with a reason, which is what a
+// caller that has just read the Membership sends.
+func at(t *testing.T, service *Service, ctx context.Context, membershipID id.UUID) Command {
+	t.Helper()
+	_, version := statusAndVersion(t, service, ctx, membershipID)
+	return Command{MembershipID: membershipID, ExpectedVersion: version, Reason: "the test acts on what it read"}
+}
+
 func statusAndVersion(t *testing.T, service *Service, ctx context.Context, membershipID id.UUID) (State, int64) {
 	t.Helper()
 	var (
@@ -181,7 +189,7 @@ func TestTheStatusChangeAndTheEventCommitTogether(t *testing.T) {
 	service.beforeAppend = func(context.Context) error { return injected }
 	t.Cleanup(func() { service.beforeAppend = nil })
 
-	_, err := service.Revoke(ctx, granted.Membership.MembershipID)
+	_, err := service.Revoke(ctx, at(t, service, ctx, granted.Membership.MembershipID))
 	if !errors.Is(err, injected) {
 		t.Fatalf("error = %v, want the injected failure", err)
 	}
@@ -200,7 +208,7 @@ func TestTheStatusChangeAndTheEventCommitTogether(t *testing.T) {
 	// The same revocation succeeds once the injected failure is removed, so the rollback left the
 	// row usable rather than merely unchanged.
 	service.beforeAppend = nil
-	revoked, err := service.Revoke(ctx, granted.Membership.MembershipID)
+	revoked, err := service.Revoke(ctx, at(t, service, ctx, granted.Membership.MembershipID))
 	if err != nil {
 		t.Fatalf("Revoke after the rollback: %v", err)
 	}
@@ -223,19 +231,19 @@ func TestVersionNeverDecreases(t *testing.T) {
 
 	versions := []int64{granted.Membership.Version}
 
-	suspended, err := service.Suspend(ctx, granted.Membership.MembershipID)
+	suspended, err := service.Suspend(ctx, at(t, service, ctx, granted.Membership.MembershipID))
 	if err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	versions = append(versions, suspended.Membership.Version)
 
-	restored, err := service.Restore(ctx, granted.Membership.MembershipID)
+	restored, err := service.Restore(ctx, at(t, service, ctx, granted.Membership.MembershipID))
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 	versions = append(versions, restored.Membership.Version)
 
-	revoked, err := service.Revoke(ctx, granted.Membership.MembershipID)
+	revoked, err := service.Revoke(ctx, at(t, service, ctx, granted.Membership.MembershipID))
 	if err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
@@ -287,21 +295,21 @@ func TestEveryPublishedEventRecordsItsVersion(t *testing.T) {
 	granted := grantOne(t, service, ctx)
 	membershipID := granted.Membership.MembershipID
 
-	if _, err := service.Suspend(ctx, membershipID); err != nil {
+	if _, err := service.Suspend(ctx, at(t, service, ctx, membershipID)); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
-	if _, err := service.Restore(ctx, membershipID); err != nil {
+	if _, err := service.Restore(ctx, at(t, service, ctx, membershipID)); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 
 	injected := errors.New("failure inside the publishing transaction")
 	service.beforeAppend = func(context.Context) error { return injected }
-	if _, err := service.Revoke(ctx, membershipID); !errors.Is(err, injected) {
+	if _, err := service.Revoke(ctx, at(t, service, ctx, membershipID)); !errors.Is(err, injected) {
 		t.Fatalf("error = %v, want the injected failure", err)
 	}
 	service.beforeAppend = nil
 
-	if _, err := service.Revoke(ctx, membershipID); err != nil {
+	if _, err := service.Revoke(ctx, at(t, service, ctx, membershipID)); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 
@@ -320,7 +328,7 @@ func TestWithdrawalTakesThePriorityLaneOnTheWire(t *testing.T) {
 	service, ctx, _ := newFixture(t)
 	granted := grantOne(t, service, ctx)
 
-	if _, err := service.Revoke(ctx, granted.Membership.MembershipID); err != nil {
+	if _, err := service.Revoke(ctx, at(t, service, ctx, granted.Membership.MembershipID)); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 
@@ -408,7 +416,7 @@ func TestASecondActiveMembershipIsRefused(t *testing.T) {
 	// Revoking the first frees the slot: the index is partial on `status = 'active'`, so the
 	// terminal row does not block a new grant with its own provenance — which is the documented
 	// way back from a revocation.
-	if _, err := service.Revoke(ctx, granted.Membership.MembershipID); err != nil {
+	if _, err := service.Revoke(ctx, at(t, service, ctx, granted.Membership.MembershipID)); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	replacement, err := service.Grant(ctx, GrantRequest{
@@ -466,7 +474,7 @@ func TestAMembershipInAnotherTenantIsNotFound(t *testing.T) {
 	granted := grantOne(t, service, ctxA)
 
 	ctxB := boundTo(t, context.Background(), tenantB)
-	_, err := service.Revoke(ctxB, granted.Membership.MembershipID)
+	_, err := service.Revoke(ctxB, Command{MembershipID: granted.Membership.MembershipID, ExpectedVersion: granted.Membership.Version, Reason: "from another Tenant"})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
@@ -495,4 +503,221 @@ func ownerPool(t *testing.T, ctx context.Context) *fdb.Pool {
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// TestAStaleVersionIsRefusedAndChangesNothing is the optimistic check TDD-organization-control-002
+// §API requires of every mutation. A caller acting on a view that has since changed is answered
+// ErrVersionMismatch, and neither the row, its version nor the outbox moves.
+func TestAStaleVersionIsRefusedAndChangesNothing(t *testing.T) {
+	service, ctx, _ := newFixture(t)
+	granted := grantOne(t, service, ctx)
+	membershipID := granted.Membership.MembershipID
+
+	shown := Command{MembershipID: membershipID, ExpectedVersion: granted.Membership.Version}
+	if _, err := service.Suspend(ctx, shown); err != nil {
+		t.Fatalf("Suspend at the version shown: %v", err)
+	}
+
+	statusBefore, versionBefore := statusAndVersion(t, service, ctx, membershipID)
+	eventsBefore := outboxCount(t, service, ctx, membershipID)
+
+	// A second administrator restores from the view the first one acted on.
+	if _, err := service.Restore(ctx, shown); !errors.Is(err, ErrVersionMismatch) {
+		t.Fatalf("Restore at a stale version: error = %v, want ErrVersionMismatch", err)
+	}
+	statusAfter, versionAfter := statusAndVersion(t, service, ctx, membershipID)
+	if statusAfter != statusBefore || versionAfter != versionBefore {
+		t.Errorf("a refused transition moved the row: %s/%d, want %s/%d", statusAfter, versionAfter, statusBefore, versionBefore)
+	}
+	if got := outboxCount(t, service, ctx, membershipID); got != eventsBefore {
+		t.Errorf("a refused transition published: %d events, want %d", got, eventsBefore)
+	}
+
+	// The state machine answers before the version does: a stale suspension of a suspended
+	// Membership says what happened rather than only that something did.
+	if _, err := service.Suspend(ctx, shown); !errors.Is(err, ErrTransitionRefused) {
+		t.Errorf("Suspend of a suspended Membership at a stale version: error = %v, want ErrTransitionRefused", err)
+	}
+}
+
+// TestATransitionNamesAVersionAndARevocationAReason refuses the two omissions before any statement
+// runs.
+func TestATransitionNamesAVersionAndARevocationAReason(t *testing.T) {
+	service, ctx, _ := newFixture(t)
+	granted := grantOne(t, service, ctx)
+	membershipID := granted.Membership.MembershipID
+
+	if _, err := service.Suspend(ctx, Command{MembershipID: membershipID}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("Suspend without a version: error = %v, want ErrInvalid", err)
+	}
+	if _, err := service.Revoke(ctx, Command{MembershipID: membershipID, ExpectedVersion: 1, Reason: "  "}); !errors.Is(err, ErrReasonRequired) {
+		t.Errorf("Revoke with a blank reason: error = %v, want ErrReasonRequired", err)
+	}
+	if status, version := statusAndVersion(t, service, ctx, membershipID); status != StateActive || version != 1 {
+		t.Errorf("a refused command moved the row to %s/%d", status, version)
+	}
+}
+
+// TestTheEventRecordsWhoActedAndWhy is the "record acting subject, reason, and correlation
+// identifier" step of TDD-organization-control-002 §Revocation, on the history row the transition
+// writes in its own transaction.
+func TestTheEventRecordsWhoActedAndWhy(t *testing.T) {
+	service, ctx, _ := newFixture(t)
+	granted := grantOne(t, service, ctx)
+	membershipID := granted.Membership.MembershipID
+
+	scope, _ := db.ScopeFrom(ctx)
+	correlation, err := id.NewV7()
+	if err != nil {
+		t.Fatalf("NewV7: %v", err)
+	}
+	correlated, err := db.TenantScope(scope.TenantID(), scope.Actor(), correlation)
+	if err != nil {
+		t.Fatalf("TenantScope: %v", err)
+	}
+	ctx = db.WithScope(ctx, correlated)
+
+	if _, err := service.Suspend(ctx, Command{MembershipID: membershipID, ExpectedVersion: 1}); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if _, err := service.Revoke(ctx, Command{MembershipID: membershipID, ExpectedVersion: 2,
+		Reason: "left the organisation"}); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	type recorded struct {
+		version     int64
+		actor       *string
+		correlation *string
+		reason      *string
+	}
+	var history []recorded
+	if err := ownerPool(t, ctx).InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT membership_version, actor_id::text, correlation_id::text, reason
+			FROM membership.membership_event WHERE membership_id = $1 ORDER BY membership_version`,
+			membershipID.String())
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var next recorded
+			if err := rows.Scan(&next.version, &next.actor, &next.correlation, &next.reason); err != nil {
+				return err
+			}
+			history = append(history, next)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatalf("read history: %v", err)
+	}
+
+	if len(history) != 3 {
+		t.Fatalf("%d history rows, want 3 (grant, suspend, revoke)", len(history))
+	}
+	for _, row := range history {
+		if row.actor == nil || *row.actor != scope.Actor().String() {
+			t.Errorf("version %d records actor %v, want %s", row.version, row.actor, scope.Actor())
+		}
+	}
+	if history[1].reason != nil {
+		t.Errorf("a suspension sent without a reason recorded %q", *history[1].reason)
+	}
+	if history[2].reason == nil || *history[2].reason != "left the organisation" {
+		t.Errorf("the revocation recorded reason %v, want the one sent", history[2].reason)
+	}
+	if history[2].correlation == nil || *history[2].correlation != correlation.String() {
+		t.Errorf("the revocation recorded correlation %v, want %s", history[2].correlation, correlation)
+	}
+}
+
+// TestReadsAreKeysetPagesConfinedToTheTenant is the read side STD-GLB-001 1.3.0 §Pagination fixes:
+// key order, a page of `limit`, `next` naming the last item and null on the last page, filters that
+// hold for every page, and Row-Level Security confining both reads to the bound Tenant.
+func TestReadsAreKeysetPagesConfinedToTheTenant(t *testing.T) {
+	service, ctx, _ := newFixture(t)
+
+	// Three Memberships for one Principal, which only that Principal's filter selects: a human
+	// one, a workload one, and a second human one after the first is revoked.
+	first := grantOne(t, service, ctx)
+	principal := first.Membership.PrincipalID
+	grant := func(subject string) Result {
+		t.Helper()
+		result, err := service.Grant(ctx, GrantRequest{
+			PrincipalID: principal, SubjectType: subject, Provenance: "migration", ValidFrom: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatalf("Grant %s: %v", subject, err)
+		}
+		t.Cleanup(func() { cleanup(t, service, ctx, result.Membership.MembershipID) })
+		return result
+	}
+	second := grant("workload")
+	if _, err := service.Revoke(ctx, at(t, service, ctx, first.Membership.MembershipID)); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	third := grant("human")
+
+	page, err := service.List(ctx, ListQuery{PrincipalID: principal, Limit: 2})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Memberships) != 2 || page.Next == nil {
+		t.Fatalf("first page: %d items, next %v; want 2 and a cursor", len(page.Memberships), page.Next)
+	}
+	if page.Memberships[0].MembershipID != first.Membership.MembershipID ||
+		page.Memberships[1].MembershipID != second.Membership.MembershipID {
+		t.Errorf("first page is not in creation order")
+	}
+	if *page.Next != second.Membership.MembershipID {
+		t.Errorf("next = %s, want the last item of the page", *page.Next)
+	}
+	if page.Memberships[0].Provenance == "" || page.Memberships[0].ValidFrom.IsZero() {
+		t.Errorf("a listed Membership lost its provenance or valid_from: %+v", page.Memberships[0])
+	}
+
+	last, err := service.List(ctx, ListQuery{PrincipalID: principal, Limit: 2, After: *page.Next})
+	if err != nil {
+		t.Fatalf("List after: %v", err)
+	}
+	if len(last.Memberships) != 1 || last.Memberships[0].MembershipID != third.Membership.MembershipID || last.Next != nil {
+		t.Errorf("last page: %+v, want the third Membership and no cursor", last)
+	}
+
+	revoked, err := service.List(ctx, ListQuery{PrincipalID: principal, Status: StateRevoked})
+	if err != nil {
+		t.Fatalf("List revoked: %v", err)
+	}
+	if len(revoked.Memberships) != 1 || revoked.Memberships[0].Status != StateRevoked {
+		t.Errorf("the revoked filter returned %+v", revoked.Memberships)
+	}
+
+	if _, err := service.List(ctx, ListQuery{Status: "lapsed"}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("an unknown status: error = %v, want ErrInvalid", err)
+	}
+	for _, limit := range []int{-1, 101} {
+		if _, err := service.List(ctx, ListQuery{Limit: limit}); !errors.Is(err, ErrInvalid) {
+			t.Errorf("limit %d: error = %v, want ErrInvalid", limit, err)
+		}
+	}
+
+	read, err := service.Get(ctx, third.Membership.MembershipID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if read.Version != third.Membership.Version || read.Status != StateActive || read.PrincipalID != principal {
+		t.Errorf("Get = %+v", read)
+	}
+
+	other := boundTo(t, context.Background(), tenantB)
+	if _, err := service.Get(other, third.Membership.MembershipID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Get from another Tenant: error = %v, want ErrNotFound", err)
+	}
+	elsewhere, err := service.List(other, ListQuery{PrincipalID: principal})
+	if err != nil {
+		t.Fatalf("List from another Tenant: %v", err)
+	}
+	if len(elsewhere.Memberships) != 0 {
+		t.Errorf("another Tenant listed %d of this Tenant's Memberships", len(elsewhere.Memberships))
+	}
 }

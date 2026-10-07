@@ -10,6 +10,7 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -351,7 +352,107 @@ func (s *Service) Get(ctx context.Context, tenantID id.UUID) (Record, error) {
 	return record, nil
 }
 
+// ListQuery selects one page of Tenants (STD-GLB-001 1.3.0 §Pagination).
+type ListQuery struct {
+	// After is the last tenant_id of the previous page; the nil identifier starts at the first.
+	After id.UUID
+
+	// Limit is the page size, 1 to db.MaxListLimit; zero takes db.DefaultListLimit.
+	Limit int
+
+	// Status narrows the list to one state; empty is every state, retired included.
+	Status State
+
+	// OrganizationID narrows it to the Tenants one Organization sponsors; nil is every sponsor.
+	OrganizationID id.UUID
+}
+
+// Page is one page of Tenants in creation order. Next is the After of the following page, and nil
+// on the last.
+type Page struct {
+	Tenants []Record
+	Next    *id.UUID
+}
+
+// listStatement is one keyset page of Tenants, in creation order, with the columns selectRecord reads.
+const listStatement = `SELECT tenant_id::text,
+       organization_id::text,
+       display_name,
+       status,
+       isolation_profile,
+       coalesce(residency_region, ''),
+       version,
+       tenant_security_version,
+       activated_at,
+       suspended_at,
+       offboarding_started_at,
+       retired_at,
+       created_at
+FROM tenant.tenant
+WHERE ($1::text = '' OR status = $1::text)
+  AND ($2::uuid IS NULL OR organization_id = $2::uuid)
+  AND ($3::uuid IS NULL OR tenant_id > $3::uuid)
+ORDER BY tenant_id
+LIMIT $4`
+
+// List reads one page of Tenants across the estate.
+//
+// Provider-scoped for the reason Get is, with the caller's reason recorded before the page is read.
+func (s *Service) List(ctx context.Context, query ListQuery, reason string) (Page, error) {
+	limit, err := db.ListLimit(query.Limit)
+	if err != nil {
+		return Page{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	if query.Status != "" && !query.Status.Valid() {
+		return Page{}, fmt.Errorf("%w: status must be requested, provisioning, active, failed, "+
+			"suspended, offboarding or retired", ErrInvalid)
+	}
+
+	page := Page{Tenants: []Record{}}
+	if err := db.WithProviderScope(ctx, s.pool, reason, func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, listStatement, string(query.Status),
+			db.Keyset(query.OrganizationID), db.Keyset(query.After), limit+1)
+		if err != nil {
+			return fmt.Errorf("tenant: list: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			record, err := scanRecord(rows)
+			if err != nil {
+				return err
+			}
+			page.Tenants = append(page.Tenants, record)
+		}
+		return rows.Err()
+	}); err != nil {
+		return Page{}, err
+	}
+
+	if len(page.Tenants) > limit {
+		page.Tenants = page.Tenants[:limit]
+		next := page.Tenants[limit-1].TenantID
+		page.Next = &next
+	}
+	return page, nil
+}
+
+// rowScanner is what scanRecord reads from: one row of a QueryRow or of a Query.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// errScan marks a row that could not be read, which for a single read is an absent one.
+var errScan = errors.New("tenant: scan")
+
 func loadRecord(ctx context.Context, tx db.Tx, tenantID id.UUID) (Record, error) {
+	record, err := scanRecord(tx.QueryRow(ctx, selectRecord, tenantID.String()))
+	if errors.Is(err, errScan) {
+		return Record{}, fmt.Errorf("%w: %s", ErrNotFound, tenantID)
+	}
+	return record, err
+}
+
+func scanRecord(r rowScanner) (Record, error) {
 	var (
 		record       Record
 		rawTenant    string
@@ -360,12 +461,12 @@ func loadRecord(ctx context.Context, tx db.Tx, tenantID id.UUID) (Record, error)
 		profile      string
 		residencyRaw string
 	)
-	if err := tx.QueryRow(ctx, selectRecord, tenantID.String()).Scan(
+	if err := r.Scan(
 		&rawTenant, &rawSponsor, &record.DisplayName, &status, &profile, &residencyRaw,
 		&record.Version, &record.SecurityVersion,
 		&record.ActivatedAt, &record.SuspendedAt, &record.OffboardingStartedAt, &record.RetiredAt,
 		&record.CreatedAt); err != nil {
-		return Record{}, fmt.Errorf("%w: %s", ErrNotFound, tenantID)
+		return Record{}, fmt.Errorf("%w: %w", errScan, err)
 	}
 
 	parsed, err := id.Parse(rawTenant)

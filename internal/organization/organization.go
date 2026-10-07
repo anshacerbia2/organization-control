@@ -502,7 +502,104 @@ func (s *Service) Get(ctx context.Context, organizationID id.UUID) (Organization
 	return record, nil
 }
 
+// ListQuery selects one page of the registry (STD-GLB-001 1.3.0 §Pagination).
+type ListQuery struct {
+	// After is the last organization_id of the previous page; the nil identifier starts at the first.
+	After id.UUID
+
+	// Limit is the page size, 1 to db.MaxListLimit; zero takes db.DefaultListLimit.
+	Limit int
+
+	// Status narrows the list to one state; empty is every state, retired included.
+	Status State
+
+	// Classification narrows it to one kind of party; empty is every kind.
+	Classification Classification
+}
+
+// Page is one page of Organizations in creation order. Next is the After of the following page,
+// and nil on the last.
+type Page struct {
+	Organizations []Organization
+	Next          *id.UUID
+}
+
+// listStatement is one keyset page of the registry, in creation order.
+const listStatement = `SELECT organization_id::text,
+       display_name,
+       classification,
+       status,
+       coalesce(parent_id::text, ''),
+       version,
+       created_at
+FROM organization.organization
+WHERE ($1::text = '' OR status = $1::text)
+  AND ($2::text = '' OR classification = $2::text)
+  AND ($3::uuid IS NULL OR organization_id > $3::uuid)
+ORDER BY organization_id
+LIMIT $4`
+
+// List reads one page of the registry.
+//
+// Provider-scoped like every read here, with the caller's reason: the registry is every customer in
+// the estate, so each page is recorded as privileged access before it is read.
+func (s *Service) List(ctx context.Context, query ListQuery, reason string) (Page, error) {
+	limit, err := db.ListLimit(query.Limit)
+	if err != nil {
+		return Page{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	switch {
+	case query.Status != "" && !query.Status.Valid():
+		return Page{}, fmt.Errorf("%w: status must be active, suspended or retired", ErrInvalid)
+	case query.Classification != "" && !query.Classification.Valid():
+		return Page{}, fmt.Errorf("%w: classification must be provider, customer, partner or publisher", ErrInvalid)
+	}
+
+	page := Page{Organizations: []Organization{}}
+	if err := db.WithProviderScope(ctx, s.pool, reason, func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, listStatement, string(query.Status), string(query.Classification),
+			db.Keyset(query.After), limit+1)
+		if err != nil {
+			return fmt.Errorf("organization: list: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			record, err := scanOrganization(rows)
+			if err != nil {
+				return err
+			}
+			page.Organizations = append(page.Organizations, record)
+		}
+		return rows.Err()
+	}); err != nil {
+		return Page{}, err
+	}
+
+	if len(page.Organizations) > limit {
+		page.Organizations = page.Organizations[:limit]
+		next := page.Organizations[limit-1].OrganizationID
+		page.Next = &next
+	}
+	return page, nil
+}
+
+// rowScanner is what scanOrganization reads from: one row of a QueryRow or of a Query.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// errScan marks a row that could not be read, which for a single read is an absent one.
+var errScan = errors.New("organization: scan")
+
 func load(ctx context.Context, tx db.Tx, organizationID id.UUID) (Organization, error) {
+	record, err := scanOrganization(tx.QueryRow(ctx, selectForUpdate, organizationID.String()))
+	if errors.Is(err, errScan) {
+		return Organization{}, fmt.Errorf("%w: %s", ErrNotFound, organizationID)
+	}
+	return record, err
+}
+
+func scanOrganization(r rowScanner) (Organization, error) {
 	var (
 		record         Organization
 		rawID          string
@@ -510,10 +607,9 @@ func load(ctx context.Context, tx db.Tx, organizationID id.UUID) (Organization, 
 		status         string
 		rawParent      string
 	)
-	if err := tx.QueryRow(ctx, selectForUpdate, organizationID.String()).Scan(
-		&rawID, &record.DisplayName, &classification, &status, &rawParent,
+	if err := r.Scan(&rawID, &record.DisplayName, &classification, &status, &rawParent,
 		&record.Version, &record.CreatedAt); err != nil {
-		return Organization{}, fmt.Errorf("%w: %s", ErrNotFound, organizationID)
+		return Organization{}, fmt.Errorf("%w: %w", errScan, err)
 	}
 
 	parsed, err := id.Parse(rawID)

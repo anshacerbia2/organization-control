@@ -649,3 +649,67 @@ func TestAnAbsentTenantIsNotFound(t *testing.T) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
 }
+
+// TestTheListIsAKeysetPageWithItsAccessRecorded is STD-GLB-001 1.3.0 §Pagination over Tenants: key
+// order, `next` on a full page and null on the last, filters holding for every page, and each page
+// recorded as privileged access, with the caller's reason, before it is read.
+func TestTheListIsAKeysetPageWithItsAccessRecorded(t *testing.T) {
+	f := newFixture(t)
+
+	// Minted before the seeds, so a list starting after it begins with them. Only begins: the two
+	// Tenants scripts/ci-fixture.sql seeds have fixed identifiers that sort after every UUIDv7.
+	before := mustID(t)
+	first := f.seed(t, StateActive, "active")
+	second := f.seed(t, StateSuspended, "active")
+	third := f.seed(t, StateActive, "active")
+
+	recordedBefore := len(f.recorder.calls)
+	page, err := f.service.List(f.ctx, ListQuery{After: before, Limit: 2}, "the Tenant screen")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Tenants) != 2 || page.Tenants[0].TenantID != first.TenantID || page.Tenants[1].TenantID != second.TenantID {
+		t.Fatalf("first page is not the first two Tenants in creation order: %+v", page.Tenants)
+	}
+	if page.Next == nil || *page.Next != second.TenantID {
+		t.Fatalf("next = %v, want the last item of the page", page.Next)
+	}
+	if got := f.recorder.calls[len(f.recorder.calls)-1]; len(f.recorder.calls) != recordedBefore+1 || got.Reason != "the Tenant screen" {
+		t.Errorf("the page recorded %d accesses, the last %+v; want one with the caller's reason",
+			len(f.recorder.calls)-recordedBefore, got)
+	}
+
+	last, err := f.service.List(f.ctx, ListQuery{After: *page.Next, Limit: 2}, "the Tenant screen")
+	if err != nil {
+		t.Fatalf("List after: %v", err)
+	}
+	if len(last.Tenants) == 0 || last.Tenants[0].TenantID != third.TenantID {
+		t.Fatalf("second page = %+v; want it to start at the third Tenant", last.Tenants)
+	}
+
+	suspended, err := f.service.List(f.ctx, ListQuery{After: before, Status: StateSuspended}, "x")
+	if err != nil {
+		t.Fatalf("List suspended: %v", err)
+	}
+	if len(suspended.Tenants) != 1 || suspended.Tenants[0].TenantID != second.TenantID {
+		t.Errorf("the status filter returned %+v", suspended.Tenants)
+	}
+	sponsored, err := f.service.List(f.ctx, ListQuery{OrganizationID: third.OrganizationID}, "x")
+	if err != nil {
+		t.Fatalf("List sponsored: %v", err)
+	}
+	if len(sponsored.Tenants) != 1 || sponsored.Tenants[0].TenantID != third.TenantID ||
+		sponsored.Tenants[0].DisplayName == "" || sponsored.Tenants[0].IsolationProfile != "pooled" {
+		t.Errorf("the organization filter returned %+v", sponsored.Tenants)
+	}
+	if sponsored.Next != nil {
+		t.Errorf("the last page carries next %s, want null", *sponsored.Next)
+	}
+
+	if _, err := f.service.List(f.ctx, ListQuery{Status: "paused"}, "x"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("an unknown status: error = %v, want ErrInvalid", err)
+	}
+	if _, err := f.service.List(f.ctx, ListQuery{Limit: 0, After: before}, ""); !errors.Is(err, db.ErrReasonRequired) {
+		t.Errorf("a list without a reason: error = %v, want db.ErrReasonRequired", err)
+	}
+}
