@@ -1228,6 +1228,12 @@ table "offboarding" {
     null = true
     type = timestamptz
   }
+  // The instant the offboarding entered release (TDD-organization-control-004 1.7.0). Entering
+  // obligations needs no column of its own: it is the transaction that stamps frozen_at.
+  column "released_at" {
+    null = true
+    type = timestamptz
+  }
   column "retired_at" {
     null = true
     type = timestamptz
@@ -1306,6 +1312,16 @@ table "offboarding_obligation" {
   column "detail" {
     null = true
     type = text
+  }
+  // Who reported the obligation's latest outcome, and when: completed, waived and failed alike
+  // (TDD-organization-control-004 1.7.0). completed_at is set only for the two resolving states.
+  column "resolved_by" {
+    null = true
+    type = uuid
+  }
+  column "resolved_at" {
+    null = true
+    type = timestamptz
   }
 
   primary_key {

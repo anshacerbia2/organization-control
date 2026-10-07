@@ -1,4 +1,4 @@
-h1:xnDtwaT1TgRDdpfnMK7X8xDaQmd70AOzunPZJbbOIwo=
+h1:SleqXbzpdFr4EIFmhlbx5Yxr+aQymwpuf1aH9FRD9Vg=
 20260821202322_baseline_organization_schema.sql h1:iLX771m6Nv6GkIXeIDTQcEmWAMlMd3Rod+l1e3GiydA=
 20260826071822_add_projection_snapshot_mark.sql h1:NEpR7ckeg3Cr3hLh0H8f6hUBkBanqkPuwiIIEoezmMQ=
 20260827143343_add_verify_rate_signal.sql h1:IoZCJOcErFuME9vNN+FzIr9elyLD+viqIkIu5V56ayA=
@@ -15,3 +15,4 @@ h1:xnDtwaT1TgRDdpfnMK7X8xDaQmd70AOzunPZJbbOIwo=
 20261004120000_add_tenant_admin_grant.sql h1:vT3c6bf7Wkn4sSRP5zFL7cEk8MR4LEHucrZ26oC3r/I=
 20261006120000_add_emergency_grant_use.sql h1:ke3OnGCpenH/PJ1YGgW2SzsHDnILwfmk5DEiBiW/0BU=
 20261007133609_add_membership_event_actor.sql h1:rIDAE6t9WE6BBIlAI4AipTPIdbMSCyPkMjxNFTEXymo=
+20261007163911_add_offboarding_read_side.sql h1:vHk0O4gVh/xjuTsMjnS8BJKvp3Zs3orh2gZ/kCt6saY=

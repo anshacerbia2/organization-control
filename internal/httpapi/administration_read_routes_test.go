@@ -1,10 +1,15 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/anshacerbia2/organization-control/internal/offboarding"
+	"github.com/anshacerbia2/organization-control/internal/tenant"
 )
 
 func get(t *testing.T, handler http.Handler, path string, headers map[string]string) *httptest.ResponseRecorder {
@@ -55,6 +60,11 @@ func TestAListRefusesWhatItCannotHonour(t *testing.T) {
 		{"an unknown tenant status", provider, "/v1/tenants?status=paused", audit, "status"},
 		{"organization_id not a UUID", provider, "/v1/tenants?organization_id=acme", audit, "organization_id"},
 		{"a provider limit above the bound", provider, "/v1/tenants?limit=1000", audit, "limit"},
+		{"an unknown offboarding stage", provider, "/v1/offboardings?stage=paused", audit, "stage"},
+		{"tenant_id not a UUID", provider, "/v1/offboardings?tenant_id=acme", audit, "tenant_id"},
+		{"an offboarding limit of zero", provider, "/v1/offboardings?limit=0", audit, "limit"},
+		{"a parameter the offboarding list does not take", provider, "/v1/offboardings?status=freeze", audit, "status"},
+		{"an offboarding filter given twice", provider, "/v1/offboardings?stage=freeze&stage=release", audit, "more than once"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,6 +106,9 @@ func TestTheListsKeepTheirScopes(t *testing.T) {
 		{"a tenant caller on the Tenant list", tenant, "/v1/tenants", audit, http.StatusForbidden},
 		{"a provider list without a reason", provider, "/v1/organizations", nil, http.StatusBadRequest},
 		{"the Tenant list without a reason", provider, "/v1/tenants", nil, http.StatusBadRequest},
+		{"a tenant caller on the offboarding list", tenant, "/v1/offboardings", audit, http.StatusForbidden},
+		{"the offboarding list without a reason", provider, "/v1/offboardings", nil, http.StatusBadRequest},
+		{"a tenant caller on an obligation board", tenant, "/v1/offboardings/" + mustID(t).String() + "/obligations", audit, http.StatusForbidden},
 		{"a Membership named by something other than a UUID", tenant, "/v1/memberships/not-a-uuid", nil, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
@@ -146,5 +159,57 @@ func TestAMembershipTransitionNamesItsVersion(t *testing.T) {
 				t.Errorf("the refusal did not name %q:\n%s", tc.want, recorder.Body.String())
 			}
 		})
+	}
+}
+
+// TestTheReadSideShapesNameWhatIsNotYetReached holds the 1.7.0 additions to their contract: the new
+// offboarding fields are present and null until reached, the obligation's resolver is omitted while
+// open, and the single Tenant read carries the record flat beside its two computed fields.
+func TestTheReadSideShapesNameWhatIsNotYetReached(t *testing.T) {
+	t.Parallel()
+
+	marshal := func(value any) string {
+		t.Helper()
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return string(raw)
+	}
+
+	begun := marshal(viewOffboarding(offboarding.Offboarding{Stage: offboarding.StageFreeze, ActiveMemberships: 4}))
+	for _, want := range []string{`"obligations_at":null`, `"released_at":null`, `"deprovisioning":null`, `"active_memberships":4`} {
+		if !strings.Contains(begun, want) {
+			t.Errorf("a begun offboarding lacks %s:\n%s", want, begun)
+		}
+	}
+	if strings.Contains(begun, `"frozen_at"`) || strings.Contains(begun, `"retired_at"`) {
+		t.Errorf("the stamps that were omitted before 1.7.0 are now present:\n%s", begun)
+	}
+
+	frozenAt := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	detail := "no status"
+	released := marshal(viewOffboarding(offboarding.Offboarding{
+		Stage: offboarding.StageRelease, FrozenAt: &frozenAt,
+		Deprovisioning: &offboarding.Deprovisioning{State: "unresolved", Detail: &detail, RequestedAt: frozenAt},
+	}))
+	for _, want := range []string{`"obligations_at":"2026-10-07T12:00:00Z"`, `"frozen_at":"2026-10-07T12:00:00Z"`,
+		`"deprovisioning":{"state":"unresolved","detail":"no status","requested_at":"2026-10-07T12:00:00Z","resolved_at":null}`} {
+		if !strings.Contains(released, want) {
+			t.Errorf("a released offboarding lacks %s:\n%s", want, released)
+		}
+	}
+
+	open := marshal(viewObligation(offboarding.Obligation{State: offboarding.ObligationOpen}))
+	if strings.Contains(open, "resolved_") {
+		t.Errorf("an open obligation names a resolution:\n%s", open)
+	}
+
+	tenantID := mustID(t)
+	read := marshal(viewTenantDetail(tenant.Detail{Record: tenant.Record{TenantID: tenantID}, ActiveMemberships: 847}))
+	for _, want := range []string{`"tenant_id":"` + tenantID.String() + `"`, `"offboarding_id":null`, `"active_memberships":847`} {
+		if !strings.Contains(read, want) {
+			t.Errorf("the Tenant read lacks %s:\n%s", want, read)
+		}
 	}
 }

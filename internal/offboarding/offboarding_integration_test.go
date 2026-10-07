@@ -1013,3 +1013,240 @@ func TestTheStageMachineIsLinearAndForwardOnly(t *testing.T) {
 		}
 	}
 }
+
+// TestTheViewCarriesEachStageEntryAndWhatTheGatesRead is TDD-organization-control-004 1.7.0: each
+// stage's entry instant is readable, the count is what the freeze has left, and the deprovisioning
+// is the command retirement is gated on — in the answer to each act and in the read alike.
+func TestTheViewCarriesEachStageEntryAndWhatTheGatesRead(t *testing.T) {
+	f := newFixture(t)
+	tenantID, _ := f.seed(t, 3)
+
+	begun := f.begin(t, tenantID, false)
+	if begun.ActiveMemberships != 3 {
+		t.Errorf("begin: active_memberships = %d, want the 3 the freeze will suspend", begun.ActiveMemberships)
+	}
+	if begun.ObligationsAt() != nil || begun.ReleasedAt != nil || begun.Deprovisioning != nil {
+		t.Errorf("begin stamped a later stage: %+v", begun)
+	}
+
+	if _, err := f.service.FreezeBatch(f.providerCtx, tenantID, 1, "offboarding suite freeze"); err != nil {
+		t.Fatalf("FreezeBatch: %v", err)
+	}
+	partial, err := f.service.Get(f.providerCtx, begun.OffboardingID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if partial.ActiveMemberships != 2 {
+		t.Errorf("after one batch: active_memberships = %d, want 2", partial.ActiveMemberships)
+	}
+
+	f.freezeAll(t, tenantID, 10)
+	frozen, err := f.service.CompleteFreeze(f.providerCtx, begun.OffboardingID)
+	if err != nil {
+		t.Fatalf("CompleteFreeze: %v", err)
+	}
+	if at := frozen.ObligationsAt(); at == nil || !at.Equal(f.fixed) || frozen.FrozenAt == nil || !frozen.FrozenAt.Equal(*at) {
+		t.Errorf("obligations_at = %v, frozen_at = %v; want both the instant of the freeze", at, frozen.FrozenAt)
+	}
+	if frozen.ActiveMemberships != 0 || frozen.ReleasedAt != nil {
+		t.Errorf("complete-freeze: %+v", frozen)
+	}
+
+	released, err := f.service.Release(f.providerCtx, begun.OffboardingID)
+	if err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if released.ReleasedAt == nil || !released.ReleasedAt.Equal(f.fixed) {
+		t.Errorf("released_at = %v, want %v", released.ReleasedAt, f.fixed)
+	}
+	if d := released.Deprovisioning; d == nil || d.State != "requested" || d.Detail != nil || d.ResolvedAt != nil {
+		t.Errorf("release: deprovisioning = %+v, want the requested command", d)
+	}
+
+	if err := f.service.RecordDeprovisioning(f.providerCtx, DeprovisioningOutcome{
+		OffboardingID: begun.OffboardingID, State: "unresolved", Detail: "no status within the timeout",
+	}); err != nil {
+		t.Fatalf("RecordDeprovisioning: %v", err)
+	}
+	read, err := f.service.Get(f.providerCtx, begun.OffboardingID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if read.Stage != StageRelease || read.ReleasedAt == nil || !read.ReleasedAt.Equal(f.fixed) {
+		t.Errorf("read: stage %s, released_at %v", read.Stage, read.ReleasedAt)
+	}
+	if d := read.Deprovisioning; d == nil || d.State != "unresolved" || d.Detail == nil ||
+		*d.Detail != "no status within the timeout" || d.ResolvedAt == nil {
+		t.Errorf("read: deprovisioning = %+v, want the unresolved outcome with its detail", d)
+	}
+
+	if _, err := f.service.Get(f.providerCtx, mustID(t)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an absent offboarding: error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestAFailedAdvanceStampsNoReleaseInstant: the release instant is written in the transaction that
+// advances, so a release refused by its gate leaves it null.
+func TestAFailedAdvanceStampsNoReleaseInstant(t *testing.T) {
+	f := newFixture(t)
+	tenantID, _ := f.seed(t, 0)
+	record := f.begin(t, tenantID, true)
+	if _, err := f.service.CompleteFreeze(f.providerCtx, record.OffboardingID); err != nil {
+		t.Fatalf("CompleteFreeze: %v", err)
+	}
+	if _, err := f.service.Release(f.providerCtx, record.OffboardingID); !errors.Is(err, ErrLegalHold) {
+		t.Fatalf("Release under a hold returned %v, want ErrLegalHold", err)
+	}
+	held, err := f.service.Get(f.providerCtx, record.OffboardingID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if held.ReleasedAt != nil || held.Deprovisioning != nil || !held.LegalHold {
+		t.Errorf("a refused release left %+v", held)
+	}
+}
+
+// TestTheBoardIsEveryRowOverdueFirstWithItsResolver is the obligation board of
+// TDD-organization-experience-003: every row, open rows past due first, then open by due date, then
+// the rest in the order raised, and each settled or failed row naming who reported it and when.
+func TestTheBoardIsEveryRowOverdueFirstWithItsResolver(t *testing.T) {
+	f := newFixture(t)
+	tenantID, _ := f.seed(t, 0)
+	record := f.begin(t, tenantID, false)
+	if _, err := f.service.CompleteFreeze(f.providerCtx, record.OffboardingID); err != nil {
+		t.Fatalf("CompleteFreeze: %v", err)
+	}
+
+	raise := func(domain string, due *time.Time) Obligation {
+		t.Helper()
+		obligation, err := f.service.Raise(f.providerCtx, RaiseRequest{
+			OffboardingID: record.OffboardingID, Domain: domain, Type: domain + "-work", DueAt: due,
+		})
+		if err != nil {
+			t.Fatalf("Raise %s: %v", domain, err)
+		}
+		return obligation
+	}
+	at := func(d time.Duration) *time.Time { v := f.fixed.Add(d); return &v }
+
+	settled := raise("audit", at(-72*time.Hour))
+	failing := raise("billing", at(-96*time.Hour))
+	undated := raise("hcm", nil)
+	later := raise("document", at(48*time.Hour))
+	overdue := raise("product", at(-1*time.Hour))
+	mostOverdue := raise("provisioning", at(-48*time.Hour))
+
+	if _, err := f.service.Resolve(f.providerCtx, Resolution{
+		ObligationID: settled.ObligationID, Domain: "audit", State: ObligationCompleted,
+	}); err != nil {
+		t.Fatalf("Resolve completed: %v", err)
+	}
+	failed, err := f.service.Resolve(f.providerCtx, Resolution{
+		ObligationID: failing.ObligationID, Domain: "billing", State: ObligationFailed, Detail: "the run was rejected",
+	})
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	scope, _ := db.ScopeFrom(f.providerCtx)
+	if failed.ResolvedBy == nil || *failed.ResolvedBy != scope.Actor() || failed.ResolvedAt == nil || failed.CompletedAt != nil {
+		t.Errorf("a failure: resolved_by %v, resolved_at %v, completed_at %v", failed.ResolvedBy, failed.ResolvedAt, failed.CompletedAt)
+	}
+
+	board, err := f.service.Board(f.providerCtx, record.OffboardingID)
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	want := []id.UUID{mostOverdue.ObligationID, overdue.ObligationID, later.ObligationID, undated.ObligationID,
+		settled.ObligationID, failing.ObligationID}
+	if len(board.Obligations) != len(want) {
+		t.Fatalf("the board has %d rows, want %d", len(board.Obligations), len(want))
+	}
+	for i, row := range board.Obligations {
+		if row.ObligationID != want[i] {
+			t.Errorf("row %d is %s/%s, want %s", i, row.Domain, row.State, want[i])
+		}
+	}
+	for _, row := range board.Obligations {
+		switch row.State {
+		case ObligationOpen:
+			if row.ResolvedBy != nil || row.ResolvedAt != nil {
+				t.Errorf("open %s names a resolver", row.Domain)
+			}
+		default:
+			if row.ResolvedBy == nil || *row.ResolvedBy != scope.Actor() || row.ResolvedAt == nil || !row.ResolvedAt.Equal(f.fixed) {
+				t.Errorf("%s %s: resolved_by %v, resolved_at %v", row.State, row.Domain, row.ResolvedBy, row.ResolvedAt)
+			}
+		}
+	}
+	if len(board.Outstanding) != 5 || board.Outstanding[0] != "billing/billing-work (failed)" {
+		t.Errorf("outstanding = %v, want the four open and the failed one, sorted", board.Outstanding)
+	}
+
+	if _, err := f.service.Board(f.providerCtx, mustID(t)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an absent offboarding: error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestTheOffboardingListIsAKeysetPage is STD-GLB-001 1.3.0 §Pagination over offboardings: key order,
+// `next` on a full page and nil on the last, the stage and Tenant filters, and a refusal of a stage
+// outside the machine, a page size out of range, and a page without a reason.
+func TestTheOffboardingListIsAKeysetPage(t *testing.T) {
+	f := newFixture(t)
+	before := mustID(t)
+	firstTenant, _ := f.seed(t, 2)
+	secondTenant, _ := f.seed(t, 0)
+	thirdTenant, _ := f.seed(t, 0)
+	first := f.begin(t, firstTenant, false)
+	second := f.begin(t, secondTenant, false)
+	third := f.begin(t, thirdTenant, false)
+	if _, err := f.service.CompleteFreeze(f.providerCtx, second.OffboardingID); err != nil {
+		t.Fatalf("CompleteFreeze: %v", err)
+	}
+
+	page, err := f.service.List(f.providerCtx, ListQuery{After: before, Limit: 2}, "the offboarding screen")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Offboardings) != 2 || page.Offboardings[0].OffboardingID != first.OffboardingID ||
+		page.Offboardings[1].OffboardingID != second.OffboardingID {
+		t.Fatalf("first page = %+v", page.Offboardings)
+	}
+	if page.Offboardings[0].ActiveMemberships != 2 || page.Offboardings[1].ObligationsAt() == nil {
+		t.Errorf("list items lack the view's derived fields: %+v", page.Offboardings)
+	}
+	if page.Next == nil || *page.Next != second.OffboardingID {
+		t.Fatalf("next = %v, want the last item of the page", page.Next)
+	}
+	rest, err := f.service.List(f.providerCtx, ListQuery{After: *page.Next}, "the offboarding screen")
+	if err != nil {
+		t.Fatalf("List after: %v", err)
+	}
+	if len(rest.Offboardings) == 0 || rest.Offboardings[0].OffboardingID != third.OffboardingID || rest.Next != nil {
+		t.Errorf("second page = %+v, next %v", rest.Offboardings, rest.Next)
+	}
+
+	byStage, err := f.service.List(f.providerCtx, ListQuery{After: before, Stage: StageObligations}, "x")
+	if err != nil {
+		t.Fatalf("List by stage: %v", err)
+	}
+	if len(byStage.Offboardings) != 1 || byStage.Offboardings[0].OffboardingID != second.OffboardingID {
+		t.Errorf("the stage filter returned %+v", byStage.Offboardings)
+	}
+	byTenant, err := f.service.List(f.providerCtx, ListQuery{TenantID: thirdTenant}, "x")
+	if err != nil {
+		t.Fatalf("List by Tenant: %v", err)
+	}
+	if len(byTenant.Offboardings) != 1 || byTenant.Offboardings[0].OffboardingID != third.OffboardingID {
+		t.Errorf("the Tenant filter returned %+v", byTenant.Offboardings)
+	}
+
+	if _, err := f.service.List(f.providerCtx, ListQuery{Stage: "paused"}, "x"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("an unknown stage: error = %v, want ErrInvalid", err)
+	}
+	if _, err := f.service.List(f.providerCtx, ListQuery{Limit: 101}, "x"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("a limit of 101: error = %v, want ErrInvalid", err)
+	}
+	if _, err := f.service.List(f.providerCtx, ListQuery{}, ""); !errors.Is(err, db.ErrReasonRequired) {
+		t.Errorf("a page without a reason: error = %v, want db.ErrReasonRequired", err)
+	}
+}

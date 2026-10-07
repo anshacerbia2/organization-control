@@ -228,6 +228,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/provisioning/failed", h.failProvisioning)
 	api.HandleFunc("POST /v1/provisioning/sweep-unresolved", h.sweepProvisioning)
 
+	api.HandleFunc("GET /v1/offboardings", h.listOffboardings)
 	api.HandleFunc("POST /v1/offboardings", h.beginOffboarding)
 	api.HandleFunc("GET /v1/offboardings/{offboarding_id}", h.getOffboarding)
 	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/freeze", h.freezeOffboarding)

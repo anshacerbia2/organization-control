@@ -352,6 +352,71 @@ func (s *Service) Get(ctx context.Context, tenantID id.UUID) (Record, error) {
 	return record, nil
 }
 
+// Detail is one whole Tenant with the two facts its single read computes (TDD-organization-control-003
+// 1.7.0 §Lists).
+type Detail struct {
+	Record
+
+	// OffboardingID is the Tenant's offboarding, the most recently begun; nil when none was begun.
+	OffboardingID *id.UUID
+
+	// ActiveMemberships is the count of the Tenant's Memberships whose status is `active`: the
+	// Memberships an offboarding's freeze would suspend.
+	ActiveMemberships int
+}
+
+// selectSubjects reads what the single read adds to the record.
+//
+// The rows are read directly rather than through internal/offboarding or internal/membership, the
+// way Organization and Workspace retirement read what references them: this package must not
+// import either (arch.json), and a count is no path to a mutation.
+const selectSubjects = `SELECT
+    (SELECT o.offboarding_id::text
+     FROM operation.offboarding o
+     WHERE o.tenant_id = $1
+     ORDER BY o.started_at DESC, o.offboarding_id DESC
+     LIMIT 1),
+    (SELECT count(*)
+     FROM membership.membership m
+     WHERE m.tenant_id = $1 AND m.status = 'active')`
+
+// Detail reads one whole Tenant, its offboarding and its active Membership count, in one
+// transaction, so the three describe one instant. The count is computed here because
+// TDD-organization-experience-001 §Irreversible Operations requires the affected-subject count to
+// come from the API rather than from a client that could only count what it had paged.
+func (s *Service) Detail(ctx context.Context, tenantID id.UUID) (Detail, error) {
+	if tenantID.IsNil() {
+		return Detail{}, fmt.Errorf("%w: a tenant identifier is required", ErrInvalid)
+	}
+
+	var detail Detail
+	if err := db.WithProviderScope(ctx, s.pool, "read tenant "+tenantID.String(),
+		func(ctx context.Context, tx db.Tx) error {
+			record, err := loadRecord(ctx, tx, tenantID)
+			if err != nil {
+				return err
+			}
+			detail.Record = record
+
+			var rawOffboarding *string
+			if err := tx.QueryRow(ctx, selectSubjects, tenantID.String()).Scan(
+				&rawOffboarding, &detail.ActiveMemberships); err != nil {
+				return fmt.Errorf("tenant: read offboarding and memberships: %w", err)
+			}
+			if rawOffboarding != nil {
+				parsed, err := id.Parse(*rawOffboarding)
+				if err != nil {
+					return fmt.Errorf("tenant: stored offboarding identifier %q: %w", *rawOffboarding, err)
+				}
+				detail.OffboardingID = &parsed
+			}
+			return nil
+		}); err != nil {
+		return Detail{}, err
+	}
+	return detail, nil
+}
+
 // ListQuery selects one page of Tenants (STD-GLB-001 1.3.0 §Pagination).
 type ListQuery struct {
 	// After is the last tenant_id of the previous page; the nil identifier starts at the first.

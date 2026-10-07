@@ -115,6 +115,24 @@ func viewTenantRecord(t tenant.Record) tenantRecordView {
 	}
 }
 
+// tenantDetailView is `GET /v1/tenants/{tenant_id}`: the record and the two facts only the single read
+// computes (TDD-organization-control-003 1.7.0). Both are always present: `offboarding_id` is null
+// when no offboarding was begun, and `active_memberships` is a count, 0 included.
+type tenantDetailView struct {
+	tenantRecordView
+
+	OffboardingID     *id.UUID `json:"offboarding_id"`
+	ActiveMemberships int      `json:"active_memberships"`
+}
+
+func viewTenantDetail(d tenant.Detail) tenantDetailView {
+	return tenantDetailView{
+		tenantRecordView:  viewTenantRecord(d.Record),
+		OffboardingID:     d.OffboardingID,
+		ActiveMemberships: d.ActiveMemberships,
+	}
+}
+
 // requestedView answers `POST /v1/tenants`.
 //
 // It carries the correlation identifier back to the caller. That is not decoration: it is what
@@ -266,15 +284,37 @@ type offboardingView struct {
 	StartedAt     time.Time  `json:"started_at"`
 	FrozenAt      *time.Time `json:"frozen_at,omitempty"`
 	RetiredAt     *time.Time `json:"retired_at,omitempty"`
+
+	// From TDD-organization-control-004 1.7.0, present and null until reached, where the two stamps
+	// above keep their earlier omission. obligations_at is frozen_at: one transaction, one instant.
+	ObligationsAt     *time.Time          `json:"obligations_at"`
+	ReleasedAt        *time.Time          `json:"released_at"`
+	Deprovisioning    *deprovisioningView `json:"deprovisioning"`
+	ActiveMemberships int                 `json:"active_memberships"`
+}
+
+// deprovisioningView is the latest deprovisioning command and what was reported back for it.
+type deprovisioningView struct {
+	State       string     `json:"state"`
+	Detail      *string    `json:"detail"`
+	RequestedAt time.Time  `json:"requested_at"`
+	ResolvedAt  *time.Time `json:"resolved_at"`
 }
 
 func viewOffboarding(o offboarding.Offboarding) offboardingView {
-	return offboardingView{
+	view := offboardingView{
 		OffboardingID: o.OffboardingID, TenantID: o.TenantID, Stage: string(o.Stage),
 		InitiatedBy: o.InitiatedBy, Reason: o.Reason, LegalHold: o.LegalHold,
 		CorrelationID: o.CorrelationID, StartedAt: o.StartedAt, FrozenAt: o.FrozenAt,
-		RetiredAt: o.RetiredAt,
+		RetiredAt: o.RetiredAt, ObligationsAt: o.ObligationsAt(), ReleasedAt: o.ReleasedAt,
+		ActiveMemberships: o.ActiveMemberships,
 	}
+	if d := o.Deprovisioning; d != nil {
+		view.Deprovisioning = &deprovisioningView{
+			State: d.State, Detail: d.Detail, RequestedAt: d.RequestedAt, ResolvedAt: d.ResolvedAt,
+		}
+	}
+	return view
 }
 
 type obligationView struct {
@@ -287,6 +327,11 @@ type obligationView struct {
 	DueAt         *time.Time `json:"due_at,omitempty"`
 	CompletedAt   *time.Time `json:"completed_at,omitempty"`
 	Detail        string     `json:"detail,omitempty"`
+
+	// Who reported the latest outcome and when, on completed, waived and failed rows alike
+	// (TDD-organization-control-004 1.7.0). Omitted while open, as completed_at is.
+	ResolvedBy *id.UUID   `json:"resolved_by,omitempty"`
+	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 }
 
 func viewObligation(o offboarding.Obligation) obligationView {
@@ -294,6 +339,7 @@ func viewObligation(o offboarding.Obligation) obligationView {
 		ObligationID: o.ObligationID, OffboardingID: o.OffboardingID, TenantID: o.TenantID,
 		Domain: o.Domain, Type: o.Type, State: string(o.State), DueAt: o.DueAt,
 		CompletedAt: o.CompletedAt, Detail: o.Detail,
+		ResolvedBy: o.ResolvedBy, ResolvedAt: o.ResolvedAt,
 	}
 }
 
