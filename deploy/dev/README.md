@@ -1,19 +1,36 @@
 # organization-control on the development server
 
 Organization Control beside identity-kernel's and identity-control's stacks, deployed the way every
-service on the server is (STD-GLB-009 §Development Server Deployment).
+service on the server is (STD-GLB-009 §Development Server Deployment). The sections follow that
+standard's skeleton, in its order.
+
+## What runs
+
+The Compose project is `scnehaux-organization-control-dev`.
 
 | Service | What it is |
 | :-- | :-- |
 | `postgres` | This service's own Control Database, in the named volume `postgres` |
 | `migrate` | One-shot: the cluster roles, the owned schemas, the platform schema, RLS, privileges, the five runtime login roles, and a check of the privilege shape |
-| `organization-control` | The API, with its delivery dispatcher in process (ADR-GLB-018 §5.4) |
+| `organization-control` | The API, with its delivery dispatcher in process (ADR-GLB-018 §5.4), on `127.0.0.1:8083` (`ORGANIZATION_CONTROL_PORT`) |
 | `bootstrap-provider` | One-off task: the first provider grant |
 | `maintenance` | One-off task: the daily maintenance stage |
 
-**Never run `docker compose down -v`.** The volume holds Organization's provider grants, and the
-Identity Control API's provider projection is built from them. A new database would revoke every grant
-there, including the one that makes the ceremony's Principal a provider.
+| Network | What it is |
+| :-- | :-- |
+| `internal` | This stack's own, between the database, the job and the service. `compose.override.example.yaml` pins it to the subnet reserved for it |
+| `scnehaux-identity-api` | identity-kernel's, joined for Keycloak: the key set and workload tokens |
+| `scnehaux-identity-control-api` | identity-control's, joined both ways: this service delivers to identity-control on it, and identity-control reads this service's snapshot and frontier on it |
+
+Two departures from the skeleton, kept on purpose:
+
+- **No `scnehaux-organization-control-api` network.** No other stack joins this one: identity-control
+  reaches it over identity-control's own network, which this stack joins, and Organization Experience
+  runs on a laptop and calls the published port. A network nobody joins would be one more name to
+  keep. If a stack ever needs to join this one, it is created under that name then.
+- **The internal network keeps Compose's default name**, `scnehaux-organization-control-dev_internal`,
+  and the volume `scnehaux-organization-control-dev_postgres`. Renaming the project, a network or the
+  volume would leave the server's existing database volume orphaned beside a new, empty one.
 
 ## Before you start
 
@@ -23,6 +40,11 @@ there, including the one that makes the ceremony's Principal a provider.
   both networks, so it starts after them.
 - You can get a provider token from identity-control (its README §Calling the API): the ceremony's
   Principal, `bootstrap-operator`.
+- Docker with Compose v2, and your user in the `docker` group.
+- PowerShell 7 (`pwsh`) for the wiring scripts in §Wiring to other services.
+- On a network that SSL-inspects `proxy.golang.org`, as the development server's does, set
+  `GOPROXY=direct` in `.env` before the first build. Every Go build in `compose.yaml` takes it as a
+  build argument.
 
 ## First start
 
@@ -31,11 +53,18 @@ cd organization-control/deploy/dev
 cp .env.example .env
 # fill in KEYCLOAK_ISSUER (the value identity-control's .env holds) and the six passwords:
 #   openssl rand -hex 32
+# and GOPROXY=direct where the default proxy is intercepted
+cp compose.override.example.yaml compose.override.yaml   # on the development server: the subnet pin
 docker compose up -d --build
 curl -fsS http://127.0.0.1:8083/readyz       # ready once the migration job has succeeded
 ```
 
-The service starts with no provider and no dispatcher. The next two sections make it useful.
+The service starts with no provider and no dispatcher. §One-off tasks and §Wiring to other services
+make it useful.
+
+`compose.override.yaml` is read by Compose automatically and is git-ignored. A network's subnet cannot
+change in place: on a stack started before the pin, `docker compose down` (never `-v`) and then
+`docker compose up -d` recreates the network and keeps the database.
 
 ## Updating
 
@@ -55,6 +84,19 @@ image, so this rebuilds them too.
 | `bootstrap-provider` | `docker compose run --rm bootstrap-provider -principal-id <id> -operator "<you>" -reason "<why>"` | once per Control Database: it refuses while any grant exists |
 | `maintenance` | `docker compose run --rm maintenance` | daily, from cron; it exits 3 on a security incident open past 24 hours |
 
+`maintenance` creates the outbox partitions ahead, applies the retention, purges expired Membership
+batch previews and counts stale incidents (the repository README §Building the database). On the
+development server, in the crontab of the user that runs the stacks (`crontab -e`), with the checkout
+where that server keeps it:
+
+```text
+15 3 * * * cd /home/development/apps/organization-control/deploy/dev && docker compose run --rm maintenance >> "$HOME/organization-control-maintenance.log" 2>&1
+```
+
+Plain `docker compose` from `deploy/dev`, so it reads this stack's `.env` and override like every
+other command here. A run that exits 3 is not a failure of the run: its work is done, and the log
+count says how many incidents to resolve (TDD-organization-control-005; `POST /v1/dead-letters/.../resolve`).
+
 ## Wiring to other services
 
 This connects Organization Control and the Identity Control API through workload tokens from the
@@ -63,8 +105,8 @@ STD-IAM-002 §3.1). It is the server form of identity-control's `docs/run.md` §
 
 **The order matters.** Each step needs a token the step before still accepts. Step 4's grant retires
 the ceremony's own grant in identity-control once it is projected, permanently. From then on the
-ceremony's Principal is a provider through this database alone, which is why the volume above is
-never dropped.
+ceremony's Principal is a provider through this database alone, which is why the volume is never
+dropped (§Never do).
 
 Use plain ASCII in every `X-Administrative-Reason`. Anything else is refused with `400`
 (STD-GLB-001 §Request Header Values).
@@ -202,3 +244,72 @@ IDENTITY_ORGANIZATION_BASE_URL=http://organization-control:8080
 - `provider-bootstrap` prints a `memberships` count, not `tenant context not bootstrapped`.
 - Granting a Membership here makes identity-control log `tenant converged` for its Tenant. The
   kernel then holds an Organization named by the `tenant_id`, with the Principal as a member.
+
+## Keys
+
+One private key lives here: `./keys/organization-control-workload.pem`, the workload key this service
+signs its token requests to Keycloak with, mounted read-only at `/keys`. It is made with the kernel's
+key tool in §Wiring to other services, step 1, mode `0600` and owned by `KEYS_OWNER` (the image's
+nonroot user, `65532:65532`, unless `.env` says otherwise). Only its public JWK leaves the server, to
+identity-control's workload registration. `keys/` is git-ignored; back it up with `.env`
+(§Backups).
+
+The operator caller's key, `dev-provider-caller`, is yours rather than this stack's, and stays beside
+the wiring state file outside every directory a container mounts.
+
+## Backups
+
+The Control Database lives only in the Docker volume `scnehaux-organization-control-dev_postgres`.
+**`docker compose down -v` deletes it**, and with it every provider grant identity-control's provider
+projection is built from (§Never do).
+
+Back it up daily to storage outside the volume; on the development server that is
+`/mnt/imam-storage`. In the same crontab, after `mkdir -p /mnt/imam-storage/backups/organization-control`
+once:
+
+```text
+30 2 * * * cd /home/development/apps/organization-control/deploy/dev && docker compose exec -T postgres pg_dump -U postgres -Fc organization_control > /mnt/imam-storage/backups/organization-control/organization_control-$(date +\%F).dump
+```
+
+`pg_dump` runs inside the `postgres` container over its local socket, which the image trusts, so no
+password is typed or stored: the database's own passwords stay in `.env`, read by Compose at run time.
+Copy `.env` and `keys/` alongside when they change; without them a restored database has no
+credentials to match and the service no workload key.
+
+To restore into an empty volume:
+
+```sh
+docker compose up -d postgres
+docker compose run --rm migrate          # roles, schemas, privileges, login roles from .env
+docker compose exec -T postgres pg_restore -U postgres -d organization_control --clean --if-exists < <dump>
+docker compose up -d
+curl -fsS http://127.0.0.1:8083/readyz
+```
+
+The cluster roles are not in a database dump; `migrate` makes them from `roles.sql` and `.env`, which is
+why it runs first.
+
+## Never do
+
+- **Never run `docker compose down -v`.** The volume holds Organization's provider grants, and the
+  Identity Control API's provider projection is built from them. A new database would revoke every
+  grant there, including the one that makes the ceremony's Principal a provider. `docker compose down`
+  without `-v` keeps it.
+- Never rename the Compose project, its networks or its volume (§What runs).
+- Never source identity-control's `.env` into the shell that runs these commands: its
+  `POSTGRES_PASSWORD` overrides this stack's (§Wiring to other services).
+- Never send a non-ASCII `X-Administrative-Reason`, or a command without an `Idempotency-Key`: both
+  are refused `400`.
+- Never commit `.env`, `keys/` or `compose.override.yaml`.
+
+## Troubleshooting
+
+| Symptom | Cause, and what to do |
+| :-- | :-- |
+| `/readyz` never answers after `up` | The migrate job failed, and the service waits on it: `docker compose logs migrate` |
+| `network scnehaux-identity-api not found` (or `-identity-control-api`) | The kernel's or identity-control's stack is not running. Start them first (§Before you start) |
+| The build fails fetching modules, `x509: certificate signed by unknown authority` | The module proxy is SSL-inspected. `GOPROXY=direct` in `.env`, then `docker compose up -d --build` |
+| `network ... needs to be recreated` after adding the override | The subnet changed. `docker compose down` (no `-v`), then `docker compose up -d` |
+| `maintenance` exits 3 | An unresolved dead letter is older than 24 hours. The run's work is done; resolve the incident |
+| A command answers `400` naming `Idempotency-Key` | Every command requires one: a value unique to the command, repeated unchanged on a retry |
+| identity-control logs the provider projection stale | This service is down, or delivery is not configured: §Wiring to other services, steps 5 to 7 |

@@ -35,6 +35,10 @@ services:
     build:
       context: ../..
       target: migrate
+      # Every Go build takes its module proxy from .env, so a network that intercepts the default
+      # proxy builds with GOPROXY=direct (STD-GLB-009 §Development Server Deployment).
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     # Named, so every one-off task below runs this image and `up --build` rebuilds them with the
     # release.
     image: scnehaux-organization-control-dev-migrate
@@ -65,9 +69,9 @@ services:
         condition: service_completed_successfully
     networks: [internal]
 
-  # The daily maintenance stage: outbox partitions, retention, and the stale-incident count
-  # (README §Building the database). Run it from cron on the server; it exits 3 on an incident open
-  # past 24 hours.
+  # The daily maintenance stage: outbox partitions, retention, expired batch previews, and the
+  # stale-incident count (README §Building the database). Run it from cron on the server
+  # (deploy/dev/README.md §One-off tasks); it exits 3 on an incident open past 24 hours.
   maintenance:
     image: scnehaux-organization-control-dev-migrate
     profiles: ["maintenance"]
@@ -83,6 +87,8 @@ services:
     build:
       context: ../..
       target: service
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     restart: unless-stopped
     # The workload's private key in ./keys is mode 0600 and owned by KEYS_OWNER, the image's nonroot
     # user unless a local override says otherwise.
