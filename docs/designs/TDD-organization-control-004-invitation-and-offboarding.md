@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.7.0
+  version: 1.8.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -173,8 +173,18 @@ CREATE TABLE operation.offboarding (
     frozen_at       TIMESTAMPTZ,
     released_at     TIMESTAMPTZ,   -- from 1.7.0: the instant the offboarding entered release
     retired_at      TIMESTAMPTZ,
+    prior_status    TEXT,          -- from 1.8.0: the Tenant's status when the offboarding began
+    cancelled_by    UUID,          -- from 1.8.0: who cancelled it
+    cancel_reason   TEXT,          -- from 1.8.0: why
+    cancelled_at    TIMESTAMPTZ,   -- from 1.8.0: when
     CONSTRAINT offboarding_stage_check
-        CHECK (stage IN ('freeze', 'obligations', 'release', 'retired')),
+        CHECK (stage IN ('freeze', 'obligations', 'release', 'retired', 'cancelled')),
+    CONSTRAINT offboarding_prior_status_check
+        CHECK (prior_status IS NULL OR prior_status IN ('active', 'suspended')),
+    CONSTRAINT offboarding_cancellation_check
+        CHECK ((stage = 'cancelled') = (cancelled_at IS NOT NULL)
+           AND (cancelled_at IS NULL) = (cancelled_by IS NULL)
+           AND (cancelled_at IS NULL) = (cancel_reason IS NULL)),
     -- The target of the composite foreign key below, so a child's copy of tenant_id
     -- cannot disagree with its parent's.
     CONSTRAINT offboarding_tenant_scope_unique UNIQUE (tenant_id, offboarding_id)
@@ -193,12 +203,35 @@ CREATE TABLE operation.offboarding_obligation (
     resolved_by     UUID,          -- from 1.7.0: who reported the latest outcome
     resolved_at     TIMESTAMPTZ,   -- from 1.7.0: when, for completed, waived and failed alike
     CONSTRAINT obligation_state_check
-        CHECK (state IN ('open', 'completed', 'waived', 'failed')),
+        CHECK (state IN ('open', 'completed', 'waived', 'failed', 'cancelled')),
     CONSTRAINT offboarding_obligation_parent_fk
         FOREIGN KEY (tenant_id, offboarding_id)
         REFERENCES operation.offboarding (tenant_id, offboarding_id)
 );
+
+-- From 1.8.0: which Memberships the freeze suspended, so a cancellation restores those and no
+-- others (ADR-ORG-006 §5.2). In the membership schema because the tenant role writes it, inside the
+-- freeze's own transaction, and that role reaches nothing in operation.
+CREATE TABLE membership.offboarding_freeze (
+    offboarding_id UUID        NOT NULL,
+    tenant_id      UUID        NOT NULL,
+    membership_id  UUID        NOT NULL REFERENCES membership.membership (membership_id),
+    suspended_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    restored_at    TIMESTAMPTZ,
+    PRIMARY KEY (offboarding_id, membership_id),
+    FOREIGN KEY (tenant_id, offboarding_id)
+        REFERENCES operation.offboarding (tenant_id, offboarding_id)
+);
 ```
+
+**What a cancellation needs is recorded from the start** (1.8.0, `ADR-ORG-006 §5.2`). Beginning
+an offboarding stores the Tenant's status in `prior_status`, read under the row lock the transition
+takes. Each freeze batch writes one `offboarding_freeze` row per Membership it suspends, in the
+transaction that suspends it, so the record and the suspension cannot disagree. A Membership already
+suspended before the offboarding is never selected by the freeze, so it has no row, and a
+cancellation leaves it suspended. An offboarding begun before 1.8.0 has `prior_status` null and may
+have frozen Memberships no row records. Its cancellation is refused rather than guessed
+(§Cancellation).
 
 Each stage has an entry instant, and from 1.7.0 every one is readable. `freeze` is entered at
 `started_at`. `obligations` is entered at `frozen_at`: completing the freeze and entering
@@ -326,6 +359,7 @@ POST   /v1/offboardings/{offboarding_id}/legal-hold
 POST   /v1/offboardings/{offboarding_id}/obligations
 GET    /v1/offboardings/{offboarding_id}/obligations
 POST   /v1/offboardings/{offboarding_id}/deprovisioning
+POST   /v1/offboardings/{offboarding_id}/cancel      {"expected_version": n}   (1.8.0)
 POST   /v1/obligations/{obligation_id}/resolve
 ```
 
@@ -342,7 +376,7 @@ The offboarding list follows STD-GLB-001 1.3.0 §Pagination in the form of every
 | Cursor | `after`: the `offboarding_id` of the last item of the previous page. Absent, the list starts at the first. Not a UUID: `400` |
 | Page size | `limit`: 50 when absent; a whole number from 1 to 100. Anything else, `0` included: `400`, never coerced |
 | Order | `offboarding_id`, a UUIDv7, so the order offboardings began in: the keyset `offboarding_id > $after ORDER BY offboarding_id LIMIT limit + 1` |
-| Filters | `stage` = `freeze` \| `obligations` \| `release` \| `retired`; `tenant_id` = a UUID. Each optional, each holding for every page; any other value: `400` |
+| Filters | `stage` = `freeze` \| `obligations` \| `release` \| `retired` \| `cancelled`; `tenant_id` = a UUID. Each optional, each holding for every page; any other value: `400` |
 | Response | `{"offboardings": [...], "next": "<offboarding_id>" \| null}`, `next` null on the last page |
 
 Each page writes the privileged-access record with the caller's reason before it reads. A
@@ -361,9 +395,19 @@ answers with an offboarding answers with that shape:
   "obligations_at": "<ts>" | null, "released_at": "<ts>" | null,
   "deprovisioning": {"state": "requested|realized|failed|unresolved", "detail": "..." | null,
                      "requested_at": "<ts>", "resolved_at": "<ts>" | null} | null,
-  "active_memberships": 0
+  "active_memberships": 0,
+  "prior_status": "active|suspended" | null,
+  "cancelled_by": "<uuid>" | null, "cancel_reason": "..." | null, "cancelled_at": "<ts>" | null,
+  "frozen_memberships": 0, "restore_pending": 0
 }
 ```
+
+From 1.8.0 the view carries the cancellation (`ADR-ORG-006 §5.1`): `prior_status`, the status a
+cancellation returns the Tenant to, null on an offboarding begun before 1.8.0, which cannot be
+cancelled; `cancelled_by`, `cancel_reason` and `cancelled_at`, null until cancelled;
+`frozen_memberships`, the Memberships the freeze record names, which is what a cancellation would
+restore; and `restore_pending`, those of them a cancellation has not restored yet and that are still
+`suspended`, which is `0` unless the offboarding is cancelled.
 
 `frozen_at` and `retired_at` are omitted until reached, as before 1.7.0; the fields 1.7.0 adds are
 present and null until reached. `obligations_at` and `released_at` are stage-entry instants
@@ -395,6 +439,16 @@ board's (`TDD-organization-experience-003` §The Obligation Board): `open` rows 
 the most overdue first; then the other `open` rows by `due_at`, undated last; then every other row
 in the order it was raised. An unknown offboarding is `404`.
 
+**Cancelling an offboarding** (1.8.0, `ADR-ORG-006`). `POST /v1/offboardings/{offboarding_id}/cancel`
+takes the Tenant `version` the operator was shown as `expected_version` and requires
+`X-Administrative-Reason`, like every provider route, which becomes `cancel_reason`. It answers with
+the offboarding view. In `freeze` and `obligations` it cancels (§Cancellation). In `release` and
+`retired` it is refused `409` `state-transition-refused`: release is irreversible. An offboarding
+begun before 1.8.0 is refused `409` with a detail saying the freeze recorded nothing to restore. A
+stale `expected_version` is `409` `version-conflict`. On an offboarding already `cancelled`, it
+resumes the restoration and changes nothing else, so a request that failed part way is completed
+by sending it again.
+
 ### Published Events
 
 ```text
@@ -409,7 +463,19 @@ com.scnehaux.organization.tenant.offboarding.frozen
 com.scnehaux.organization.tenant.offboarding.obligation-raised
 com.scnehaux.organization.tenant.offboarding.released
 com.scnehaux.organization.tenant.lifecycle.retired
+com.scnehaux.organization.tenant.offboarding.cancelled       (1.8.0)
+com.scnehaux.organization.tenant.security.restored           (priority, on a cancellation from active)
+com.scnehaux.organization.membership.lifecycle.restored      (one per restored Membership)
 ```
+
+A cancellation publishes `tenant.offboarding.cancelled` for the process, and the security events
+its transitions publish anyway: the Tenant's `tenant.security.restored` (begun from `active`) or
+`tenant.security.suspended` (begun from `suspended`), and one `membership.lifecycle.restored` per
+Membership it restores (`TDD-organization-control-003` §Who issues which transition). Access returns
+by the path it was stopped, and is shown by its evidence (`ADR-ORG-004 §5.2`). No consumer
+subscribes to `tenant.offboarding.*`, which `projection.SubscribableEventTypes` does not offer, so
+the new type reaches nobody who must handle it, and the Tenant and Membership types are ones every
+consumer already applies.
 
 `invitation.accepted` is an addition to the original list, which published an event for every way
 an invitation can close except the one that succeeds. `revoked` and `expired` were named and
@@ -519,6 +585,7 @@ and the gap between the two is exactly the window a long-lived invitation create
 
 ```text
 begin
+    record the Tenant's status as prior_status (1.8.0)
     transition Tenant to offboarding
     increment tenant_security_version
     emit tenant.security.suspended in the same transaction
@@ -527,6 +594,7 @@ begin
 
 freeze, in resumable batches
     suspend every active Membership in the Tenant
+    record each in membership.offboarding_freeze (1.8.0)
     increment each membership_version
     emit membership.security.suspended for each changed Membership in the same batch
 
@@ -550,6 +618,55 @@ retired
     Tenant transitions to retired
     increment tenant_security_version
 ```
+
+### Cancellation
+
+```text
+cancel(offboarding, expected_version, reason):
+    -- one provider transaction
+    lock the offboarding
+    if stage is cancelled: skip to restore              -- a resume
+    refuse unless stage is freeze or obligations        -- 409: release is irreversible
+    refuse when prior_status is null                    -- 409: begun before the freeze record
+    transition the Tenant offboarding -> prior_status at expected_version
+        increment tenant_security_version
+        emit tenant.security.restored or tenant.security.suspended
+    set stage cancelled, cancelled_by, cancel_reason, cancelled_at
+    close every open obligation as cancelled, resolved_by and resolved_at set
+    emit tenant.offboarding.cancelled
+
+restore, in batches of 100, each in its own tenant transaction like the freeze:
+    lock the frozen Memberships of this offboarding not yet restored and still suspended
+    restore each through the ordinary restore transition, held to the version locked
+        increment membership_version, record actor, correlation and reason
+        emit membership.lifecycle.restored
+    stamp each freeze row restored_at
+    until a batch restores nothing
+```
+
+**The Tenant moves first, and the Memberships after it commits.** A restored Membership's event
+carries the Tenant's security version, and a consumer discards one older than the Tenant version it
+holds. Restored before the Tenant transition, each would carry the offboarding's version and be
+superseded by the Tenant event that follows. The cost is a window in which the Tenant is back and its
+Memberships are not yet, which errs toward less access.
+
+**The restoration resumes.** It is several transactions because the freeze was, and for the same
+reason: a Tenant's Memberships in one transaction is a lock held for minutes. Each batch commits its
+restorations, their events and their `restored_at` together, and selects only rows without
+`restored_at` whose Membership is still `suspended`, so a batch that committed is not seen again.
+A request that failed part way leaves `restore_pending` above `0`, and sending the cancel again
+finishes it. A frozen Membership that is no longer `suspended` (none can be changed while the Tenant
+is offboarding, but the rule does not rely on that) is left as it is.
+
+**Nothing else is undone** (`ADR-ORG-006 §5.2`). `completed`, `waived` and `failed` obligations keep
+their record, and `open` ones become `cancelled`, a terminal state no resolution changes. An export a
+domain ran stays run. A cancelled offboarding is terminal: no freeze, stage advance, obligation,
+legal hold or second cancellation acts on it, and a new offboarding of the same Tenant is a new row.
+
+**A freeze cannot follow a cancellation.** A freeze batch is refused unless the offboarding is in
+`freeze` and, inside its own transaction, the Tenant is still `offboarding`. A batch that read both
+before a cancellation committed may still suspend a few Memberships; it records them, so they are
+restored by the next cancel request, which `restore_pending` asks for.
 
 #### Where the deprovisioning outcome is recorded
 
@@ -659,6 +776,14 @@ reimplementing the comparison.
   open rows first.
 - The offboarding list pages by key, filters by stage and Tenant, and records each page's
   access with the caller's reason.
+- Cancelling in `freeze` and in `obligations` returns the Tenant to its prior status, `active` or
+  `suspended`, with the security version incremented; restores exactly the Memberships the freeze
+  record names; leaves a Membership suspended before the offboarding suspended; closes open
+  obligations as `cancelled` and keeps settled and failed ones; and records who, why and when.
+- Cancelling in `release` or `retired`, an offboarding begun before 1.8.0, or with a stale
+  version is refused and changes nothing.
+- A second cancel request resumes an unfinished restoration and changes nothing else.
+- A freeze batch after a cancellation is refused.
 
 ### Negative
 
@@ -720,6 +845,7 @@ deprovisioning outcome, invitation token enumeration, and legal hold release.
 | Parent system | SAD-004 — Scnehaux Organization Control |
 | Realizes capability | PAD-PLT-002 — invitation, onboarding correlation, offboarding coordination |
 | Governed by | ADR-ORG-001 §5.1 — Tenant offboarding and retirement coordination |
+| Governed by | ADR-ORG-006 — a mistaken offboarding is cancelled before release, restoring what it removed (1.8.0) |
 | Conforms to | SAD-004 §5.5 — invitation possession never proves identity |
 | Conforms to | SAD-004 §5.6 — offboarding is resumable and infers completion from no single response |
 | Conforms to | SAD-004 §8.1 — anonymous lookup with enumeration resistance |

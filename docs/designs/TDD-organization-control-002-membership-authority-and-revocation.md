@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.11.0
+  version: 1.12.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -409,7 +409,7 @@ change.
 ## API / Interface
 
 ```text
-GET    /v1/principals/{principal_id}/contexts
+GET    /v1/principals/{principal_id}/contexts       ?after=&limit=
 GET    /v1/context/{tenant_id}/{principal_id}:verify
 GET    /v1/memberships                       ?after=&limit=&status=&workspace_id=&principal_id=
 GET    /v1/memberships/{membership_id}
@@ -524,6 +524,54 @@ A retired consumer's `event_types` is `[]`, because retirement retires its subsc
 Registry). Without `state`, every consumer is listed, retired ones included: a retired consumer's
 marks are the record an investigation reads (§Consumer Registry). The page runs on the provider pool
 in one transaction, so every item describes the same instant.
+
+### The Context List
+
+From 1.12.0, `GET /v1/principals/{principal_id}/contexts` lists where a person may work
+(`ADR-ORG-005`). It is the context API §Technical Context names. The set is read here and never
+placed in a token (`STD-IAM-001 §3.3`).
+
+**Who may call it** (`ADR-ORG-005 §5.1`, `TDD-organization-control-001` §Caller Authority):
+
+- **The person themselves.** A human token whose `principal_id` is the path's is a self caller,
+  with or without `tenant_id` and with or without a provider grant. The read runs as
+  `organization_self_rt`, bound to that `principal_id`, and writes no privileged-access record.
+- **A provider** with authority in force reads anyone's, with `X-Administrative-Reason`, on the
+  provider pool, and each page records the access with that reason.
+- **Everyone else** is refused `403`: a Tenant administrator or an eligible provider reading
+  another person's, and every consumer.
+
+**What it lists** (`ADR-ORG-005 §5.2`): one item per Membership of the Principal whose status is
+`active`, in a Tenant whose status is `active`.
+
+```json
+{
+  "contexts": [
+    {"membership_id": "<uuid>", "tenant_id": "<uuid>", "tenant_display_name": "Acme",
+     "tenant_status": "active", "workspace_id": "<uuid>" | null, "administers": true}
+  ],
+  "next": "<membership_id>" | null
+}
+```
+
+| Field | Value |
+| :-- | :-- |
+| `workspace_id` | The Workspace a Workspace-scoped Membership names; `null` for a Tenant-wide one |
+| `administers` | Whether the Principal holds an unrevoked tenant administration grant in that Tenant (`ADR-ORG-003`) |
+| `tenant_status` | Always `active` today, since only active Tenants are listed. Carried so a client renders what it reads rather than assuming it |
+
+Nothing else is returned: no version, no grant identifier and no other person. The list takes
+STD-GLB-001 1.3.0 §Pagination's form: `after` is the `membership_id` of the last item, `limit` is
+1 to 100 and 50 when absent, the order is `membership_id`, a UUIDv7, and `next` is null on the last
+page. It takes no filter, and any parameter but those two, or one given twice, is `400`. A
+`principal_id` that is not a UUID is `400`. A Principal with no context reads `{"contexts": [], "next":
+null}`, the same answer as a `principal_id` nobody holds: the list says where the caller may work,
+and nothing about whether a Principal exists.
+
+**An item selects; it does not grant** (`ADR-ORG-005 §5.3`). Choosing a Tenant is a sign-in for it
+(`ADR-IAM-006 §5.2`), and every request in it is checked again: the Membership, the Tenant and the
+administration grant are read for each tenant token (`TDD-organization-control-001` §Caller
+Authority). An `administers` of `true` read a moment ago is not admission.
 
 ### Membership Batches
 
@@ -1018,6 +1066,10 @@ the sum, because that is the number incident response works from.
 - Every page of one snapshot reports the same high-water mark, and continuing a snapshot
   without carrying its mark is refused rather than served with a fresh one.
 - Paging covers the set exactly once: keyset paging on `membership_id`, never `OFFSET`.
+- The context list names each active Membership in an active Tenant once, with `administers` from
+  an unrevoked grant; a suspended or revoked Membership, or one in a suspended or offboarding Tenant,
+  is not listed; it pages by `membership_id`. A self read records no access; a provider's records
+  each page with its reason.
 - The consumer list pages by `consumer_id` with `next` null on the last page, `state` holds on every
   page, each page records the access with the caller's reason, and `stale` is true for a consumer that
   never reported or reported longer ago than its budget, and false for a retired one.
@@ -1111,6 +1163,8 @@ finding, and consumer misuse of the fresh-check path.
 | Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/memberships`: `after`, `limit` 1 to 100, key order, `next` |
 | Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/projections/consumers` (1.11.0): `after` is the `consumer_id`, key order, `state` filter, `next` |
 | Consumed by | `TDD-organization-experience-002` §Projection Health — the consumer list, with `stale` computed by the API |
+| Governed by | ADR-ORG-005 — a person lists their own contexts (1.12.0, §The Context List) |
+| Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/principals/{principal_id}/contexts`: `after`, `limit` 1 to 100, key order, `next` |
 | Governed by | ADR-ORG-004 §5.1 — a bulk action is a batch the server previews, then executes; §5.2 — revocation is shown by its evidence |
 | Conforms to | SAD-004 §8.3 — bulk operations validate each item independently and return a per-item outcome |
 | Conforms to | STD-GLB-001 1.3.0 — the batch is bounded (500 items) and versioned under `/v1/` |

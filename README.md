@@ -43,6 +43,7 @@ by the application:
 | `organization_provider_rt` | Deliberately cross-Tenant | Provider |
 | `organization_consumer_rt` | A registered consumer's own seven routes: reads Memberships and Tenants, writes its own position | Consumer, when consumer authority is configured |
 | `organization_resolution_rt` | Closing and waiving dead letters (TDD-005) | Resolution |
+| `organization_self_rt` | A person reading their own contexts: three tables' named columns, one Principal | None of its own: `SET LOCAL ROLE` on the tenant connections |
 
 A single role serving both tenant and provider work cannot be constrained: any policy
 permissive enough for provider work is permissive enough for a defect in a tenant-scoped
@@ -361,6 +362,14 @@ What a provider reads about projection health and provisioning (TDD-organization
 ```text
 GET   /v1/projections/consumers              ?state=active|retired   each item adds state, retired_at, stale
 GET   /v1/tenants/{tenant_id}                adds provisioning: the latest request, unresolved included
+```
+
+A person lists where they may work, and a provider cancels an offboarding begun by mistake
+(TDD-organization-control-002 1.12.0, -004 1.8.0, ADR-ORG-005, ADR-ORG-006):
+
+```text
+GET   /v1/principals/{principal_id}/contexts      your own, with any human token; anyone's, as a provider with a reason
+POST  /v1/offboardings/{offboarding_id}/cancel    {"expected_version": n}   in freeze or obligations only
 ```
 
 ### Locally: `.env` and the Makefile
