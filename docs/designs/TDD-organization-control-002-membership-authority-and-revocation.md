@@ -564,7 +564,8 @@ Nothing else is returned: no version, no grant identifier and no other person. T
 STD-GLB-001 1.3.0 §Pagination's form: `after` is the `membership_id` of the last item, `limit` is
 1 to 100 and 50 when absent, the order is `membership_id`, a UUIDv7, and `next` is null on the last
 page. It takes no filter, and any parameter but those two, or one given twice, is `400`. A
-`principal_id` that is not a UUID is `400`. A Principal with no context reads `{"contexts": [], "next":
+`principal_id` that is not a UUID is `400` to a provider; any other caller is refused `403` before
+that, because no token names such a Principal. A Principal with no context reads `{"contexts": [], "next":
 null}`, the same answer as a `principal_id` nobody holds: the list says where the caller may work,
 and nothing about whether a Principal exists.
 
