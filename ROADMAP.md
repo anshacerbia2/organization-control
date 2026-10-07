@@ -231,9 +231,11 @@ with the check order and the evidence obligations the provider path carries.
 
 - ✅ `projection.consumer` registry with declared freshness and stale behavior
 - ✅ Snapshot generation, high-water mark, paging, admission control
-- ⏳ `GET /v1/projections/organization/snapshot`, `:reconcile`, consumer status — the
-  service layer is complete and asserted; the HTTP surface waits for the composition root
-  that Week 4 builds alongside the command surfaces
+- ✅ The projection routes — `POST /v1/projections/snapshot`, `POST /v1/projections/reconcile`
+  and `GET /v1/projections/consumers/{consumer_id}` for consumer status, served since the
+  Week 4 composition root (TDD-organization-control-002 §API / Interface). The snapshot route is a `POST`
+  at that path, not the `GET .../organization/snapshot` first planned here. identity-control
+  calls it, and `deploy-dev`'s wiring job proves the call across the stacks
 - ✅ Bootstrap contract: a cursor without a snapshot mark is refused
 - ✅ Reconciliation comparing authority against reported projection state
 
