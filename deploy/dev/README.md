@@ -146,7 +146,7 @@ This is an emergency `provider:organization-control` grant, as every bootstrap g
 
 With a `dev-provider-caller` token, whose `aud` names `organization-control-api`, against
 `http://127.0.0.1:8083`. Each request carries an `X-Administrative-Reason` and an `Idempotency-Key`,
-so a retry is safe:
+which this service requires on both (a command without one is refused `400`), so a retry is safe:
 
 ```text
 POST /v1/provider-grants

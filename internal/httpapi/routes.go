@@ -167,6 +167,10 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 
 	api := http.NewServeMux()
 
+	// Every POST is either a command, wrapped in `command` and refused without an Idempotency-Key,
+	// or named in keyOptional with the reason it is not (commands.go). TestEveryPostRouteIsClassified
+	// holds each new POST to one of the two.
+
 	// Tenant-scoped. None of these paths names a Tenant, so there is no client-supplied Tenant for
 	// a handler to mistake for the authoritative one.
 	// The lists take `after`, `limit` and named filters (STD-GLB-001 1.3.0 §Pagination). A list path
@@ -174,53 +178,53 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// distinct patterns, and a GET cannot collide with the POST routes sharing a path.
 	api.HandleFunc("GET /v1/memberships", h.listMemberships)
 	api.HandleFunc("GET /v1/memberships/{membership_id}", h.getMembership)
-	api.HandleFunc("POST /v1/memberships", h.grantMembership)
-	api.HandleFunc("POST /v1/memberships/{membership_id}/suspend", h.suspendMembership)
-	api.HandleFunc("POST /v1/memberships/{membership_id}/restore", h.restoreMembership)
-	api.HandleFunc("POST /v1/memberships/{membership_id}/revoke", h.revokeMembership)
+	api.HandleFunc("POST /v1/memberships", command(h.grantMembership))
+	api.HandleFunc("POST /v1/memberships/{membership_id}/suspend", command(h.suspendMembership))
+	api.HandleFunc("POST /v1/memberships/{membership_id}/restore", command(h.restoreMembership))
+	api.HandleFunc("POST /v1/memberships/{membership_id}/revoke", command(h.revokeMembership))
 	api.HandleFunc("GET /v1/memberships/{membership_id}/enforcement", h.membershipEnforcement)
 
 	// Bulk actions on Memberships (ADR-ORG-004 §5.1): previewed, then executed.
-	api.HandleFunc("POST /v1/membership-batches", h.previewMembershipBatch)
+	api.HandleFunc("POST /v1/membership-batches", command(h.previewMembershipBatch))
 	api.HandleFunc("GET /v1/membership-batches/{batch_id}", h.getMembershipBatch)
-	api.HandleFunc("POST /v1/membership-batches/{batch_id}/execute", h.executeMembershipBatch)
+	api.HandleFunc("POST /v1/membership-batches/{batch_id}/execute", command(h.executeMembershipBatch))
 
 	api.HandleFunc("GET /v1/workspaces", h.listWorkspaces)
-	api.HandleFunc("POST /v1/workspaces", h.createWorkspace)
+	api.HandleFunc("POST /v1/workspaces", command(h.createWorkspace))
 	api.HandleFunc("GET /v1/workspaces/{workspace_id}", h.getWorkspace)
-	api.HandleFunc("POST /v1/workspaces/{workspace_id}/archive", h.archiveWorkspace)
-	api.HandleFunc("POST /v1/workspaces/{workspace_id}/restore", h.restoreWorkspace)
-	api.HandleFunc("POST /v1/workspaces/{workspace_id}/retire", h.retireWorkspace)
+	api.HandleFunc("POST /v1/workspaces/{workspace_id}/archive", command(h.archiveWorkspace))
+	api.HandleFunc("POST /v1/workspaces/{workspace_id}/restore", command(h.restoreWorkspace))
+	api.HandleFunc("POST /v1/workspaces/{workspace_id}/retire", command(h.retireWorkspace))
 
 	api.HandleFunc("GET /v1/invitations", h.listInvitations)
-	api.HandleFunc("POST /v1/invitations", h.issueInvitation)
+	api.HandleFunc("POST /v1/invitations", command(h.issueInvitation))
 	api.HandleFunc("GET /v1/invitations/{invitation_id}", h.getInvitation)
-	api.HandleFunc("POST /v1/invitations/{invitation_id}/revoke", h.revokeInvitation)
-	api.HandleFunc("POST /v1/invitations/accept", h.acceptInvitation)
+	api.HandleFunc("POST /v1/invitations/{invitation_id}/revoke", command(h.revokeInvitation))
+	api.HandleFunc("POST /v1/invitations/accept", command(h.acceptInvitation))
 
 	// Provider-scoped.
-	api.HandleFunc("POST /v1/invitations/verify-identity", h.recordVerifiedIdentity)
+	api.HandleFunc("POST /v1/invitations/verify-identity", command(h.recordVerifiedIdentity))
 	api.HandleFunc("POST /v1/invitations/expire-lapsed", h.expireLapsedInvitations)
 
 	api.HandleFunc("GET /v1/organizations", h.listOrganizations)
-	api.HandleFunc("POST /v1/organizations", h.registerOrganization)
+	api.HandleFunc("POST /v1/organizations", command(h.registerOrganization))
 	api.HandleFunc("GET /v1/organizations/{organization_id}", h.getOrganization)
-	api.HandleFunc("POST /v1/organizations/{organization_id}/suspend", h.suspendOrganization)
-	api.HandleFunc("POST /v1/organizations/{organization_id}/restore", h.restoreOrganization)
-	api.HandleFunc("POST /v1/organizations/{organization_id}/retire", h.retireOrganization)
+	api.HandleFunc("POST /v1/organizations/{organization_id}/suspend", command(h.suspendOrganization))
+	api.HandleFunc("POST /v1/organizations/{organization_id}/restore", command(h.restoreOrganization))
+	api.HandleFunc("POST /v1/organizations/{organization_id}/retire", command(h.retireOrganization))
 
 	api.HandleFunc("GET /v1/tenants", h.listTenants)
-	api.HandleFunc("POST /v1/tenants", h.requestTenant)
+	api.HandleFunc("POST /v1/tenants", command(h.requestTenant))
 	api.HandleFunc("GET /v1/tenants/{tenant_id}", h.getTenant)
-	api.HandleFunc("POST /v1/tenants/{tenant_id}/activate", h.activateTenant)
-	api.HandleFunc("POST /v1/tenants/{tenant_id}/suspend", h.suspendTenant)
-	api.HandleFunc("POST /v1/tenants/{tenant_id}/restore", h.restoreTenant)
+	api.HandleFunc("POST /v1/tenants/{tenant_id}/activate", command(h.activateTenant))
+	api.HandleFunc("POST /v1/tenants/{tenant_id}/suspend", command(h.suspendTenant))
+	api.HandleFunc("POST /v1/tenants/{tenant_id}/restore", command(h.restoreTenant))
 
 	// Who administers a Tenant (ADR-ORG-003). Provider routes: the Tenant in the path is the one a
 	// provider acts in, never a tenant caller's.
 	api.HandleFunc("GET /v1/tenants/{tenant_id}/administrators", h.listTenantAdministrators)
-	api.HandleFunc("POST /v1/tenants/{tenant_id}/administrators", h.grantTenantAdministrator)
-	api.HandleFunc("POST /v1/tenants/{tenant_id}/administrators/{grant_id}/revoke", h.revokeTenantAdministrator)
+	api.HandleFunc("POST /v1/tenants/{tenant_id}/administrators", command(h.grantTenantAdministrator))
+	api.HandleFunc("POST /v1/tenants/{tenant_id}/administrators/{grant_id}/revoke", command(h.revokeTenantAdministrator))
 
 	// The provisioning correlation surface.
 	//
@@ -233,44 +237,44 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// mandates realized-status correlation, gives this service no inbound transport but HTTP, and
 	// `POST /v1/offboardings/{id}/deprovisioning` already reports the other direction's outcome the
 	// same way. These mirror it.
-	api.HandleFunc("POST /v1/tenants/{tenant_id}/provisioning", h.provisionTenant)
+	api.HandleFunc("POST /v1/tenants/{tenant_id}/provisioning", command(h.provisionTenant))
 	api.HandleFunc("POST /v1/provisioning/realized", h.realizeProvisioning)
 	api.HandleFunc("POST /v1/provisioning/failed", h.failProvisioning)
 	api.HandleFunc("POST /v1/provisioning/sweep-unresolved", h.sweepProvisioning)
 
 	api.HandleFunc("GET /v1/offboardings", h.listOffboardings)
-	api.HandleFunc("POST /v1/offboardings", h.beginOffboarding)
+	api.HandleFunc("POST /v1/offboardings", command(h.beginOffboarding))
 	api.HandleFunc("GET /v1/offboardings/{offboarding_id}", h.getOffboarding)
-	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/freeze", h.freezeOffboarding)
-	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/complete-freeze", h.completeFreeze)
-	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/release", h.releaseOffboarding)
-	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/retire", h.retireOffboarding)
-	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/cancel", h.cancelOffboarding)
-	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/legal-hold", h.setLegalHold)
-	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/obligations", h.raiseObligation)
+	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/freeze", command(h.freezeOffboarding))
+	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/complete-freeze", command(h.completeFreeze))
+	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/release", command(h.releaseOffboarding))
+	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/retire", command(h.retireOffboarding))
+	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/cancel", command(h.cancelOffboarding))
+	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/legal-hold", command(h.setLegalHold))
+	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/obligations", command(h.raiseObligation))
 	api.HandleFunc("GET /v1/offboardings/{offboarding_id}/obligations", h.outstandingObligations)
 	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/deprovisioning", h.recordDeprovisioning)
-	api.HandleFunc("POST /v1/obligations/{obligation_id}/resolve", h.resolveObligation)
+	api.HandleFunc("POST /v1/obligations/{obligation_id}/resolve", command(h.resolveObligation))
 
 	api.HandleFunc("GET /v1/provider-grants", h.listProviderGrants)
-	api.HandleFunc("POST /v1/provider-grants", h.grantProvider)
-	api.HandleFunc("POST /v1/provider-grants/{grant_id}/revoke", h.revokeProvider)
+	api.HandleFunc("POST /v1/provider-grants", command(h.grantProvider))
+	api.HandleFunc("POST /v1/provider-grants/{grant_id}/revoke", command(h.revokeProvider))
 	api.HandleFunc("GET /v1/provider-grants:emergency-validation", h.emergencyValidation)
 
 	// The routes an eligible caller reaches, and the only ones (ADR-ORG-002).
 	api.HandleFunc("GET /v1/provider-activations", h.listProviderActivations)
-	api.HandleFunc("POST /v1/provider-activations", h.requestProviderActivation)
+	api.HandleFunc("POST /v1/provider-activations", command(h.requestProviderActivation))
 	// The caller's own grants, so an eligible holder learns the grant_id it can activate. A literal
 	// segment, and GET: it cannot collide with the POST {activation_id} routes below.
 	api.HandleFunc("GET /v1/provider-activations/grants", h.listHeldProviderGrants)
-	api.HandleFunc("POST /v1/provider-activations/{activation_id}/approve", h.approveProviderActivation)
-	api.HandleFunc("POST /v1/provider-activations/{activation_id}/deny", h.denyProviderActivation)
-	api.HandleFunc("POST /v1/provider-activations/{activation_id}/end", h.endProviderActivation)
+	api.HandleFunc("POST /v1/provider-activations/{activation_id}/approve", command(h.approveProviderActivation))
+	api.HandleFunc("POST /v1/provider-activations/{activation_id}/deny", command(h.denyProviderActivation))
+	api.HandleFunc("POST /v1/provider-activations/{activation_id}/end", command(h.endProviderActivation))
 
 	api.HandleFunc("GET /v1/projections/consumers", h.listConsumers)
-	api.HandleFunc("POST /v1/projections/consumers", h.registerConsumer)
+	api.HandleFunc("POST /v1/projections/consumers", command(h.registerConsumer))
 	api.HandleFunc("GET /v1/projections/consumers/{consumer_id}", h.getConsumer)
-	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/retire", h.retireConsumer)
+	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/retire", command(h.retireConsumer))
 	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/progress", h.recordProgress)
 	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/bootstrap", h.bootstrapConsumer)
 	api.HandleFunc("POST /v1/projections/snapshot", h.snapshot)

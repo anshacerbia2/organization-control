@@ -166,8 +166,16 @@ func post(t *testing.T, handler http.Handler, path, body string, headers map[str
 
 	var reader io.Reader = strings.NewReader(body)
 	request := httptest.NewRequest(http.MethodPost, path, reader)
+	// Every command requires an Idempotency-Key, and a test asserting a later refusal must not be
+	// answered by the missing key instead. A test about the key itself names IdempotencyHeader in
+	// headers, with "" to send none.
+	if _, named := headers[IdempotencyHeader]; !named {
+		request.Header.Set(IdempotencyHeader, mustID(t).String())
+	}
 	for name, value := range headers {
-		request.Header.Set(name, value)
+		if value != "" {
+			request.Header.Set(name, value)
+		}
 	}
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
