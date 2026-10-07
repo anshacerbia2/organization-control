@@ -695,3 +695,85 @@ func TestAnEmergencyGrantsUseIsRecordedAndNeverRefused(t *testing.T) {
 		t.Errorf("the failure was not reported: %s", logs.String())
 	}
 }
+
+func authenticatedWith(t *testing.T, s signer, cfg AuthenticationConfig, token, method, path string) (Caller, bool, *httptest.ResponseRecorder) {
+	t.Helper()
+	middleware, err := Authenticate(s.verifier(t), cfg)
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	var (
+		seen   Caller
+		called bool
+	)
+	handler := middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen, called = CallerFrom(r.Context())
+	}))
+	request := httptest.NewRequest(method, path, nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return seen, called, recorder
+}
+
+// A person reads their own contexts with any human token, and with it reaches nothing else
+// (ADR-ORG-005 §5.1, TDD-organization-control-001 1.17.0 §Caller Authority).
+func TestASelfCallerReachesOnlyItsOwnContexts(t *testing.T) {
+	s := newSigner(t)
+	nobody := id.MustParse("01a0f64a-c533-7000-a956-c3f095484a20")
+	holder := id.MustParse("01a0f64a-c533-7000-a956-c3f095484a21")
+	records := testRecords()
+	records.eligible = map[id.UUID]bool{holder: true}
+	cfg := AuthenticationConfig{Records: records, Consumers: true}
+	own := func(principal id.UUID) string { return "/v1/principals/" + principal.String() + "/contexts" }
+
+	for name, tc := range map[string]struct {
+		principal id.UUID
+		claims    map[string]any
+	}{
+		"a person with no Tenant and no grant": {nobody, providerClaims(nobody)},
+		"a person whose token names a Tenant":  {nobody, tenantClaims(nobody, testTenant)},
+		"a Tenant administrator":               {testAdministrator, tenantClaims(testAdministrator, testTenant)},
+		"a provider":                           {testProvider, providerClaims(testProvider)},
+		"an eligible provider":                 {holder, providerClaims(holder)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			before := records.reads
+			caller, called, recorder := authenticatedWith(t, s, cfg, s.sign(t, tc.claims), http.MethodGet, own(tc.principal))
+			if !called || !caller.Self || caller.Subject != tc.principal || caller.Provider || caller.Eligible ||
+				!caller.Tenant.IsNil() || caller.Consumer != "" {
+				t.Fatalf("resolved to %+v (called %t, status %d), want a self caller for %s",
+					caller, called, recorder.Code, tc.principal)
+			}
+			if records.reads != before {
+				t.Errorf("a self caller read %d records, want none", records.reads-before)
+			}
+		})
+	}
+
+	person := s.sign(t, providerClaims(nobody))
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, own(testProvider)},
+		{http.MethodPost, own(nobody)},
+		{http.MethodGet, own(nobody) + "/"},
+		{http.MethodGet, "/v1/principals/" + nobody.String()},
+		{http.MethodGet, "/v1/principals/" + nobody.String() + "/x/contexts"},
+		{http.MethodGet, "/v1/tenants"},
+	} {
+		if _, called, recorder := authenticatedWith(t, s, cfg, person, tc.method, tc.path); called ||
+			recorder.Code != http.StatusForbidden {
+			t.Errorf("%s %s: a person with no Tenant and no grant reached the handler (called %t, status %d), want 403",
+				tc.method, tc.path, called, recorder.Code)
+		}
+	}
+
+	caller, called, _ := authenticatedWith(t, s, cfg, s.sign(t, providerClaims(testProvider)), http.MethodGet, own(nobody))
+	if !called || caller.Self || !caller.Provider {
+		t.Errorf("a provider reading another person's contexts resolved to %+v, want a provider", caller)
+	}
+	caller, called, _ = authenticatedWith(t, s, cfg, s.sign(t, consumerClaims(testConsumerWorkload)), http.MethodGet,
+		own(testConsumerWorkload))
+	if !called || caller.Self || caller.Consumer == "" {
+		t.Errorf("a workload on its own principal_id resolved to %+v, want the consumer it is", caller)
+	}
+}

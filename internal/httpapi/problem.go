@@ -157,6 +157,9 @@ var mapping = []struct {
 	{offboarding.ErrAmbiguousOutcome, platform.PreconditionUnmet},
 	{offboarding.ErrWrongDomain, platform.Forbidden},
 	{offboarding.ErrAlreadyResolved, platform.StateTransitionRefused},
+	// StateTransitionRefused: the offboarding is well formed and can never be cancelled, because it
+	// began before the freeze recorded what to restore. The detail says so.
+	{offboarding.ErrNotReversible, platform.StateTransitionRefused},
 
 	// Projection.
 	{projection.ErrNotRegistered, platform.Forbidden},

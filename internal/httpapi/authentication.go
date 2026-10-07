@@ -20,6 +20,34 @@ func activationRoute(path string) bool {
 	return path == "/v1/provider-activations" || strings.HasPrefix(path, "/v1/provider-activations/")
 }
 
+// contextsPrefix and contextsSuffix bound the one route a self caller reaches.
+const (
+	contextsPrefix = "/v1/principals/"
+	contextsSuffix = "/contexts"
+)
+
+// selfTarget reports the principal_id a request reads the contexts of, when it is the context list
+// route: GET /v1/principals/{principal_id}/contexts, exactly (ADR-ORG-005 §5.1). Any other method,
+// path or segment count is not the route, and the caller is authorized as on every other route.
+func selfTarget(r *http.Request) (id.UUID, bool) {
+	if r.Method != http.MethodGet {
+		return id.UUID{}, false
+	}
+	rest, ok := strings.CutPrefix(r.URL.Path, contextsPrefix)
+	if !ok {
+		return id.UUID{}, false
+	}
+	segment, ok := strings.CutSuffix(rest, contextsSuffix)
+	if !ok || segment == "" || strings.Contains(segment, "/") {
+		return id.UUID{}, false
+	}
+	principal, err := id.Parse(segment)
+	if err != nil || principal.IsNil() {
+		return id.UUID{}, false
+	}
+	return principal, true
+}
+
 // TokenVerifier is the one thing authentication needs from a token library.
 //
 // An interface rather than *verify.Verifier so this package can be tested without an RSA key set or
@@ -163,7 +191,16 @@ func Authenticate(verifier TokenVerifier, cfg AuthenticationConfig) (Middleware,
 				return
 			}
 
-			caller, err := authorize(r.Context(), presented, cfg)
+			var caller Caller
+			// A person reading their own contexts is admitted with no record read: the route reaches
+			// only their own rows, so no grant, Membership or Tenant has to be established first
+			// (ADR-ORG-005 §5.1). Anyone else on the route, and this person on any other, is
+			// authorized below as before.
+			if target, ok := selfTarget(r); ok && !presented.workload && target == presented.principal {
+				caller = Caller{Subject: presented.principal, Self: true}
+			} else {
+				caller, err = authorize(r.Context(), presented, cfg)
+			}
 			switch {
 			case errors.Is(err, errRecords):
 				// The records could not be read. Nobody is admitted: a provider let through because

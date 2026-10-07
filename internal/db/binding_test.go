@@ -59,7 +59,7 @@ func TestScopeBindingLivesInExactlyOnePackage(t *testing.T) {
 		}
 		text := string(body)
 		if !strings.Contains(text, "app.tenant_id") && !strings.Contains(text, "app.provider_scope") &&
-			!strings.Contains(text, "app.acting_provider") {
+			!strings.Contains(text, "app.acting_provider") && !strings.Contains(text, "app.principal_id") {
 			return nil
 		}
 		relative, relErr := filepath.Rel(root, path)
@@ -585,5 +585,66 @@ func TestATenantReadBindsTheTenantAlone(t *testing.T) {
 	if err := db.WithTenantRead(db.WithScope(context.Background(), providerScope), pool,
 		func(context.Context, db.Tx) error { return nil }); !errors.Is(err, db.ErrWrongScope) {
 		t.Errorf("a provider scope: %v, want ErrWrongScope", err)
+	}
+}
+
+// TestASelfReadBindsThePrincipalAlone: the self read is read-only, becomes the self role before it
+// binds anything, binds app.principal_id to the scope's actor and nothing else, and writes no
+// privileged-access record. Every other entry point refuses a self scope, and the self pool refuses
+// every other scope (ADR-ORG-005 §5.1).
+func TestASelfReadBindsThePrincipalAlone(t *testing.T) {
+	principal := mustUUID(t)
+	scope, err := db.SelfScope(principal, mustUUID(t))
+	if err != nil {
+		t.Fatalf("SelfScope: %v", err)
+	}
+	ctx := db.WithScope(context.Background(), scope)
+	source := &fakeTx{}
+	pool, _ := db.NewSelfPool(source)
+	if err := db.WithSelfRead(ctx, pool, func(context.Context, db.Tx) error { return nil }); err != nil {
+		t.Fatalf("WithSelfRead: %v", err)
+	}
+	if got := source.bound(); len(got) != 1 || got[0] != "app.principal_id" {
+		t.Errorf("bound settings = %v, want [app.principal_id]", got)
+	}
+	calls := source.tx.Calls()
+	if len(calls) < 3 || !strings.Contains(calls[0].SQL, "READ ONLY") ||
+		calls[1].SQL != "SET LOCAL ROLE organization_self_rt" {
+		t.Fatalf("statements %v, want read-only, then the self role, then the binding", calls)
+	}
+	found := false
+	for _, arg := range calls[2].Args {
+		if value, ok := arg.(string); ok && value == principal.String() {
+			found = true
+		}
+	}
+	if !found || strings.Contains(calls[2].SQL, principal.String()) {
+		t.Errorf("the binding %q %v does not carry the principal as a parameter", calls[2].SQL, calls[2].Args)
+	}
+
+	tenantSource := &fakeTx{}
+	tenants, _ := db.NewTenantPool(tenantSource)
+	rec := &recorder{}
+	provider, _ := db.NewProviderPool(&fakeTx{}, rec)
+	body := func(context.Context, db.Tx) error { return nil }
+	for name, open := range map[string]func() error{
+		"WithTenantScope":   func() error { return db.WithTenantScope(ctx, tenants, body) },
+		"WithTenantRead":    func() error { return db.WithTenantRead(ctx, tenants, body) },
+		"WithProviderScope": func() error { return db.WithProviderScope(ctx, provider, "a reason", body) },
+	} {
+		if err := open(); !errors.Is(err, db.ErrWrongScope) {
+			t.Errorf("%s with a self scope: error = %v, want ErrWrongScope", name, err)
+		}
+	}
+	if tenantSource.opened != 0 || len(rec.calls) != 0 {
+		t.Errorf("a refused self scope opened %d transactions and recorded %d accesses", tenantSource.opened, len(rec.calls))
+	}
+
+	tenantScope, _ := db.TenantScope(mustUUID(t), mustUUID(t), mustUUID(t))
+	providerScope, _ := db.ProviderScope(mustUUID(t), mustUUID(t))
+	for _, other := range []db.Scope{tenantScope, providerScope} {
+		if err := db.WithSelfRead(db.WithScope(context.Background(), other), pool, body); !errors.Is(err, db.ErrWrongScope) {
+			t.Errorf("WithSelfRead with %+v: error = %v, want ErrWrongScope", other, err)
+		}
 	}
 }

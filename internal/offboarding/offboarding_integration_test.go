@@ -187,6 +187,7 @@ func (f *fixture) seed(t *testing.T, memberCount int) (id.UUID, []id.UUID) {
 		f.exec(t, `DELETE FROM platform.outbox WHERE aggregate_id IN (
 		    SELECT membership_id FROM membership.membership WHERE tenant_id = $1)`, tenantID.String())
 		f.exec(t, `DELETE FROM platform.outbox WHERE aggregate_id = $1`, tenantID.String())
+		f.exec(t, `DELETE FROM membership.offboarding_freeze WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM operation.offboarding_obligation WHERE tenant_id = $1`, tenantID.String())
 		f.exec(t, `DELETE FROM platform.outbox WHERE aggregate_id IN (
 		    SELECT offboarding_id FROM operation.offboarding WHERE tenant_id = $1)`, tenantID.String())
@@ -256,13 +257,26 @@ func (f *fixture) begin(t *testing.T, tenantID id.UUID, hold bool) Offboarding {
 	return record
 }
 
+// offboardingOf reads the Tenant's most recently begun offboarding, on the owner connection.
+func (f *fixture) offboardingOf(t *testing.T, tenantID id.UUID) id.UUID {
+	t.Helper()
+	var raw string
+	if err := f.setup.InTx(f.providerCtx, func(ctx context.Context, tx fdb.Tx) error {
+		return tx.QueryRow(ctx, `SELECT offboarding_id::text FROM operation.offboarding
+		    WHERE tenant_id = $1 ORDER BY started_at DESC, offboarding_id DESC LIMIT 1`, tenantID.String()).Scan(&raw)
+	}); err != nil {
+		t.Fatalf("reading the Tenant's offboarding: %v", err)
+	}
+	return id.MustParse(raw)
+}
+
 // freezeAll drains the freeze in batches, the way a worker does.
 func (f *fixture) freezeAll(t *testing.T, tenantID id.UUID, size int) int {
 	t.Helper()
 	ctx := f.providerCtx
 	total := 0
 	for round := 0; round < 100; round++ {
-		frozen, err := f.service.FreezeBatch(ctx, tenantID, size, "offboarding suite freeze")
+		frozen, err := f.service.FreezeBatch(ctx, f.offboardingOf(t, tenantID), tenantID, size, "offboarding suite freeze")
 		if err != nil {
 			t.Fatalf("FreezeBatch round %d: %v", round, err)
 		}
@@ -324,7 +338,7 @@ func TestTheFreezeIsResumableAndSuspendsEveryMembership(t *testing.T) {
 	f.begin(t, tenantID, false)
 
 	// One batch of two, simulating a worker that stopped after the first batch.
-	first, err := f.service.FreezeBatch(f.providerCtx, tenantID, 2, "offboarding suite freeze")
+	first, err := f.service.FreezeBatch(f.providerCtx, f.offboardingOf(t, tenantID), tenantID, 2, "offboarding suite freeze")
 	if err != nil {
 		t.Fatalf("FreezeBatch: %v", err)
 	}
@@ -363,7 +377,7 @@ func TestCompleteFreezeCountsRatherThanTrustingTheCaller(t *testing.T) {
 	tenantID, _ := f.seed(t, 3)
 	record := f.begin(t, tenantID, false)
 
-	if _, err := f.service.FreezeBatch(f.providerCtx, tenantID, 1, "offboarding suite freeze"); err != nil {
+	if _, err := f.service.FreezeBatch(f.providerCtx, f.offboardingOf(t, tenantID), tenantID, 1, "offboarding suite freeze"); err != nil {
 		t.Fatalf("FreezeBatch: %v", err)
 	}
 	if _, err := f.service.CompleteFreeze(f.providerCtx, record.OffboardingID); err == nil {
@@ -1029,7 +1043,7 @@ func TestTheViewCarriesEachStageEntryAndWhatTheGatesRead(t *testing.T) {
 		t.Errorf("begin stamped a later stage: %+v", begun)
 	}
 
-	if _, err := f.service.FreezeBatch(f.providerCtx, tenantID, 1, "offboarding suite freeze"); err != nil {
+	if _, err := f.service.FreezeBatch(f.providerCtx, f.offboardingOf(t, tenantID), tenantID, 1, "offboarding suite freeze"); err != nil {
 		t.Fatalf("FreezeBatch: %v", err)
 	}
 	partial, err := f.service.Get(f.providerCtx, begun.OffboardingID)
@@ -1248,5 +1262,208 @@ func TestTheOffboardingListIsAKeysetPage(t *testing.T) {
 	}
 	if _, err := f.service.List(f.providerCtx, ListQuery{}, ""); !errors.Is(err, db.ErrReasonRequired) {
 		t.Errorf("a page without a reason: error = %v, want db.ErrReasonRequired", err)
+	}
+}
+
+// membershipStatus reads one Membership's status and version on the owner connection.
+func (f *fixture) membershipStatus(t *testing.T, membershipID id.UUID) (string, int64) {
+	t.Helper()
+	var status string
+	var version int64
+	if err := f.setup.InTx(f.providerCtx, func(ctx context.Context, tx fdb.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status, membership_version FROM membership.membership
+		    WHERE membership_id = $1`, membershipID.String()).Scan(&status, &version)
+	}); err != nil {
+		t.Fatalf("read membership: %v", err)
+	}
+	return status, version
+}
+
+// TestACancellationRestoresWhatTheOffboardingRemovedAndNothingElse is ADR-ORG-006 §5.2: in
+// obligations, the Tenant returns to active with its security version incremented and the restored
+// event published, the Memberships the freeze suspended are restored with an event each, the one
+// suspended before the offboarding stays suspended, open obligations close as cancelled and settled
+// ones keep their record, and who, why and when are recorded.
+func TestACancellationRestoresWhatTheOffboardingRemovedAndNothingElse(t *testing.T) {
+	f := newFixture(t)
+	tenantID, members := f.seed(t, 4)
+	// Suspended for its own reason before the offboarding began.
+	f.exec(t, `UPDATE membership.membership SET status = 'suspended', membership_version = 2
+	    WHERE membership_id = $1`, members[0].String())
+
+	begun := f.begin(t, tenantID, false)
+	if begun.PriorStatus != "active" {
+		t.Fatalf("prior_status = %q, want active", begun.PriorStatus)
+	}
+	f.freezeAll(t, tenantID, 2)
+	if _, err := f.service.CompleteFreeze(f.providerCtx, begun.OffboardingID); err != nil {
+		t.Fatalf("CompleteFreeze: %v", err)
+	}
+	open, err := f.service.Raise(f.providerCtx, RaiseRequest{OffboardingID: begun.OffboardingID, Domain: "product", Type: "data-export"})
+	if err != nil {
+		t.Fatalf("Raise: %v", err)
+	}
+	done, err := f.service.Raise(f.providerCtx, RaiseRequest{OffboardingID: begun.OffboardingID, Domain: "billing", Type: "final-invoice"})
+	if err != nil {
+		t.Fatalf("Raise: %v", err)
+	}
+	if _, err := f.service.Resolve(f.providerCtx, Resolution{ObligationID: done.ObligationID, Domain: "billing",
+		State: ObligationCompleted}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	before, err := f.service.Get(f.providerCtx, begun.OffboardingID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if before.FrozenMemberships != 3 || before.RestorePending != 0 {
+		t.Errorf("before cancelling: frozen %d, pending %d; want 3 and 0", before.FrozenMemberships, before.RestorePending)
+	}
+	_, version, securityVersion := f.tenantRow(t, tenantID)
+
+	cancelled, err := f.service.Cancel(f.providerCtx, CancelRequest{
+		OffboardingID: begun.OffboardingID, ExpectedVersion: version, Reason: "begun by mistake"})
+	if err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if cancelled.Stage != StageCancelled || cancelled.CancelledBy == nil || cancelled.CancelledAt == nil ||
+		cancelled.CancelReason == nil || *cancelled.CancelReason != "begun by mistake" || cancelled.RestorePending != 0 {
+		t.Errorf("the cancelled offboarding reads %+v", cancelled)
+	}
+	status, _, after := f.tenantRow(t, tenantID)
+	if status != "active" || after != securityVersion+1 {
+		t.Errorf("the Tenant is %s at security version %d, want active at %d", status, after, securityVersion+1)
+	}
+	if got := f.eventCount(t, "com.scnehaux.organization.tenant.security.restored", tenantID); got != 1 {
+		t.Errorf("tenant.security.restored published %d times, want 1", got)
+	}
+	if got := f.eventCount(t, "com.scnehaux.organization.tenant.offboarding.cancelled", begun.OffboardingID); got != 1 {
+		t.Errorf("offboarding.cancelled published %d times, want 1", got)
+	}
+	if status, _ := f.membershipStatus(t, members[0]); status != "suspended" {
+		t.Errorf("the Membership suspended before the offboarding is %s, want suspended", status)
+	}
+	for _, m := range members[1:] {
+		if status, version := f.membershipStatus(t, m); status != "active" || version != 3 {
+			t.Errorf("frozen Membership %s is %s at version %d, want active at 3", m, status, version)
+		}
+		if got := f.eventCount(t, "com.scnehaux.organization.membership.lifecycle.restored", m); got != 1 {
+			t.Errorf("Membership %s published %d restored events, want 1", m, got)
+		}
+	}
+
+	board, err := f.service.Board(f.providerCtx, begun.OffboardingID)
+	if err != nil {
+		t.Fatalf("Board: %v", err)
+	}
+	for _, o := range board.Obligations {
+		switch o.ObligationID {
+		case open.ObligationID:
+			if o.State != ObligationCancelled || o.ResolvedBy == nil || o.ResolvedAt == nil {
+				t.Errorf("the open obligation reads %+v, want cancelled with who and when", o)
+			}
+		case done.ObligationID:
+			if o.State != ObligationCompleted {
+				t.Errorf("the completed obligation reads %s, want completed", o.State)
+			}
+		}
+	}
+
+	// Terminal: a second cancel resumes nothing and changes nothing; the freeze, an advance, a hold,
+	// an obligation and a resolution are refused.
+	again, err := f.service.Cancel(f.providerCtx, CancelRequest{
+		OffboardingID: begun.OffboardingID, ExpectedVersion: 1, Reason: "again"})
+	if err != nil || again.Stage != StageCancelled || *again.CancelReason != "begun by mistake" {
+		t.Errorf("a repeated cancel: %+v, %v; want the same cancellation", again, err)
+	}
+	if _, _, v := f.tenantRow(t, tenantID); v != after {
+		t.Errorf("a repeated cancel moved the security version to %d", v)
+	}
+	if _, err := f.service.FreezeBatch(f.providerCtx, begun.OffboardingID, tenantID, 10, "x"); !errors.Is(err, ErrStageRefused) {
+		t.Errorf("a freeze after cancelling: error = %v, want ErrStageRefused", err)
+	}
+	if _, err := f.service.Release(f.providerCtx, begun.OffboardingID); !errors.Is(err, ErrStageRefused) {
+		t.Errorf("a release after cancelling: error = %v, want ErrStageRefused", err)
+	}
+	if _, err := f.service.SetLegalHold(f.providerCtx, begun.OffboardingID, true, "x"); !errors.Is(err, ErrStageRefused) {
+		t.Errorf("a legal hold after cancelling: error = %v, want ErrStageRefused", err)
+	}
+	if _, err := f.service.Resolve(f.providerCtx, Resolution{ObligationID: open.ObligationID, Domain: "product",
+		State: ObligationCompleted}); !errors.Is(err, ErrAlreadyResolved) {
+		t.Errorf("resolving a cancelled obligation: error = %v, want ErrAlreadyResolved", err)
+	}
+}
+
+// TestACancellationReturnsASuspendedTenantToSuspended: a suspension in force before the offboarding
+// stays in force, published as tenant.security.suspended with the version incremented, and a freeze
+// interrupted part way restores only what it suspended.
+func TestACancellationReturnsASuspendedTenantToSuspended(t *testing.T) {
+	f := newFixture(t)
+	tenantID, members := f.seed(t, 3)
+	f.exec(t, `UPDATE tenant.tenant SET status = 'suspended', suspended_at = now() WHERE tenant_id = $1`, tenantID.String())
+
+	begun := f.begin(t, tenantID, false)
+	if begun.PriorStatus != "suspended" {
+		t.Fatalf("prior_status = %q, want suspended", begun.PriorStatus)
+	}
+	if _, err := f.service.FreezeBatch(f.providerCtx, begun.OffboardingID, tenantID, 2, "a partial freeze"); err != nil {
+		t.Fatalf("FreezeBatch: %v", err)
+	}
+	_, version, securityVersion := f.tenantRow(t, tenantID)
+	suspendedBefore := f.eventCount(t, "com.scnehaux.organization.tenant.security.suspended", tenantID)
+
+	if _, err := f.service.Cancel(f.providerCtx, CancelRequest{
+		OffboardingID: begun.OffboardingID, ExpectedVersion: version + 1, Reason: "stale"}); !errors.Is(err, tenant.ErrVersionMismatch) {
+		t.Fatalf("a stale version: error = %v, want tenant.ErrVersionMismatch", err)
+	}
+	cancelled, err := f.service.Cancel(f.providerCtx, CancelRequest{
+		OffboardingID: begun.OffboardingID, ExpectedVersion: version, Reason: "begun by mistake"})
+	if err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	status, _, after := f.tenantRow(t, tenantID)
+	if status != "suspended" || after != securityVersion+1 {
+		t.Errorf("the Tenant is %s at %d, want suspended at %d", status, after, securityVersion+1)
+	}
+	if got := f.eventCount(t, "com.scnehaux.organization.tenant.security.suspended", tenantID); got != suspendedBefore+1 {
+		t.Errorf("tenant.security.suspended published %d more times, want 1", got-suspendedBefore)
+	}
+	if cancelled.FrozenMemberships != 2 || f.activeMembers(t, tenantID) != 3 {
+		t.Errorf("frozen %d, active %d; want the 2 frozen restored and the third never touched",
+			cancelled.FrozenMemberships, f.activeMembers(t, tenantID))
+	}
+	_ = members
+}
+
+// TestACancellationIsRefusedAfterReleaseAndForAnUnrecordedOffboarding: release is irreversible, and
+// an offboarding begun before prior_status existed has nothing recorded to restore. Neither refusal
+// changes anything.
+func TestACancellationIsRefusedAfterReleaseAndForAnUnrecordedOffboarding(t *testing.T) {
+	f := newFixture(t)
+	tenantID, _ := f.seed(t, 1)
+	begun := f.begin(t, tenantID, false)
+	f.freezeAll(t, tenantID, 10)
+	if _, err := f.service.CompleteFreeze(f.providerCtx, begun.OffboardingID); err != nil {
+		t.Fatalf("CompleteFreeze: %v", err)
+	}
+	if _, err := f.service.Release(f.providerCtx, begun.OffboardingID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	_, version, _ := f.tenantRow(t, tenantID)
+	if _, err := f.service.Cancel(f.providerCtx, CancelRequest{
+		OffboardingID: begun.OffboardingID, ExpectedVersion: version, Reason: "too late"}); !errors.Is(err, ErrStageRefused) {
+		t.Errorf("cancelling in release: error = %v, want ErrStageRefused", err)
+	}
+
+	legacyTenant, _ := f.seed(t, 1)
+	legacy := f.begin(t, legacyTenant, false)
+	f.exec(t, `UPDATE operation.offboarding SET prior_status = NULL WHERE offboarding_id = $1`, legacy.OffboardingID.String())
+	status, version, _ := f.tenantRow(t, legacyTenant)
+	if _, err := f.service.Cancel(f.providerCtx, CancelRequest{
+		OffboardingID: legacy.OffboardingID, ExpectedVersion: version, Reason: "legacy"}); !errors.Is(err, ErrNotReversible) {
+		t.Errorf("cancelling an unrecorded offboarding: error = %v, want ErrNotReversible", err)
+	}
+	if after, _, _ := f.tenantRow(t, legacyTenant); after != status {
+		t.Errorf("a refused cancellation moved the Tenant from %s to %s", status, after)
 	}
 }

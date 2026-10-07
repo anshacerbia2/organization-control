@@ -773,3 +773,67 @@ func TestTheSingleReadCountsAndFindsTheOffboarding(t *testing.T) {
 		t.Errorf("an absent Tenant: error = %v, want ErrNotFound", err)
 	}
 }
+
+// TestTheSingleReadCarriesTheLatestProvisioningRequest is TDD-organization-control-003 1.8.0: the
+// single read carries the latest provisioning-direction request with its state, detail and resolution
+// instant, `unresolved` included; a newer deprovisioning command is not read as one; and a Tenant with
+// no request reads nil.
+func TestTheSingleReadCarriesTheLatestProvisioningRequest(t *testing.T) {
+	f := newFixture(t)
+	seeded := f.seed(t, StateProvisioning, "active")
+
+	detail, err := f.service.Detail(f.ctx, seeded.TenantID)
+	if err != nil {
+		t.Fatalf("Detail: %v", err)
+	}
+	if detail.Provisioning != nil {
+		t.Fatalf("provisioning = %+v with no request recorded, want nil", detail.Provisioning)
+	}
+
+	insert := func(state, operation string, detail *string, requestedAt time.Time, resolvedAt *time.Time) (id.UUID, id.UUID) {
+		requestID, correlationID := mustID(t), mustID(t)
+		f.exec(t, `INSERT INTO tenant.provisioning_request
+		    (request_id, tenant_id, desired_profile, state, correlation_id, requested_at, resolved_at, detail)
+		VALUES ($1, $2, jsonb_build_object('operation', $3::text), $4, $5, $6, $7, $8)`,
+			requestID.String(), seeded.TenantID.String(), operation, state, correlationID.String(),
+			requestedAt, resolvedAt, detail)
+		return requestID, correlationID
+	}
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	refused, failedAt := "the region is full", base.Add(-time.Hour)
+	insert("failed", "provision", &refused, base.Add(-2*time.Hour), &failedAt)
+
+	note, sweptAt := "no realized status within the provisioning timeout", base.Add(-time.Minute)
+	requestID, correlationID := insert("unresolved", "provision", &note, base.Add(-30*time.Minute), &sweptAt)
+	// Newer, and offboarding's: not a provisioning request.
+	insert("requested", "deprovision", nil, base, nil)
+
+	detail, err = f.service.Detail(f.ctx, seeded.TenantID)
+	if err != nil {
+		t.Fatalf("Detail: %v", err)
+	}
+	got := detail.Provisioning
+	if got == nil {
+		t.Fatal("provisioning = nil with three requests recorded")
+	}
+	if got.RequestID != requestID || got.CorrelationID != correlationID || got.State != RequestUnresolved {
+		t.Errorf("provisioning = %+v; want the unresolved retry %s", got, requestID)
+	}
+	if got.Detail == nil || *got.Detail != note {
+		t.Errorf("detail = %v, want %q", got.Detail, note)
+	}
+	if !got.RequestedAt.Equal(base.Add(-30*time.Minute)) || got.ResolvedAt == nil || !got.ResolvedAt.Equal(sweptAt) {
+		t.Errorf("requested_at %s, resolved_at %v; want %s and %s",
+			got.RequestedAt, got.ResolvedAt, base.Add(-30*time.Minute), sweptAt)
+	}
+
+	pending, _ := insert("requested", "provision", nil, base.Add(time.Minute), nil)
+	detail, err = f.service.Detail(f.ctx, seeded.TenantID)
+	if err != nil {
+		t.Fatalf("Detail: %v", err)
+	}
+	if got := detail.Provisioning; got == nil || got.RequestID != pending || got.State != RequestRequested ||
+		got.Detail != nil || got.ResolvedAt != nil {
+		t.Errorf("a pending request reads %+v; want %s, requested, no detail, not resolved", got, pending)
+	}
+}

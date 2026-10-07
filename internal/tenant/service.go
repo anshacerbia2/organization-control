@@ -261,6 +261,10 @@ const (
 	applyRetire = `UPDATE tenant.tenant SET status = $2, version = version + 1, updated_at = now(),` +
 		` tenant_security_version = tenant_security_version + 1, retired_at = $3` +
 		` WHERE tenant_id = $1 RETURNING version, tenant_security_version`
+	// Both cancellation transitions, whose rules are the same but for the destination ($2).
+	applyCancelOffboarding = `UPDATE tenant.tenant SET status = $2, version = version + 1, updated_at = now(),` +
+		` tenant_security_version = tenant_security_version + 1, offboarding_started_at = NULL` +
+		` WHERE tenant_id = $1 RETURNING version, tenant_security_version`
 )
 
 func applyStatement(action Action) string {
@@ -277,6 +281,8 @@ func applyStatement(action Action) string {
 		return applyBeginOffboarding
 	case ActionRetire:
 		return applyRetire
+	case ActionCancelOffboardingToActive, ActionCancelOffboardingToSuspended:
+		return applyCancelOffboarding
 	}
 	return ""
 }

@@ -150,7 +150,7 @@ func (s *Service) Resolve(ctx context.Context, res Resolution) (Obligation, erro
 		return Obligation{}, fmt.Errorf("%w: an obligation identifier is required", ErrInvalid)
 	case strings.TrimSpace(res.Domain) == "":
 		return Obligation{}, fmt.Errorf("%w: the resolving domain is required", ErrInvalid)
-	case !res.State.Valid() || res.State == ObligationOpen:
+	case !res.State.Valid() || res.State == ObligationOpen || res.State == ObligationCancelled:
 		return Obligation{}, fmt.Errorf("%w: %q is not a resolution", ErrInvalid, res.State)
 	case res.State != ObligationCompleted && strings.TrimSpace(res.Detail) == "":
 		return Obligation{}, fmt.Errorf("%w: %s requires a detail", ErrInvalid, res.State)
@@ -178,7 +178,8 @@ func (s *Service) Resolve(ctx context.Context, res Resolution) (Obligation, erro
 			}
 			// A failed obligation may be retried or waived; a resolved one is final. The first
 			// resolution records who decided, and a second would overwrite that record.
-			if loaded.State.Resolved() {
+			// A cancelled obligation closed with its offboarding, which is terminal.
+			if loaded.State.Resolved() || loaded.State == ObligationCancelled {
 				return fmt.Errorf("%w: %s is %s", ErrAlreadyResolved, res.ObligationID, loaded.State)
 			}
 
@@ -321,8 +322,8 @@ func (s *Service) SetLegalHold(ctx context.Context, offboardingID id.UUID, hold 
 			if err != nil {
 				return err
 			}
-			if loaded.Stage == StageRetired {
-				return fmt.Errorf("%w: %s is retired", ErrStageRefused, offboardingID)
+			if loaded.Stage == StageRetired || loaded.Stage == StageCancelled {
+				return fmt.Errorf("%w: %s is %s", ErrStageRefused, offboardingID, loaded.Stage)
 			}
 			if _, err := tx.Exec(ctx, `UPDATE operation.offboarding
 			    SET legal_hold = $2 WHERE offboarding_id = $1`,

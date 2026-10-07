@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.16.0
+  version: 1.17.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -129,6 +129,11 @@ CREATE ROLE organization_provider_rt NOLOGIN;
 -- A registered projection consumer acting on its own records.
 CREATE ROLE organization_consumer_rt NOLOGIN;
 
+-- A person reading their own contexts (1.17.0, ADR-ORG-005). Reached only by SET LOCAL ROLE
+-- from the tenant connections, never inherited.
+CREATE ROLE organization_self_rt NOLOGIN;
+GRANT organization_self_rt TO organization_rt WITH INHERIT FALSE, SET TRUE;
+
 -- No runtime role owns a table, holds SUPERUSER, holds BYPASSRLS,
 -- or holds any DDL privilege.
 ```
@@ -172,6 +177,39 @@ It cannot write a business row, change its own declared terms or un-retire itsel
 a consumer, read an invitation, an Organization, a Workspace or delivery evidence, or write
 the audit trail. A consumer ran as the provider role before this role existed, so its
 credential could do all of that.
+
+**The self role** (1.17.0) serves one read: a person's own contexts (`ADR-ORG-005`,
+`TDD-organization-control-002` §The Context List). It holds `USAGE` on `membership` and `tenant`
+and `SELECT` on the columns that read needs, each through a `SELECT` policy of its own keyed on
+`app.principal_id`:
+
+- `membership_id`, `principal_id`, `tenant_id`, `workspace_id` and `status` of
+  `membership.membership`, where `principal_id` is the bound one;
+- `tenant_id`, `display_name` and `status` of `tenant.tenant`, where the bound Principal holds an
+  active Membership in it;
+- `principal_id`, `tenant_id` and `revoked_at` of `membership.tenant_admin_grant`, where
+  `principal_id` is the bound one.
+
+It writes nothing, reads no other Principal's row, and reaches no Tenant the Principal is not a
+member of. It has no login and no DSN of its own. `organization_rt` is granted it
+`WITH INHERIT FALSE, SET TRUE`, and the self read opens a read-only transaction on the tenant
+connections and runs `SET LOCAL ROLE organization_self_rt` before it binds anything. PostgreSQL
+defines both halves: with `INHERIT FALSE` "the new member does not inherit", and the `SET` option
+"allows the member to change to the granted role using the `SET ROLE` command"
+(<https://www.postgresql.org/docs/17/sql-grant.html>). After it, "permissions checking for SQL
+commands is carried out as though the named role were the one that had logged in originally"
+(<https://www.postgresql.org/docs/17/sql-set-role.html>), and `LOCAL` ends with the transaction. So
+the tenant role gains none of the self role's grants or policies, and the self read holds none of
+the tenant role's.
+
+A login of its own was the alternative. It would put a fifth credential in every deployment and in
+foundation-reference's system proof, which seeds the login roles from `scripts/login-roles.sql`, to
+serve one read-only route. It would also buy nothing against the tenant credential: that credential
+can already read any Tenant by binding it, so reaching a role that reads one Principal's rows across
+Tenants gives it no new reach. What the separate role does buy is kept: the self read runs as a role
+that can read three tables' named columns for one Principal, and a defect in it cannot write or read
+anything else. The self transaction writes no privileged-access record, because it is not provider
+access (`ADR-ORG-005 §5.1`).
 
 The process opens a pool per runtime role, and the consumer's only when consumer authority
 is configured. Provider traffic is routed to the provider pool by the authorization layer,
@@ -335,6 +373,9 @@ resolve(request):
     if actor is a registered projection consumer:
         return ConsumerScope                  -- cross-Tenant, opens only the consumer pool
 
+    if actor is a self caller (1.17.0):
+        return SelfScope(principal)           -- one Principal, opens only the self read
+
     if actor holds a provider grant:
         require reason and correlation identifier
         emit privileged-administration event
@@ -399,12 +440,15 @@ because its registration's audience names the resource.
 | Provider | `subject_type` `human`, `acr`, `auth_time`; no `tenant_id` | provider authority in force for the `principal_id`: an emergency grant, or an approved activation of an eligible grant (§Provider Activation) | no grant, or `acr` or `auth_time` absent |
 | Eligible provider | as a provider | an eligible grant with no activation in force | reaches only `/v1/provider-activations`; every other route answers `403` before a transaction opens |
 | Projection consumer | `subject_type` `workload`, `workload_owner`; no `tenant_id` | an active consumer registered with the `principal_id` | none registered, or consumer authority not configured |
+| Self (1.17.0) | `subject_type` `human`, as a Tenant administrator's or a provider's claims, with or without `tenant_id`, on `GET /v1/principals/{principal_id}/contexts` whose `principal_id` is the token's | none | reaches that one route, for its own `principal_id`; a human token naming another Principal there is authorized as above |
 
 ```text
 authenticate(token):
     verify signature, iss, aud, typ, exp                 -- foundation-platform verify
     principal := principal_id, a UUID
     type      := subject_type, human or workload
+    if type is human and the route is GET /v1/principals/{principal}/contexts:
+        return Self(principal)                           -- no record read (1.17.0)
     if tenant_id present:
         require type is human, acr aal2 or higher, and auth_time
         require, in tenant_id, read now in one read-only transaction:
@@ -1152,6 +1196,18 @@ administrative connection is explicitly not accepted as evidence.
   refused; two consumers cannot share one.
 - Startup refuses each of the four removed settings.
 
+### Self Caller
+
+- A human token whose `principal_id` is the path's reaches `GET /v1/principals/{principal_id}/contexts`
+  with or without `tenant_id`, with no provider grant, and with an eligible grant, and writes no
+  privileged-access record.
+- The same token on any other route is authorized as before: no grant and no `tenant_id` is `403`.
+- A workload token, or a human token naming another Principal, is not a self caller.
+- Logged in as the tenant role, with `app.principal_id` bound and the self role not set, nothing
+  more is readable than the Tenant binding allows: the self policies do not reach the tenant role.
+- As the self role, bound to one Principal, no other Principal's Membership, Tenant or
+  administration grant is readable, nothing is writable, and an unbound read raises.
+
 ### Tenant Administration Grant
 
 - A tenant token is admitted only with an active Membership, an active Tenant and a grant in
@@ -1313,6 +1369,7 @@ rejection triage, provider-access review, and suspected cross-tenant exposure.
 | Governed by | ADR-GLB-002 — Enterprise PostgreSQL Row-Level Security for Isolation |
 | Governed by | ADR-ORG-001 — Separate Organization Authority and Keycloak Projection; §5.11 provider and consumer authority |
 | Governed by | ADR-ORG-003 — Tenant Administration Is a Recorded Grant, Checked with Current Membership |
+| Governed by | ADR-ORG-005 §5.1 — a self caller reads its own contexts, on one route, with no provider record (1.17.0) |
 | Conforms to | STD-IAM-002 §3.1.1, §3.2, §3.5 — the grant's holder checks its own record; `principal_id` is the persisted identifier |
 | Conforms to | STD-GLB-002 — `FORCE ROW LEVEL SECURITY`, non-owner runtime role, no `SUPERUSER`/`BYPASSRLS`, isolation proven as the runtime role |
 | Enterprise constraint | EAD-003 — private domain persistence; cross-domain database access is prohibited |

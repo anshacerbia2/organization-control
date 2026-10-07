@@ -48,6 +48,17 @@ func WithConsumerSnapshot(ctx context.Context, pool *ConsumerPool, reason string
 	return withRecordedScope(ctx, pool.tx, pool.recorder, fn)
 }
 
+type SelfPool struct{ tx Transactor }
+
+func WithSelfRead(ctx context.Context, pool *SelfPool, fn Body) error {
+	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.principal_id', $1, true)`, ""); err != nil {
+			return err
+		}
+		return fn(ctx, tx)
+	})
+}
+
 func WithTenantScope(ctx context.Context, pool *TenantPool, fn Body) error {
 	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, ""); err != nil {

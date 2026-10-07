@@ -100,6 +100,10 @@ func testSurface(t *testing.T) Surface {
 	must(err, "dead-letter resolver")
 	contexts, err := occontext.New(providerPool)
 	must(err, "context service")
+	selfPool, err := db.NewSelfPool(transactor)
+	must(err, "self pool")
+	contextList, err := occontext.NewContexts(providerPool, selfPool)
+	must(err, "context list")
 	providerGrants, err := authority.NewAdministration(providerPool)
 	must(err, "provider grants")
 	providerActivations, err := authority.NewActivations(providerPool, authority.ActivationPolicy{Max: 8 * time.Hour, ApprovalRequired: true})
@@ -117,7 +121,7 @@ func testSurface(t *testing.T) Surface {
 			Organizations: organizations,
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
-			Replayer: replayer, Resolver: resolver,
+			ContextList: contextList, Replayer: replayer, Resolver: resolver,
 			Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
 			TenantAdministrators: tenantAdministrators,
 		},
@@ -529,6 +533,8 @@ func testSurfaceServices(t *testing.T) Services {
 	resolutionPool, _ := db.NewResolutionPool(transactor, stubRecorder{})
 	resolver, _ := projection.NewResolver(resolutionPool)
 	contexts, _ := occontext.New(providerPool)
+	selfPool, _ := db.NewSelfPool(transactor)
+	contextList, _ := occontext.NewContexts(providerPool, selfPool)
 	providerGrants, _ := authority.NewAdministration(providerPool)
 	providerActivations, _ := authority.NewActivations(providerPool, authority.ActivationPolicy{Max: 8 * time.Hour, ApprovalRequired: true})
 	tenantAdministrators, _ := authority.NewTenantAdministration(providerPool, tenantPool, memberships)
@@ -541,7 +547,7 @@ func testSurfaceServices(t *testing.T) Services {
 		Organizations: organizations,
 		Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 		Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
-		Replayer: replayer, Resolver: resolver,
+		ContextList: contextList, Replayer: replayer, Resolver: resolver,
 		Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
 		TenantAdministrators: tenantAdministrators,
 	}

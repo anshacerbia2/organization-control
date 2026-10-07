@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.7.0
+  version: 1.9.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -95,6 +95,8 @@ stateDiagram-v2
     suspended --> active: restore
     active --> offboarding: begin offboarding
     suspended --> offboarding: begin offboarding
+    offboarding --> active: cancel offboarding, begun from active
+    offboarding --> suspended: cancel offboarding, begun from suspended
     offboarding --> retired: all obligations complete
     retired --> [*]
 ```
@@ -119,6 +121,7 @@ split is not arbitrary:
 | `active -> suspended`, `suspended -> active` | `TenantService.Suspend` / `.Restore` |
 | `active -> offboarding`, `suspended -> offboarding` | `OffboardingService`, `TDD-organization-control-004` |
 | `offboarding -> retired` | `OffboardingService`, `TDD-organization-control-004` |
+| `offboarding -> active`, `offboarding -> suspended` | `OffboardingService.Cancel`, `TDD-organization-control-004` (1.9.0) |
 
 The last two are transitions here and commands there because each is a stage of a process
 that does more than move this row: entering offboarding also creates an
@@ -127,6 +130,27 @@ Membership in the Tenant, and retirement is refused while any obligation is open
 hold is set. A command in `TenantService` that moved only the Tenant row would look
 complete and leave access running, which is why `TenantService` exposes neither and
 `internal/tenant` is given no dependency on `internal/membership`.
+
+**Cancelling an offboarding returns the Tenant to where it was** (1.9.0, `ADR-ORG-006 §5.2`).
+Two transitions, one per prior status, because the machine maps an action to one destination:
+
+| Action | Transition | Event | Security version | Clears |
+| :-- | :-- | :-- | :-- | :-- |
+| `cancel-offboarding-to-active` | `offboarding -> active` | `tenant.security.restored` (priority) | increments | `offboarding_started_at` |
+| `cancel-offboarding-to-suspended` | `offboarding -> suspended` | `tenant.security.suspended` (priority) | increments | `offboarding_started_at` |
+
+The offboarding chooses the action from the status it recorded when it began; nothing else issues
+either. A suspension in force before the offboarding stays in force, and its `suspended_at` is
+kept. Both reuse the event types a consumer already applies, with `tenant_status` in the payload
+saying which state the Tenant is in, the same way `tenant.security.suspended` already serves both a
+suspension and an offboarding (§Published Events). A new type would need every consumer to
+subscribe to it before a cancellation could reach it; these need no consumer change.
+
+Both increment `tenant_security_version`. Consumers apply a Tenant event only when its version is
+higher than the one they hold, so an event that did not increment would be discarded and the
+consumer would keep `offboarding`. A Membership restored by the same cancellation is restored after
+the Tenant transition commits, so it carries the incremented version and is not superseded by it
+(`TDD-organization-control-004` §Cancellation).
 
 Keeping the transitions themselves in one table is what makes that split safe: the
 refusal rules, the security-version consequences, and the timestamps do not fork between
@@ -382,6 +406,39 @@ Tenant in `offboarding` or `retired` to the process that put it there, without l
 offboarding. The list leaves both out because each is a further read per row, and the list is the
 screen that does not need them.
 
+From 1.8.0 the single Tenant read also carries `provisioning`: the Tenant's latest provisioning
+request (§Provisioning Correlation), or `null` when none was ever recorded.
+
+```json
+"provisioning": {
+  "request_id": "<uuid>",
+  "correlation_id": "<uuid>",
+  "state": "requested" | "realized" | "failed" | "unresolved",
+  "detail": "<text>" | null,
+  "requested_at": "<timestamp>",
+  "resolved_at": "<timestamp>" | null
+}
+```
+
+| Field | Value |
+| :-- | :-- |
+| `state` | The request's state, not the Tenant's. `unresolved` exists only here: the Tenant whose request timed out stays in `requested` or `provisioning` |
+| `detail` | The reason a failure was reported with, the sweep's note on an `unresolved` request, or whatever a realized status carried; `null` when nothing was |
+| `resolved_at` | When the outcome was recorded, or when the sweep declared it unknown; `null` while `requested` |
+
+Each field is a column of `tenant.provisioning_request`, read as stored. "Latest" is the request
+activation reads (§Tenant Activation): the provisioning direction only
+(`coalesce(desired_profile->>'operation', 'provision') = 'provision'`), newest `requested_at`, then
+`request_id`. A deprovisioning command is offboarding's and is read on the offboarding
+(`TDD-organization-control-004`). A retry from `failed` records a new request, so `provisioning`
+is the current attempt, and the earlier one stays in the table as the history.
+
+It is read in the same transaction as the record, so the request and the Tenant describe one instant.
+`TDD-organization-experience-002` §Tenant States Are Rendered Individually needs it: `unresolved`
+renders with retry disabled, because retrying an outcome nobody knows is how a Tenant is provisioned
+twice (§Provisioning Correlation), and `failed` renders with its reason. Neither is readable from the
+Tenant's own `status`. The list leaves `provisioning` out for the reason it leaves out the other two.
+
 | List | Filters |
 | :-- | :-- |
 | `GET /v1/organizations` | `status` = `active` \| `suspended` \| `retired`; `classification` = `provider` \| `customer` \| `partner` \| `publisher` |
@@ -466,6 +523,10 @@ suspension removes it, restoration makes a cached denial wrong.
 of the lifecycle state name. It is emitted both for `active -> suspended` and when an
 `active` or already-suspended Tenant enters `offboarding`; in both cases every existing
 Tenant context must stop. The event carries the incremented `tenant_security_version`.
+
+From 1.9.0 `tenant.security.suspended` is also what `offboarding -> suspended` publishes when an
+offboarding begun from `suspended` is cancelled, and `tenant.security.restored` what
+`offboarding -> active` publishes (§Who issues which transition).
 
 Two transitions therefore share one event type, deliberately. A consumer that must tell
 them apart reads `tenant_status` out of the payload — which is present for exactly this
@@ -617,6 +678,9 @@ at the transport.
 - A Tenant cannot become `active` from `requested` without passing `provisioning`.
 - A Tenant cannot become `active` under a suspended or retired Organization.
 - `retired` is terminal for Tenant, Organization, and Workspace.
+- `offboarding -> active` and `offboarding -> suspended` increment the security version, clear
+  `offboarding_started_at`, keep `suspended_at`, and publish `tenant.security.restored` and
+  `tenant.security.suspended` on the priority lane.
 
 ### Constraints
 
@@ -661,6 +725,9 @@ at the transport.
 - An unresolved request is not retried automatically.
 - A realized status arriving after the timeout resolves the request by correlation.
 - A duplicate realized status produces one effect.
+- The single Tenant read carries the latest provisioning request with its state, detail and
+  resolution instant, `unresolved` included; a retry's newer request replaces the failed one there;
+  a deprovisioning command is not read as one; a Tenant with no request reads `null`.
 
 ### Concurrency
 
@@ -721,3 +788,5 @@ resolution, and Tenant activation refused.
 | Consumed by | `TDD-organization-control-002` — Membership references `tenant.tenant` and `workspace.workspace` |
 | Consumed by | `TDD-organization-control-004` — offboarding drives the Tenant terminal transitions |
 | Consumed by | `TDD-organization-experience-001` §Irreversible Operations — the affected-subject count, computed by the API |
+| Consumed by | `TDD-organization-experience-002` §Tenant States Are Rendered Individually — `provisioning` on the Tenant read (1.8.0) |
+| Governed by | ADR-ORG-006 §5.2 — a cancelled offboarding returns the Tenant to its prior status (1.9.0) |

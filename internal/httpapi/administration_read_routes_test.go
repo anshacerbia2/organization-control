@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/anshacerbia2/organization-control/internal/offboarding"
+	"github.com/anshacerbia2/organization-control/internal/projection"
 	"github.com/anshacerbia2/organization-control/internal/tenant"
 )
 
@@ -65,6 +66,11 @@ func TestAListRefusesWhatItCannotHonour(t *testing.T) {
 		{"an offboarding limit of zero", provider, "/v1/offboardings?limit=0", audit, "limit"},
 		{"a parameter the offboarding list does not take", provider, "/v1/offboardings?status=freeze", audit, "status"},
 		{"an offboarding filter given twice", provider, "/v1/offboardings?stage=freeze&stage=release", audit, "more than once"},
+		{"an unknown consumer state", provider, "/v1/projections/consumers?state=stale", audit, "state"},
+		{"a consumer limit of zero", provider, "/v1/projections/consumers?limit=0", audit, "limit"},
+		{"a consumer limit above the bound", provider, "/v1/projections/consumers?limit=101", audit, "limit"},
+		{"a parameter the consumer list does not take", provider, "/v1/projections/consumers?status=active", audit, "status"},
+		{"a consumer cursor given twice", provider, "/v1/projections/consumers?after=a&after=b", audit, "more than once"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,6 +114,8 @@ func TestTheListsKeepTheirScopes(t *testing.T) {
 		{"the Tenant list without a reason", provider, "/v1/tenants", nil, http.StatusBadRequest},
 		{"a tenant caller on the offboarding list", tenant, "/v1/offboardings", audit, http.StatusForbidden},
 		{"the offboarding list without a reason", provider, "/v1/offboardings", nil, http.StatusBadRequest},
+		{"a tenant caller on the consumer list", tenant, "/v1/projections/consumers", audit, http.StatusForbidden},
+		{"the consumer list without a reason", provider, "/v1/projections/consumers", nil, http.StatusBadRequest},
 		{"a tenant caller on an obligation board", tenant, "/v1/offboardings/" + mustID(t).String() + "/obligations", audit, http.StatusForbidden},
 		{"a Membership named by something other than a UUID", tenant, "/v1/memberships/not-a-uuid", nil, http.StatusBadRequest},
 	}
@@ -207,9 +215,121 @@ func TestTheReadSideShapesNameWhatIsNotYetReached(t *testing.T) {
 
 	tenantID := mustID(t)
 	read := marshal(viewTenantDetail(tenant.Detail{Record: tenant.Record{TenantID: tenantID}, ActiveMemberships: 847}))
-	for _, want := range []string{`"tenant_id":"` + tenantID.String() + `"`, `"offboarding_id":null`, `"active_memberships":847`} {
+	for _, want := range []string{`"tenant_id":"` + tenantID.String() + `"`, `"offboarding_id":null`, `"active_memberships":847`,
+		`"provisioning":null`} {
 		if !strings.Contains(read, want) {
 			t.Errorf("the Tenant read lacks %s:\n%s", want, read)
 		}
+	}
+
+	requestID, correlationID := mustID(t), mustID(t)
+	pending := marshal(viewTenantDetail(tenant.Detail{Record: tenant.Record{TenantID: tenantID},
+		Provisioning: &tenant.ProvisioningRequest{RequestID: requestID, CorrelationID: correlationID,
+			State: tenant.RequestUnresolved, Detail: &detail, RequestedAt: frozenAt, ResolvedAt: &frozenAt}}))
+	want := `"provisioning":{"request_id":"` + requestID.String() + `","correlation_id":"` + correlationID.String() +
+		`","state":"unresolved","detail":"no status","requested_at":"2026-10-07T12:00:00Z","resolved_at":"2026-10-07T12:00:00Z"}`
+	if !strings.Contains(pending, want) {
+		t.Errorf("the Tenant read lacks %s:\n%s", want, pending)
+	}
+	waiting := marshal(provisioningRequestView{State: "requested"})
+	if !strings.Contains(waiting, `"detail":null`) || !strings.Contains(waiting, `"resolved_at":null`) {
+		t.Errorf("an unresolved field is omitted rather than null:\n%s", waiting)
+	}
+
+	listed := marshal(viewListedConsumer(projection.ListedConsumer{State: projection.ConsumerActive, Stale: true}))
+	for _, want := range []string{`"state":"active"`, `"stale":true`, `"event_types":[]`, `"max_accepted_age_seconds":0`} {
+		if !strings.Contains(listed, want) {
+			t.Errorf("a listed consumer lacks %s:\n%s", want, listed)
+		}
+	}
+	if strings.Contains(listed, `"retired_at"`) {
+		t.Errorf("an active consumer names a retirement:\n%s", listed)
+	}
+}
+
+// TestTheContextListKeepsItsCallers is ADR-ORG-005 §5.1 at the routes: a self caller is answered
+// without a reason, a provider needs one, and a tenant caller, an eligible provider and a consumer
+// reading another person's contexts are refused before the database. The parameters are the list's.
+func TestTheContextListKeepsItsCallers(t *testing.T) {
+	t.Parallel()
+
+	principal := mustID(t)
+	path := "/v1/principals/" + principal.String() + "/contexts"
+	audit := map[string]string{ReasonHeader: "an audit"}
+	self := Caller{Subject: principal, Self: true}
+	eligible := providerCaller(t)
+	eligible.Provider, eligible.Eligible = false, true
+
+	for _, tc := range []struct {
+		name    string
+		caller  Caller
+		path    string
+		headers map[string]string
+		status  int
+	}{
+		{"a tenant caller on another person's", tenantCaller(t), path, audit, http.StatusForbidden},
+		{"an eligible provider on another person's", eligible, path, audit, http.StatusForbidden},
+		{"a consumer on another person's", consumerCallerFixture(t, "foundation-reference"), path, audit, http.StatusForbidden},
+		{"a provider without a reason", providerCaller(t), path, nil, http.StatusBadRequest},
+		{"a provider naming no UUID", providerCaller(t), "/v1/principals/nobody/contexts", audit, http.StatusBadRequest},
+		{"a self limit of zero", self, path + "?limit=0", nil, http.StatusBadRequest},
+		{"a self cursor that is not a UUID", self, path + "?after=x", nil, http.StatusBadRequest},
+		{"a filter the list does not take", self, path + "?status=active", nil, http.StatusBadRequest},
+		{"a self caller on someone else's", Caller{Subject: mustID(t), Self: true}, path, nil, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			caller := tc.caller
+			recorder := get(t, mounted(t, &caller), tc.path, tc.headers)
+			if recorder.Code != tc.status {
+				t.Fatalf("%s answered %d, want %d:\n%s", tc.path, recorder.Code, tc.status, recorder.Body.String())
+			}
+		})
+	}
+}
+
+// TestTheCancelRouteNamesAVersionAndAReason is ADR-ORG-006 §5.1 at the route: a provider command
+// with the Tenant version and a reason, refused before the database without either, and refused to
+// a tenant caller. The view carries the cancellation, present and null until it happens.
+func TestTheCancelRouteNamesAVersionAndAReason(t *testing.T) {
+	t.Parallel()
+
+	path := "/v1/offboardings/" + mustID(t).String() + "/cancel"
+	audit := map[string]string{ReasonHeader: "begun by mistake"}
+	for _, tc := range []struct {
+		name    string
+		caller  Caller
+		body    string
+		headers map[string]string
+		status  int
+	}{
+		{"a tenant caller", tenantCaller(t), `{"expected_version":3}`, audit, http.StatusForbidden},
+		{"no reason", providerCaller(t), `{"expected_version":3}`, nil, http.StatusBadRequest},
+		{"no body", providerCaller(t), ``, audit, http.StatusBadRequest},
+		{"a misspelled version", providerCaller(t), `{"expected_versoin":3}`, audit, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			caller := tc.caller
+			recorder := post(t, mounted(t, &caller), path, tc.body, tc.headers)
+			if recorder.Code != tc.status {
+				t.Fatalf("answered %d, want %d:\n%s", recorder.Code, tc.status, recorder.Body.String())
+			}
+		})
+	}
+
+	raw, err := json.Marshal(viewOffboarding(offboarding.Offboarding{Stage: offboarding.StageFreeze}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"prior_status":null`, `"cancelled_by":null`, `"cancel_reason":null`,
+		`"cancelled_at":null`, `"frozen_memberships":0`, `"restore_pending":0`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("a begun offboarding lacks %s:\n%s", want, raw)
+		}
+	}
+	raw, _ = json.Marshal(viewOffboarding(offboarding.Offboarding{Stage: offboarding.StageCancelled, PriorStatus: "suspended"}))
+	if !strings.Contains(string(raw), `"prior_status":"suspended"`) || !strings.Contains(string(raw), `"stage":"cancelled"`) {
+		t.Errorf("a cancelled offboarding reads:\n%s", raw)
 	}
 }

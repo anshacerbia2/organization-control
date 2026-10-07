@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.10.0
+  version: 1.12.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -409,7 +409,7 @@ change.
 ## API / Interface
 
 ```text
-GET    /v1/principals/{principal_id}/contexts
+GET    /v1/principals/{principal_id}/contexts       ?after=&limit=
 GET    /v1/context/{tenant_id}/{principal_id}:verify
 GET    /v1/memberships                       ?after=&limit=&status=&workspace_id=&principal_id=
 GET    /v1/memberships/{membership_id}
@@ -423,6 +423,7 @@ GET    /v1/membership-batches/{batch_id}
 POST   /v1/membership-batches/{batch_id}/execute  Idempotency-Key
 POST   /v1/projections/snapshot
 POST   /v1/projections/reconcile
+GET    /v1/projections/consumers                 ?after=&limit=&state=
 GET    /v1/projections/consumers/{consumer_id}
 POST   /v1/projections/consumers
 ```
@@ -472,6 +473,106 @@ suspends each Membership at the version it locked and records the freeze's own r
 **A transition names its event.** From 1.10.0 the response to grant, suspend, restore and revoke
 carries `event_id`, the identifier of the event the transition published, beside `accepted_at`. It
 is what the enforcement read reports on and what a client correlates a batch item with.
+
+### The Consumer List
+
+From 1.11.0, `GET /v1/projections/consumers` lists the registry, so an operator sees every consumer's
+freshness on one screen (`TDD-organization-experience-002` §Projection Health). Until then the
+registry was readable one consumer at a time, by a caller who already knew the `consumer_id`.
+
+It is a provider route. It requires provider authority and `X-Administrative-Reason`, and each page
+writes the privileged-access record with that reason before it reads, as every provider list does
+(`TDD-organization-control-003` §Lists). A registered consumer is refused `403`: it reads its own
+record at `GET /v1/projections/consumers/{consumer_id}`, and other consumers' budgets and positions
+are not its concern (NIST SP 800-53 AC-6, `TDD-organization-control-001` [R6]).
+
+The list takes the form STD-GLB-001 1.3.0 §Pagination fixes for the estate:
+
+| Part | Form |
+| :-- | :-- |
+| Cursor | `after`: the `consumer_id` of the last item of the previous page. Absent, the list starts at the first |
+| Page size | `limit`: 50 when absent; a whole number from 1 to 100. Anything else, `0` included: `400`, never coerced |
+| Order | `consumer_id`, the primary key: the keyset `consumer_id > $after ORDER BY consumer_id LIMIT limit + 1` |
+| Filters | `state` = `active` \| `retired`. Optional, and it holds for every page; any other value: `400` |
+| Response | `{"consumers": [...], "next": "<consumer_id>" \| null}`, `next` null on the last page |
+
+The order is not creation order. STD-GLB-001 orders a list by its primary key, and this one's key is
+the consumer's chosen name, `TEXT`, so the list is in the database's collation order of the names. The
+cursor is still an identifier the client already holds, which is the standard's reason for not making
+it opaque. An unknown parameter, or one given twice, is `400`, as on every list.
+
+Each item is the shape `GET /v1/projections/consumers/{consumer_id}` returns, which already carries
+`max_accepted_age_seconds`, `stale_behavior`, `last_reported_mark`, `last_reported_at` and
+`event_types`, and adds three fields:
+
+| Field | Value |
+| :-- | :-- |
+| `state` | `active`, or `retired` once `retired_at` is set |
+| `retired_at` | When the consumer was retired; absent while it is active |
+| `stale` | `true` when an active consumer has never reported, or when its last report is older than `max_accepted_age` |
+
+`stale` is computed by this service when the page is read, on the service's clock, which is the clock
+`last_reported_at` was written with. It is the rule of `Consumer.Age`: a consumer that has never
+reported is stale by definition, because nothing is known about its copy. The report-age metric
+(README §Metrics and alerts) differs on that one case: it counts a consumer that never reported from
+its registration, so a new consumer is `stale` here before its age alert can fire. A retired consumer is never stale. It enforces nothing and is owed nothing, and
+the list says that with `state`. `stale` describes the consumer's report, not its enforcement. The
+consumer decides what a stale projection means for its own requests, by its `stale_behavior`
+(§Staleness Policy), which is why the item carries both.
+
+A retired consumer's `event_types` is `[]`, because retirement retires its subscription (§Consumer
+Registry). Without `state`, every consumer is listed, retired ones included: a retired consumer's
+marks are the record an investigation reads (§Consumer Registry). The page runs on the provider pool
+in one transaction, so every item describes the same instant.
+
+### The Context List
+
+From 1.12.0, `GET /v1/principals/{principal_id}/contexts` lists where a person may work
+(`ADR-ORG-005`). It is the context API §Technical Context names. The set is read here and never
+placed in a token (`STD-IAM-001 §3.3`).
+
+**Who may call it** (`ADR-ORG-005 §5.1`, `TDD-organization-control-001` §Caller Authority):
+
+- **The person themselves.** A human token whose `principal_id` is the path's is a self caller,
+  with or without `tenant_id` and with or without a provider grant. The read runs as
+  `organization_self_rt`, bound to that `principal_id`, and writes no privileged-access record.
+- **A provider** with authority in force reads anyone's, with `X-Administrative-Reason`, on the
+  provider pool, and each page records the access with that reason.
+- **Everyone else** is refused `403`: a Tenant administrator or an eligible provider reading
+  another person's, and every consumer.
+
+**What it lists** (`ADR-ORG-005 §5.2`): one item per Membership of the Principal whose status is
+`active`, in a Tenant whose status is `active`.
+
+```json
+{
+  "contexts": [
+    {"membership_id": "<uuid>", "tenant_id": "<uuid>", "tenant_display_name": "Acme",
+     "tenant_status": "active", "workspace_id": "<uuid>" | null, "administers": true}
+  ],
+  "next": "<membership_id>" | null
+}
+```
+
+| Field | Value |
+| :-- | :-- |
+| `workspace_id` | The Workspace a Workspace-scoped Membership names; `null` for a Tenant-wide one |
+| `administers` | Whether the Principal holds an unrevoked tenant administration grant in that Tenant (`ADR-ORG-003`) |
+| `tenant_status` | Always `active` today, since only active Tenants are listed. Carried so a client renders what it reads rather than assuming it |
+
+Nothing else is returned: no version, no grant identifier and no other person. The list takes
+STD-GLB-001 1.3.0 §Pagination's form: `after` is the `membership_id` of the last item, `limit` is
+1 to 100 and 50 when absent, the order is `membership_id`, a UUIDv7, and `next` is null on the last
+page. It takes no filter, and any parameter but those two, or one given twice, is `400`. A
+`principal_id` that is not a UUID is `400` to a provider; any other caller is refused `403` before
+that, because no token names such a Principal. A Principal with no context reads `{"contexts": [], "next":
+null}`, the same answer as a `principal_id` nobody holds: the list says where the caller may work,
+and nothing about whether a Principal exists.
+
+**An item selects; it does not grant** (`ADR-ORG-005 §5.3`). Choosing a Tenant is a sign-in for it
+(`ADR-IAM-006 §5.2`), and every request in it is checked again: the Membership, the Tenant and the
+administration grant are read for each tenant token (`TDD-organization-control-001` §Caller
+Authority). An `administers` of `true` read a moment ago is not admission.
 
 ### Membership Batches
 
@@ -966,6 +1067,13 @@ the sum, because that is the number incident response works from.
 - Every page of one snapshot reports the same high-water mark, and continuing a snapshot
   without carrying its mark is refused rather than served with a fresh one.
 - Paging covers the set exactly once: keyset paging on `membership_id`, never `OFFSET`.
+- The context list names each active Membership in an active Tenant once, with `administers` from
+  an unrevoked grant; a suspended or revoked Membership, or one in a suspended or offboarding Tenant,
+  is not listed; it pages by `membership_id`. A self read records no access; a provider's records
+  each page with its reason.
+- The consumer list pages by `consumer_id` with `next` null on the last page, `state` holds on every
+  page, each page records the access with the caller's reason, and `stale` is true for a consumer that
+  never reported or reported longer ago than its budget, and false for a retired one.
 - Gaps in `streamposition` caused by rolled-back transactions do not stall bootstrap.
 - Delivering Membership version 14 before version 13 leaves version 14 as desired state;
   the later delivery of version 13 is classified as superseded and cannot restore
@@ -1054,6 +1162,10 @@ finding, and consumer misuse of the fresh-check path.
 | Conforms to | STD-IAM-001 §3.4 — enforcement delay is propagation plus remaining token lifetime |
 | Conforms to | STD-GLB-001 — RFC 7807 problem details |
 | Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/memberships`: `after`, `limit` 1 to 100, key order, `next` |
+| Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/projections/consumers` (1.11.0): `after` is the `consumer_id`, key order, `state` filter, `next` |
+| Consumed by | `TDD-organization-experience-002` §Projection Health — the consumer list, with `stale` computed by the API |
+| Governed by | ADR-ORG-005 — a person lists their own contexts (1.12.0, §The Context List) |
+| Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/principals/{principal_id}/contexts`: `after`, `limit` 1 to 100, key order, `next` |
 | Governed by | ADR-ORG-004 §5.1 — a bulk action is a batch the server previews, then executes; §5.2 — revocation is shown by its evidence |
 | Conforms to | SAD-004 §8.3 — bulk operations validate each item independently and return a per-item outcome |
 | Conforms to | STD-GLB-001 1.3.0 — the batch is bounded (500 items) and versioned under `/v1/` |

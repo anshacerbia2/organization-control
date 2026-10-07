@@ -38,6 +38,7 @@ BEGIN
               ('membership.tenant_admin_grant'),
               ('membership.membership_batch'),
               ('membership.membership_batch_item'),
+              ('membership.offboarding_freeze'),
               ('invitation.invitation'),
               ('operation.offboarding'),
               ('operation.offboarding_obligation'),
@@ -198,6 +199,18 @@ GRANT SELECT, INSERT, UPDATE ON membership.membership_batch_item TO organization
 -- The provider role holds nothing here.
 GRANT SELECT, INSERT ON membership.tenant_admin_grant TO organization_rt;
 GRANT UPDATE (revoked_at, revoked_by, revoke_reason) ON membership.tenant_admin_grant TO organization_rt;
+-- The provider reads three columns for one purpose: whether a person administers each Tenant they
+-- may work in, on GET /v1/principals/{principal_id}/contexts read as a provider (ADR-ORG-005 §5.1).
+GRANT SELECT (principal_id, tenant_id, revoked_at) ON membership.tenant_admin_grant TO organization_provider_rt;
+
+-- membership.offboarding_freeze -- which Memberships an offboarding's freeze suspended, so its
+-- cancellation restores those and no others (ADR-ORG-006 §5.2). The tenant role writes a row in the
+-- freeze batch's own transaction and stamps restored_at in the cancellation's restore batch, both
+-- through db.WithProviderInTenant under the Tenant's policy; the provider role reads it for the
+-- offboarding view's counts. No DELETE, and nothing but restored_at changes.
+GRANT SELECT, INSERT ON membership.offboarding_freeze TO organization_rt;
+GRANT UPDATE (restored_at) ON membership.offboarding_freeze TO organization_rt;
+GRANT SELECT ON membership.offboarding_freeze TO organization_provider_rt;
 
 -- invitation.invitation
 --   organization_rt          SELECT, INSERT, UPDATE   issue, accept, revoke
@@ -652,3 +665,29 @@ ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA membership
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA tenant
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_consumer_rt;
 
+-- ---------------------------------------------------------------------------------------------
+-- The self role
+-- ---------------------------------------------------------------------------------------------
+--
+-- A person reading their own contexts, GET /v1/principals/{principal_id}/contexts (ADR-ORG-005,
+-- TDD-organization-control-001 §Roles). It has no login. The tenant role may SET ROLE to it and does
+-- not inherit it: with INHERIT FALSE "the new member does not inherit", and SET TRUE "allows the
+-- member to change to the granted role using the SET ROLE command" (PostgreSQL 17, GRANT). So the
+-- tenant role's transactions gain none of what follows, and db.WithSelfRead, which sets it LOCAL in a
+-- read-only transaction, holds none of the tenant role's.
+GRANT organization_self_rt TO organization_rt WITH INHERIT FALSE, SET TRUE;
+
+-- The three reads, by column, each under a SELECT policy in rls.sql keyed on app.principal_id: the
+-- Principal's Memberships, the Tenants it is an active member of, and its administration grants.
+-- Nothing written, no other column, no other table.
+GRANT USAGE ON SCHEMA membership, tenant TO organization_self_rt;
+GRANT SELECT (membership_id, principal_id, tenant_id, workspace_id, status)
+    ON membership.membership TO organization_self_rt;
+GRANT SELECT (tenant_id, display_name, status) ON tenant.tenant TO organization_self_rt;
+GRANT SELECT (principal_id, tenant_id, revoked_at) ON membership.tenant_admin_grant TO organization_self_rt;
+
+-- Nothing inherited: a table added later must be granted deliberately.
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA membership
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_self_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA tenant
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_self_rt;

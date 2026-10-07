@@ -56,6 +56,11 @@ type Caller struct {
 	// Emergency is authority from an emergency grant. Every request it authorizes is reported
 	// (ADR-ORG-002 §5.2).
 	Emergency bool
+
+	// Self is a person reading their own contexts: a human token on
+	// GET /v1/principals/{principal_id}/contexts whose principal_id is the path's (ADR-ORG-005 §5.1).
+	// Authentication sets it on that route alone, so no other route ever sees a self caller.
+	Self bool
 }
 
 type callerKey struct{}
@@ -138,6 +143,14 @@ func ResolveScope(next http.Handler) http.Handler {
 
 // resolve is the caller-to-scope rule, separated so it can be exercised directly.
 func resolve(caller Caller, correlation id.UUID) (db.Scope, error) {
+	if caller.Self {
+		if caller.Provider || caller.Eligible || caller.Consumer != "" || !caller.Tenant.IsNil() {
+			return db.Scope{}, errors.New("httpapi: a self caller carries no other authority")
+		}
+		// The Principal is the caller's own, and the scope opens only the self read: no Tenant, no
+		// provider pool, no record of provider access (ADR-ORG-005 §5.1).
+		return db.SelfScope(caller.Subject, correlation)
+	}
 	if caller.Consumer != "" {
 		if caller.Provider || !caller.Tenant.IsNil() {
 			return db.Scope{}, errors.New("httpapi: a consumer caller must carry neither provider authority nor a Tenant")

@@ -56,6 +56,10 @@ type Services struct {
 	Resolver      *projection.Resolver
 	Contexts      *occontext.Service
 
+	// ContextList lists a Principal's contexts: the caller's own as organization_self_rt, or anyone's
+	// for a provider (ADR-ORG-005).
+	ContextList *occontext.Contexts
+
 	// ProviderGrants grants and revokes provider authority (ADR-ORG-001 §5.11).
 	ProviderGrants *authority.Administration
 
@@ -241,6 +245,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/complete-freeze", h.completeFreeze)
 	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/release", h.releaseOffboarding)
 	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/retire", h.retireOffboarding)
+	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/cancel", h.cancelOffboarding)
 	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/legal-hold", h.setLegalHold)
 	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/obligations", h.raiseObligation)
 	api.HandleFunc("GET /v1/offboardings/{offboarding_id}/obligations", h.outstandingObligations)
@@ -262,6 +267,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/provider-activations/{activation_id}/deny", h.denyProviderActivation)
 	api.HandleFunc("POST /v1/provider-activations/{activation_id}/end", h.endProviderActivation)
 
+	api.HandleFunc("GET /v1/projections/consumers", h.listConsumers)
 	api.HandleFunc("POST /v1/projections/consumers", h.registerConsumer)
 	api.HandleFunc("GET /v1/projections/consumers/{consumer_id}", h.getConsumer)
 	api.HandleFunc("POST /v1/projections/consumers/{consumer_id}/retire", h.retireConsumer)
@@ -287,6 +293,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/dead-letters/{event_id}/consumers/{consumer}/resolve", h.resolveDeadLetter)
 	api.HandleFunc("POST /v1/dead-letters/{event_id}/consumers/{consumer}/waive", h.waiveDeadLetter)
 
+	api.HandleFunc("GET /v1/principals/{principal_id}/contexts", h.listContexts)
 	api.HandleFunc("POST /v1/context/verify", h.verifyContext)
 	api.HandleFunc("POST /v1/context/switch-eligible", h.switchEligible)
 	api.HandleFunc("POST /v1/context/rate", h.recordRate)
@@ -325,6 +332,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the dead-letter resolver is required")
 	case s.Contexts == nil:
 		return errors.New("httpapi: the context service is required")
+	case s.ContextList == nil:
+		return errors.New("httpapi: the context list is required")
 	case s.ProviderActivations == nil:
 		return errors.New("httpapi: the provider activation service is required")
 	case s.ProviderGrants == nil:

@@ -45,12 +45,16 @@ const (
 	providerRole   = "organization_provider_rt"
 	resolutionRole = "organization_resolution_rt"
 	consumerRole   = "organization_consumer_rt"
+
+	// selfRole has no login. db.WithSelfRead sets it LOCAL on the tenant connections, so its
+	// statements run as it and are planned as it here, as every other role's are.
+	selfRole = "organization_self_rt"
 )
 
 // Roles are the runtime roles whose privileges this tool derives. organization_dispatch_rt is
 // absent on purpose: the dispatcher's statements live in foundation-platform and run in
 // foundation-reference, so no code path in this repository exercises that role.
-var Roles = []string{tenantRole, providerRole, resolutionRole, consumerRole}
+var Roles = []string{tenantRole, providerRole, resolutionRole, consumerRole, selfRole}
 
 // wrappers are the scope entry points, by SSA function name, and the role their pool connects as.
 var wrappers = map[string]string{
@@ -62,6 +66,7 @@ var wrappers = map[string]string{
 	dbPkg + ".WithResolutionScope":  resolutionRole,
 	dbPkg + ".WithConsumerScope":    consumerRole,
 	dbPkg + ".WithConsumerSnapshot": consumerRole,
+	dbPkg + ".WithSelfRead":         selfRole,
 }
 
 // wrapperInternals are the unexported helpers the wrappers share. They forward the body as a
