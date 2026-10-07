@@ -408,6 +408,14 @@ jobs:
   #
   # SYSTEMPROOF_UNPINNED lifts foundation-reference's pin on this repository and nothing else: this
   # checkout must still be a clean commit, and the run is logged as UNPINNED, never as a closure.
+  # deploy/ holds only environment directories, and deploy/dev follows the skeleton of
+  # STD-GLB-009 §Development Server Deployment: the README's ten sections in order, the required
+  # files, loopback ports, GOPROXY from .env, and pass-through of every .env.example variable.
+  deploy-dev-skeleton:
+    uses: anshacerbia2/scnehaux-architecture/.github/workflows/deploy-dev-skeleton.yml@main
+    with:
+      kind: service
+
   system-proof:
     runs-on: ubuntu-latest
 
