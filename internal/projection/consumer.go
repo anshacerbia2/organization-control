@@ -578,7 +578,7 @@ func (r *Registry) List(ctx context.Context, query ConsumerListQuery, reason str
 		defer rows.Close()
 		for rows.Next() {
 			var (
-				item              ListedConsumer
+				item                ListedConsumer
 				principal, behavior string
 			)
 			if err := rows.Scan(&item.ConsumerID, &principal, &item.ProjectionVersion, &item.MaxAcceptedAge,
