@@ -971,6 +971,206 @@ table "membership_event" {
   }
 }
 
+// A bulk Membership action the server previewed, and its execution (ADR-ORG-004 §5.1,
+// TDD-organization-control-002 1.10.0 §Membership Batches). Stored because the preview is binding:
+// execution is held to the version each item was read at, and this is where that version survives
+// between the two requests. Written by the tenant role under the Tenant's policy, like a Membership.
+table "membership_batch" {
+  schema  = schema.membership
+  comment = "Bulk Membership actions, previewed then executed (ADR-ORG-004). RLS-protected."
+
+  column "batch_id" {
+    null = false
+    type = uuid
+  }
+  column "tenant_id" {
+    null = false
+    type = uuid
+  }
+  column "action" {
+    null = false
+    type = text
+  }
+  column "state" {
+    null = false
+    type = text
+  }
+  column "reason" {
+    null = true
+    type = text
+  }
+  // The preview request's, or the continued batch's when this resubmits its failed items.
+  column "correlation_id" {
+    null = false
+    type = uuid
+  }
+  column "continues" {
+    null = true
+    type = uuid
+  }
+  column "created_by" {
+    null = false
+    type = uuid
+  }
+  column "created_at" {
+    null = false
+    type = timestamptz
+  }
+  column "expires_at" {
+    null = false
+    type = timestamptz
+  }
+  column "would_change" {
+    null = false
+    type = integer
+  }
+  column "would_not_change" {
+    null = false
+    type = integer
+  }
+  // SCIM's failOnErrors: the failures tolerated before the run stops. Null: no allowance.
+  column "fail_on_errors" {
+    null = true
+    type = integer
+  }
+  column "executed_by" {
+    null = true
+    type = uuid
+  }
+  column "executed_at" {
+    null = true
+    type = timestamptz
+  }
+  column "completed_at" {
+    null = true
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.batch_id]
+  }
+
+  foreign_key "membership_batch_tenant_fk" {
+    columns     = [column.tenant_id]
+    ref_columns = [table.tenant.column.tenant_id]
+  }
+
+  // The target of the item's composite foreign key, so an item cannot claim a Tenant its batch does
+  // not belong to.
+  unique "membership_batch_tenant_scope_unique" {
+    columns = [column.tenant_id, column.batch_id]
+  }
+
+  check "membership_batch_action_check" {
+    expr = "action IN ('suspend', 'restore', 'revoke')"
+  }
+  check "membership_batch_state_check" {
+    expr = "state IN ('previewed', 'executing', 'executed')"
+  }
+  // A revocation is irreversible and always says why; a blank reason names nobody's intent.
+  check "membership_batch_reason_check" {
+    expr = "((reason IS NULL) OR (btrim(reason) <> '')) AND ((action <> 'revoke') OR (reason IS NOT NULL))"
+  }
+  check "membership_batch_allowance_check" {
+    expr = "(fail_on_errors IS NULL) OR (fail_on_errors >= 0)"
+  }
+}
+
+// One Membership a batch names, what its preview found, and what its execution did.
+table "membership_batch_item" {
+  schema  = schema.membership
+  comment = "One item of a bulk Membership action (ADR-ORG-004). RLS-protected."
+
+  column "batch_id" {
+    null = false
+    type = uuid
+  }
+  column "tenant_id" {
+    null = false
+    type = uuid
+  }
+  column "position" {
+    null = false
+    type = integer
+  }
+  // As the request named it. No foreign key: an identifier naming no Membership of this Tenant is
+  // recorded with its refusal rather than refused as a row.
+  column "membership_id" {
+    null = false
+    type = uuid
+  }
+  column "principal_id" {
+    null = true
+    type = uuid
+  }
+  column "current_status" {
+    null = true
+    type = text
+  }
+  // The version execution is held to.
+  column "version_read" {
+    null = true
+    type = bigint
+  }
+  column "resulting_status" {
+    null = true
+    type = text
+  }
+  // The problem document the single command would return: type, title, status, detail.
+  column "refusal" {
+    null = true
+    type = jsonb
+  }
+  column "outcome" {
+    null = true
+    type = text
+  }
+  column "outcome_reason" {
+    null = true
+    type = text
+  }
+  column "accepted_at" {
+    null = true
+    type = timestamptz
+  }
+  column "event_id" {
+    null = true
+    type = uuid
+  }
+  column "resulting_version" {
+    null = true
+    type = bigint
+  }
+  column "problem" {
+    null = true
+    type = jsonb
+  }
+
+  primary_key {
+    columns = [column.batch_id, column.position]
+  }
+
+  foreign_key "membership_batch_item_parent_fk" {
+    columns     = [column.tenant_id, column.batch_id]
+    ref_columns = [table.membership_batch.column.tenant_id, table.membership_batch.column.batch_id]
+  }
+
+  unique "membership_batch_item_once" {
+    columns = [column.batch_id, column.membership_id]
+  }
+
+  check "membership_batch_item_outcome_check" {
+    expr = "outcome IS NULL OR outcome IN ('succeeded', 'failed', 'not_attempted')"
+  }
+  check "membership_batch_item_reason_check" {
+    expr = "outcome_reason IS NULL OR outcome_reason IN ('refused_at_preview', 'error_allowance')"
+  }
+  // An item either would change or carries the refusal saying why not.
+  check "membership_batch_item_preview_check" {
+    expr = "(resulting_status IS NULL) <> (refusal IS NULL)"
+  }
+}
+
 // Who administers each Tenant (ADR-ORG-003). A token's tenant_id only selects a Tenant; a Principal
 // administers it while it holds an active Membership there and a grant here that is not revoked.
 // Granted and revoked by a provider alone, through db.WithProviderInTenant: the tenant role holds the

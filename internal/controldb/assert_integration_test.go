@@ -37,11 +37,11 @@ func TestAssertIsolationAcceptsAnIntactDatabase(t *testing.T) {
 	if !report.OK() {
 		t.Fatalf("a freshly migrated database reports problems: %v", report.Problems)
 	}
-	// Ten tables across five schemas. Asserted rather than left implicit, because every loop
-	// in AssertIsolation is vacuous over an empty set — a report with no tables and no problems
-	// would otherwise read as intact.
-	if len(report.Tables) != 10 {
-		t.Errorf("report covers %d tables, want 10", len(report.Tables))
+	// Twelve tables across five schemas, the two Membership batch tables (ADR-ORG-004) included.
+	// Asserted rather than left implicit, because every loop in AssertIsolation is vacuous over an
+	// empty set — a report with no tables and no problems would otherwise read as intact.
+	if len(report.Tables) != 12 {
+		t.Errorf("report covers %d tables, want 12", len(report.Tables))
 	}
 	for _, table := range report.Tables {
 		want := 2 + len(controldb.AdditionalPolicies[table.Qualified()])

@@ -52,6 +52,10 @@ var registry = map[string]error{
 	"membership.ErrInvalid":           membership.ErrInvalid,
 	"membership.ErrNotFound":          membership.ErrNotFound,
 	"membership.ErrRevoked":           membership.ErrRevoked,
+	"membership.ErrBatchNotFound":     membership.ErrBatchNotFound,
+	"membership.ErrBatchNotPreviewed": membership.ErrBatchNotPreviewed,
+	"membership.ErrBatchExpired":      membership.ErrBatchExpired,
+	"membership.ErrNoTransition":      membership.ErrNoTransition,
 
 	"tenant.ErrUnknownAction":           tenant.ErrUnknownAction,
 	"tenant.ErrTransitionRefused":       tenant.ErrTransitionRefused,

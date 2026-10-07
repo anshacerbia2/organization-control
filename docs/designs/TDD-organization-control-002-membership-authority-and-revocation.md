@@ -285,6 +285,7 @@ CREATE TABLE membership.membership_batch_item (
     outcome_reason    TEXT,                   -- not_attempted: refused_at_preview | error_allowance
     accepted_at       TIMESTAMPTZ,            -- succeeded
     event_id          UUID,                   -- succeeded: the event the transition published
+    resulting_version BIGINT,                 -- succeeded: the membership_version it produced
     problem           JSONB,                  -- failed: the single command's problem
     PRIMARY KEY (batch_id, position),
     CONSTRAINT membership_batch_item_once UNIQUE (batch_id, membership_id),
@@ -613,7 +614,7 @@ reads platform tables for a tenant caller through another role, and the provider
 privileged-access record for a Tenant administrator reading their own Tenant, which is the
 cross-Tenant evidence that table exists to keep. So `organization_rt` gains:
 
-- `SELECT (event_id, membership_id, tenant_id, membership_version, event_type, recorded_at)` on
+- `SELECT (event_id, membership_id, membership_version, event_type, recorded_at)` on
   `membership.membership_event`. Row-Level Security confines it to the Tenant. The columns carry no
   actor, correlation or reason, and the role still holds no `UPDATE` or `DELETE`, which is what the
   immutability of the history rests on.

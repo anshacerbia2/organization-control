@@ -36,6 +36,8 @@ BEGIN
               ('membership.membership'),
               ('membership.membership_event'),
               ('membership.tenant_admin_grant'),
+              ('membership.membership_batch'),
+              ('membership.membership_batch_item'),
               ('invitation.invitation'),
               ('operation.offboarding'),
               ('operation.offboarding_obligation'),
@@ -161,11 +163,32 @@ GRANT SELECT                 ON membership.membership TO organization_provider_r
 
 -- membership.membership_event -- INSERT, tenant only, in the transaction that bumps the version.
 --
--- History, and history is not edited: no role may UPDATE or DELETE a row, and neither runtime role
--- may read it. A runtime able to rewrite a version could make an older event look like the newer
--- one and close a revocation's dead letter as superseded by it. The resolver reads it through its
--- own role, below.
+-- History, and history is not edited: no role may UPDATE or DELETE a row. A runtime able to rewrite
+-- a version could make an older event look like the newer one and close a revocation's dead letter
+-- as superseded by it. The resolver reads it through its own role, below.
 GRANT INSERT ON membership.membership_event TO organization_rt;
+
+-- membership.membership_event -- SELECT on five columns, tenant only, under the Tenant's policy.
+--
+-- organization_rt -> membership.Service.Enforcement -> latestEventStatement -> SELECT
+--
+-- The enforcement read (ADR-ORG-004 §5.2, TDD-organization-control-002 1.10.0) starts from the
+-- Membership's latest event. Row-Level Security confines it to the Tenant, and its policy needs no
+-- column privilege on tenant_id; the columns carry no actor, correlation or reason; and reading a
+-- row does not let anyone rewrite it.
+GRANT SELECT (event_id, membership_id, membership_version, event_type, recorded_at)
+    ON membership.membership_event TO organization_rt;
+
+-- membership.membership_batch, membership.membership_batch_item -- tenant only (ADR-ORG-004 §5.1).
+--
+-- organization_rt -> membership.Service.PreviewBatch -> INSERT both, SELECT the continued batch
+--                 -> membership.Service.ExecuteBatch -> SELECT and UPDATE both
+--                 -> membership.Service.GetBatch     -> SELECT both
+--
+-- No DELETE: an executed batch is the record of what a bulk action did. The provider role holds
+-- nothing here, because no provider path acts on a Tenant's batch.
+GRANT SELECT, INSERT, UPDATE ON membership.membership_batch      TO organization_rt;
+GRANT SELECT, INSERT, UPDATE ON membership.membership_batch_item TO organization_rt;
 
 -- membership.tenant_admin_grant -- tenant only (ADR-ORG-003). SELECT for the check every tenant
 -- request makes, under that Tenant's policy; INSERT for a grant; UPDATE on the three revocation
@@ -324,6 +347,22 @@ GRANT SELECT ON platform.outbox_delivery TO organization_provider_rt;
 GRANT UPDATE (published, failure_class, last_error, next_attempt_at, lease_id, leased_until)
     ON platform.outbox_delivery TO organization_provider_rt;
 
+-- platform.outbox_delivery, platform.delivery_receipt, platform.dead_letter -- SELECT on the
+-- columns the enforcement read derives a state from, tenant only.
+--
+-- organization_rt -> membership.Service.Enforcement -> evidenceStatement -> SELECT
+--
+-- ADR-ORG-004 §5.2 shows a transition by its evidence: the deliveries its event was owed, what each
+-- consumer recorded, and what was dead-lettered. The read runs as the tenant role because a Tenant
+-- administrator reads their own Tenant, and the provider role would file a privileged-access record
+-- -- the cross-Tenant evidence that table exists to keep -- for every such read. The statement
+-- reaches these tables only by the event_id the Tenant's own policy returned from
+-- membership_event, and the columns carry no payload, envelope, failure detail or resolution
+-- record. No INSERT on delivery_receipt: forging that evidence stays impossible from a request path.
+GRANT SELECT (event_id, consumer, published_at, failure_class) ON platform.outbox_delivery  TO organization_rt;
+GRANT SELECT (event_id, consumer, evidence, recorded_at)      ON platform.delivery_receipt TO organization_rt;
+GRANT SELECT (event_id, consumer, resolved_at)                 ON platform.dead_letter      TO organization_rt;
+
 -- platform.outbox -- SELECT, provider only
 --
 -- organization_provider_rt -> projection.Publisher.Snapshot -> markStatement -> SELECT
@@ -343,9 +382,9 @@ GRANT USAGE ON SEQUENCE platform.outbox_sequence
 --
 -- organization_provider_rt -> projection.FrontierReader -> unresolved security-debt facts
 --
--- organization_rt gets nothing: no request-path code reads incident evidence. It previously
--- held DELETE here, which let the ordinary request path remove a record of an undelivered
--- security event rather than resolve it.
+-- organization_rt reads three columns for the enforcement read, above, and nothing else. It
+-- previously held DELETE here, which let the ordinary request path remove a record of an
+-- undelivered security event rather than resolve it.
 GRANT SELECT ON platform.dead_letter TO organization_provider_rt;
 
 -- platform.idempotency_key
@@ -367,7 +406,8 @@ GRANT SELECT, INSERT         ON platform.idempotency_key TO organization_provide
 -- foundation-reference's own database. Referenced in this repository only by the ordering
 -- guard at the top of this file, and by the comment below.
 
--- platform.delivery_receipt -- nothing, for either runtime role.
+-- platform.delivery_receipt -- nothing for the provider role, and for the tenant role only the
+-- four columns the enforcement read selects, above.
 --
 -- It is the root of trust for dead-letter resolution: a row saying this event reached this
 -- consumer, and the only evidence in that contract not derived from the consumer's own report

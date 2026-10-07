@@ -46,9 +46,10 @@ var expectedPlatformPrivileges = map[string]map[string][]string{
 		"outbox_delivery": {"INSERT"},
 		// The idempotency claim store runs on the tenant connections by design.
 		"idempotency_key": {"INSERT", "SELECT", "UPDATE"},
-		// dead_letter: none. No request-path code reads incident evidence. It previously held
-		// DELETE here, which let the ordinary request path remove the record of an undelivered
-		// security event rather than resolve it.
+		// dead_letter, delivery_receipt and outbox_delivery: the enforcement read selects a few
+		// columns of each (ADR-ORG-004 §5.2), which is column-level and so not listed. No table-wide
+		// privilege: dead_letter previously held DELETE here, which let the ordinary request path
+		// remove the record of an undelivered security event rather than resolve it.
 		// processed_event: none. A consumer's inbox, used by foundation-reference against its own
 		// database, and referenced nowhere in this repository's Go code.
 	},

@@ -85,6 +85,13 @@ var mapping = []struct {
 	{membership.ErrUnknownAction, platform.Internal},
 	{membership.ErrVersionMismatch, platform.VersionConflict},
 	{membership.ErrReasonRequired, platform.ValidationFailed},
+	// Batches (ADR-ORG-004). A batch already executing or executed, or past its expiry, cannot move
+	// to execution, and no retry changes that: preview again.
+	{membership.ErrBatchNotFound, platform.NotFound},
+	{membership.ErrBatchNotPreviewed, platform.StateTransitionRefused},
+	{membership.ErrBatchExpired, platform.StateTransitionRefused},
+	// NotFound: there is no transition to report on, which is the resource the route names.
+	{membership.ErrNoTransition, platform.NotFound},
 
 	// Tenant.
 	{tenant.ErrInvalid, platform.ValidationFailed},

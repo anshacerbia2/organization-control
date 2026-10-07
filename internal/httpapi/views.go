@@ -44,6 +44,10 @@ type membershipResultView struct {
 	Membership            membershipView `json:"membership"`
 	AcceptedAt            time.Time      `json:"accepted_at"`
 	TenantSecurityVersion int64          `json:"tenant_security_version"`
+
+	// EventID names the event the transition published, which
+	// GET /v1/memberships/{membership_id}/enforcement reports on (TDD-organization-control-002 1.10.0).
+	EventID id.UUID `json:"event_id"`
 }
 
 func viewMembership(m membership.Membership) membershipView {
@@ -58,7 +62,7 @@ func viewMembership(m membership.Membership) membershipView {
 func viewMembershipResult(r membership.Result) membershipResultView {
 	return membershipResultView{
 		Membership: viewMembership(r.Membership), AcceptedAt: r.AcceptedAt,
-		TenantSecurityVersion: r.TenantSecurityVersion,
+		TenantSecurityVersion: r.TenantSecurityVersion, EventID: r.EventID,
 	}
 }
 
