@@ -239,6 +239,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// The routes an eligible caller reaches, and the only ones (ADR-ORG-002).
 	api.HandleFunc("GET /v1/provider-activations", h.listProviderActivations)
 	api.HandleFunc("POST /v1/provider-activations", h.requestProviderActivation)
+	// The caller's own grants, so an eligible holder learns the grant_id it can activate. A literal
+	// segment, and GET: it cannot collide with the POST {activation_id} routes below.
+	api.HandleFunc("GET /v1/provider-activations/grants", h.listHeldProviderGrants)
 	api.HandleFunc("POST /v1/provider-activations/{activation_id}/approve", h.approveProviderActivation)
 	api.HandleFunc("POST /v1/provider-activations/{activation_id}/deny", h.denyProviderActivation)
 	api.HandleFunc("POST /v1/provider-activations/{activation_id}/end", h.endProviderActivation)
