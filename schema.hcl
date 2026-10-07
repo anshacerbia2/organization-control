@@ -932,6 +932,23 @@ table "membership_event" {
     default = sql("now()")
   }
 
+  // Who acted, for which request, and why (TDD-organization-control-002 1.9.0 §Event History): the
+  // "record acting subject, reason, and correlation identifier" step of §Revocation. Nullable,
+  // because rows written before them have nothing to give; every row written since carries the
+  // actor, and a revocation always carries a reason, which the route refuses to go without.
+  column "actor_id" {
+    null = true
+    type = uuid
+  }
+  column "correlation_id" {
+    null = true
+    type = uuid
+  }
+  column "reason" {
+    null = true
+    type = text
+  }
+
   primary_key {
     columns = [column.event_id]
   }
@@ -946,6 +963,11 @@ table "membership_event" {
   // history -- and the predicate orders by exactly that.
   unique "membership_event_version_unique" {
     columns = [column.membership_id, column.membership_version]
+  }
+
+  // A blank reason is a reason naming nobody's intent; absent is honest, blank is not.
+  check "membership_event_reason_present" {
+    expr = "(reason IS NULL) OR (btrim(reason) <> '')"
   }
 }
 

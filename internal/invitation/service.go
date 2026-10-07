@@ -548,21 +548,118 @@ func (s *Service) Get(ctx context.Context, invitationID id.UUID) (Invitation, er
 	return record, nil
 }
 
+// ListQuery selects one page of the bound Tenant's invitations (STD-GLB-001 1.3.0 §Pagination).
+type ListQuery struct {
+	// After is the last invitation_id of the previous page; the nil identifier starts at the first.
+	After id.UUID
+
+	// Limit is the page size, 1 to db.MaxListLimit; zero takes db.DefaultListLimit.
+	Limit int
+
+	// State narrows the list to one stored state; empty is every state. An invitation past its
+	// expiry that the sweep has not reached is still `pending`, and acceptance refuses it anyway.
+	State State
+}
+
+// Page is one page of invitations in creation order. Next is the After of the following page, and
+// nil on the last.
+type Page struct {
+	Invitations []Invitation
+	Next        *id.UUID
+}
+
+// listStatement is one keyset page of the bound Tenant's invitations, in creation order. Row-Level
+// Security confines it to the Tenant. It reads the columns load reads, and the HTTP view drops the
+// target identifier and its hash as it does for a single read.
+const listStatement = `SELECT invitation_id::text,
+       tenant_id::text,
+       coalesce(workspace_id::text, ''),
+       target_identifier,
+       target_hash,
+       subject_type,
+       invited_by::text,
+       coalesce(reason, ''),
+       state,
+       correlation_id::text,
+       coalesce(principal_id::text, ''),
+       expires_at,
+       created_at,
+       accepted_at,
+       revoked_at
+FROM invitation.invitation
+WHERE ($1::text = '' OR state = $1::text)
+  AND ($2::uuid IS NULL OR invitation_id > $2::uuid)
+ORDER BY invitation_id
+LIMIT $3`
+
+// List reads one page of the bound Tenant's invitations, in a read-only transaction.
+func (s *Service) List(ctx context.Context, query ListQuery) (Page, error) {
+	limit, err := db.ListLimit(query.Limit)
+	if err != nil {
+		return Page{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	if query.State != "" && !query.State.Valid() {
+		return Page{}, fmt.Errorf("%w: state must be pending, identity_verified, accepted, expired or revoked", ErrInvalid)
+	}
+
+	page := Page{Invitations: []Invitation{}}
+	if err := db.WithTenantRead(ctx, s.tenantPool, func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, listStatement, string(query.State), db.Keyset(query.After), limit+1)
+		if err != nil {
+			return fmt.Errorf("invitation: list: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			record, err := scanInvitation(rows)
+			if err != nil {
+				return err
+			}
+			page.Invitations = append(page.Invitations, record)
+		}
+		return rows.Err()
+	}); err != nil {
+		return Page{}, err
+	}
+
+	if len(page.Invitations) > limit {
+		page.Invitations = page.Invitations[:limit]
+		next := page.Invitations[limit-1].InvitationID
+		page.Next = &next
+	}
+	return page, nil
+}
+
+// rowScanner is what scanInvitation reads from: one row of a QueryRow or of a Query.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// errScan marks a row that could not be read, which for a single read is an absent one.
+var errScan = errors.New("invitation: scan")
+
 func load(ctx context.Context, tx db.Tx, statement, key string) (Invitation, error) {
+	record, err := scanInvitation(tx.QueryRow(ctx, statement, key))
+	if errors.Is(err, errScan) {
+		// Under Row-Level Security an invitation in another Tenant is simply absent, and reporting
+		// that it exists elsewhere would disclose a row this caller may not read.
+		return Invitation{}, fmt.Errorf("%w: %s", ErrNotFound, key)
+	}
+	return record, err
+}
+
+func scanInvitation(r rowScanner) (Invitation, error) {
 	var (
 		record                                     Invitation
 		rawID, rawTenant, rawWorkspace             string
 		rawInvitedBy, rawCorrelation, rawPrincipal string
 		state                                      string
 	)
-	if err := tx.QueryRow(ctx, statement, key).Scan(
+	if err := r.Scan(
 		&rawID, &rawTenant, &rawWorkspace, &record.TargetIdentifier, &record.TargetHash,
 		&record.SubjectType, &rawInvitedBy, &record.Reason, &state, &rawCorrelation,
 		&rawPrincipal, &record.ExpiresAt, &record.CreatedAt,
 		&record.AcceptedAt, &record.RevokedAt); err != nil {
-		// Under Row-Level Security an invitation in another Tenant is simply absent, and reporting
-		// that it exists elsewhere would disclose a row this caller may not read.
-		return Invitation{}, fmt.Errorf("%w: %s", ErrNotFound, key)
+		return Invitation{}, fmt.Errorf("%w: %w", errScan, err)
 	}
 
 	for target, raw := range map[*id.UUID]string{

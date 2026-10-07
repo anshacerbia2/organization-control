@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.5.0
+  version: 1.6.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-08-23
+  last_reviewed: 2026-10-07
   parent_sad: SAD-004
 ---
 
@@ -247,6 +247,49 @@ POST   /v1/offboardings/{offboarding_id}/obligations/{obligation_id}:waive
 POST   /v1/offboardings/{offboarding_id}:advance
 POST   /v1/offboardings/{offboarding_id}:finalise
 ```
+
+**The invitation routes as served** (`internal/httpapi/routes.go`), from 1.6.0:
+
+```text
+Tenant-scoped: the Tenant is the caller's, from the token
+GET    /v1/invitations                       ?after=&limit=&state=
+POST   /v1/invitations
+GET    /v1/invitations/{invitation_id}
+POST   /v1/invitations/{invitation_id}/revoke
+POST   /v1/invitations/accept
+
+Provider-scoped
+POST   /v1/invitations/verify-identity
+POST   /v1/invitations/expire-lapsed
+
+Unauthenticated
+POST   /v1/invitations/lookup
+```
+
+The list above names `GET /v1/tenants/{tenant_id}/invitations`. The served path is
+`GET /v1/invitations`, as issuing is `POST /v1/invitations`, because a tenant-scoped route takes
+its Tenant from the token (`TDD-organization-control-001` §Scope Resolution): a Tenant in the path
+would be a requested scope for a handler to compare against the bound one, and a route with none
+leaves nothing to mistake for it. Row-Level Security confines the list to the caller's Tenant. A
+transition is a path segment (`/revoke`), not `:revoke`, because a Go 1.22 `net/http` wildcard
+fills a whole segment. `:resend` is not built: a resend is a revocation and a new issue today, and
+the route waits for a client that needs it as one act.
+
+The list follows STD-GLB-001 1.3.0 §Pagination, the form identity-control serves for
+`GET /v1/registrations`:
+
+| Part | Form |
+| :-- | :-- |
+| Cursor | `after`: the `invitation_id` of the last item of the previous page. Absent, the list starts at the first. Not a UUID: `400` |
+| Page size | `limit`: 50 when absent; a whole number from 1 to 100. Anything else, `0` included: `400`, never coerced |
+| Order | `invitation_id`, a UUIDv7, so creation order: the keyset `invitation_id > $after ORDER BY invitation_id LIMIT limit + 1` |
+| Filter | `state` = `pending` \| `identity_verified` \| `accepted` \| `expired` \| `revoked`, optional, holding for every page; any other value: `400` |
+| Response | `{"invitations": [...], "next": "<invitation_id>" \| null}`, `next` null on the last page |
+
+Each item has the shape `GET /v1/invitations/{invitation_id}` returns, which carries neither the
+target identifier nor its hash (§Security Notes). `state` is the stored state: an invitation past
+`expires_at` that the sweep has not yet reached is still `pending`, with its `expires_at` in the
+past, and acceptance refuses it all the same (§Expiry Sweep).
 
 ### Published Events
 
@@ -571,6 +614,7 @@ deprovisioning outcome, invitation token enumeration, and legal hold release.
 | Conforms to | SAD-004 §5.5 — invitation possession never proves identity |
 | Conforms to | SAD-004 §5.6 — offboarding is resumable and infers completion from no single response |
 | Conforms to | SAD-004 §8.1 — anonymous lookup with enumeration resistance |
+| Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/invitations`: `after`, `limit` 1 to 100, key order, `next` |
 | Enterprise constraint | EAD-003 — deletion accounts for projections, derived products, backups, evidence, and legal hold |
 | Depends on | `TDD-organization-control-002` — Membership creation and suspension |
 | Depends on | `TDD-organization-control-003` — Tenant state transitions this flow drives |

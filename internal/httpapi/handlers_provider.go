@@ -249,6 +249,70 @@ func (h *handlers) getOrganization(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusOK, viewOrganization(record))
 }
 
+type organizationPageView struct {
+	Organizations []organizationView `json:"organizations"`
+	Next          *string            `json:"next"`
+}
+
+// listOrganizations serves `GET /v1/organizations?after=&limit=&status=&classification=`. Each page
+// records the access with the caller's reason before it reads.
+func (h *handlers) listOrganizations(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	params, ok := readList(w, r, []string{"status", "classification"}, nil)
+	if !ok {
+		return
+	}
+	page, err := h.services.Organizations.List(r.Context(), organization.ListQuery{
+		After:          params.After,
+		Limit:          params.Limit,
+		Status:         organization.State(params.Filters["status"]),
+		Classification: organization.Classification(params.Filters["classification"]),
+	}, reason(r))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	view := organizationPageView{Organizations: make([]organizationView, 0, len(page.Organizations)), Next: nextCursor(page.Next)}
+	for _, record := range page.Organizations {
+		view.Organizations = append(view.Organizations, viewOrganization(record))
+	}
+	respond(w, http.StatusOK, view)
+}
+
+type tenantPageView struct {
+	Tenants []tenantRecordView `json:"tenants"`
+	Next    *string            `json:"next"`
+}
+
+// listTenants serves `GET /v1/tenants?after=&limit=&status=&organization_id=`. Each page records the
+// access with the caller's reason before it reads.
+func (h *handlers) listTenants(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	params, ok := readList(w, r, []string{"status"}, []string{"organization_id"})
+	if !ok {
+		return
+	}
+	page, err := h.services.Tenants.List(r.Context(), tenant.ListQuery{
+		After:          params.After,
+		Limit:          params.Limit,
+		Status:         tenant.State(params.Filters["status"]),
+		OrganizationID: params.IDs["organization_id"],
+	}, reason(r))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	view := tenantPageView{Tenants: make([]tenantRecordView, 0, len(page.Tenants)), Next: nextCursor(page.Next)}
+	for _, record := range page.Tenants {
+		view.Tenants = append(view.Tenants, viewTenantRecord(record))
+	}
+	respond(w, http.StatusOK, view)
+}
+
 func (h *handlers) organizationTransition(w http.ResponseWriter, r *http.Request,
 	apply func(*http.Request, organization.Command) (organization.Organization, error)) {
 	if _, ok := requireProvider(w, r); !ok {

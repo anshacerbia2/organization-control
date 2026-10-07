@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.5.0
+  version: 1.6.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-09-27
+  last_reviewed: 2026-10-07
   parent_sad: SAD-004
 ---
 
@@ -313,24 +313,70 @@ it later. Treating a timeout as failure and retrying would provision twice.
 
 ## API / Interface
 
+The routes as served (`internal/httpapi/routes.go`):
+
 ```text
+Provider-scoped: provider authority and X-Administrative-Reason
+GET    /v1/organizations                          ?after=&limit=&status=&classification=
 POST   /v1/organizations
 GET    /v1/organizations/{organization_id}
-POST   /v1/organizations/{organization_id}:suspend
-POST   /v1/organizations/{organization_id}:restore
-POST   /v1/organizations/{organization_id}:retire
+POST   /v1/organizations/{organization_id}/suspend
+POST   /v1/organizations/{organization_id}/restore
+POST   /v1/organizations/{organization_id}/retire
 
+GET    /v1/tenants                                ?after=&limit=&status=&organization_id=
 POST   /v1/tenants
 GET    /v1/tenants/{tenant_id}
-POST   /v1/tenants/{tenant_id}:activate
-POST   /v1/tenants/{tenant_id}:suspend
-POST   /v1/tenants/{tenant_id}:restore
+POST   /v1/tenants/{tenant_id}/activate
+POST   /v1/tenants/{tenant_id}/suspend
+POST   /v1/tenants/{tenant_id}/restore
 
-POST   /v1/tenants/{tenant_id}/workspaces
-GET    /v1/tenants/{tenant_id}/workspaces/{workspace_id}
-POST   /v1/tenants/{tenant_id}/workspaces/{workspace_id}:archive
-POST   /v1/tenants/{tenant_id}/workspaces/{workspace_id}:retire
+Tenant-scoped: the Tenant is the caller's, from the token, and never in the path
+GET    /v1/workspaces                             ?after=&limit=&status=
+POST   /v1/workspaces
+GET    /v1/workspaces/{workspace_id}
+POST   /v1/workspaces/{workspace_id}/archive
+POST   /v1/workspaces/{workspace_id}/restore
+POST   /v1/workspaces/{workspace_id}/retire
 ```
+
+Until 1.6.0 this list wrote the transitions as `:suspend`, `:activate`, `:restore`, `:retire` and `:archive`, and nested
+Workspaces under `/v1/tenants/{tenant_id}/`. Neither was ever served. A transition is a path
+segment (`/suspend`), because every route on this surface is registered as a Go 1.22
+`net/http` pattern, where a wildcard fills a whole segment and `{id}:suspend` is not a
+pattern. A Workspace route names no Tenant, because a tenant-scoped route takes its Tenant
+from the token (`TDD-organization-control-001` §Scope Resolution): a Tenant in the path
+would be a requested scope for a handler to compare, and here there is none to mistake for
+the bound one. A client follows this list, not the earlier one.
+
+### Lists
+
+The three lists follow STD-GLB-001 1.3.0 §Pagination, in the form identity-control serves
+for `GET /v1/registrations` (`TDD-identity-control-003` §API / Interface):
+
+| Part | Form |
+| :-- | :-- |
+| Cursor | `after`: the identifier of the last item of the previous page. Absent, the list starts at its first item. Not a UUID: `400` |
+| Page size | `limit`: 50 when absent; a whole number from 1 to 100. Anything else, `0` included: `400`, never coerced |
+| Order | The primary key (`organization_id`, `tenant_id`, `workspace_id`), a UUIDv7, so creation order. The query is the keyset `id > $after ORDER BY id LIMIT limit + 1`; the extra row only says whether a page follows |
+| Filters | Each a closed set or an identifier, each optional, each holding for every page. A value outside the set, or an identifier that is not a UUID: `400` |
+| Response | `{"organizations": [...], "next": "<organization_id>" \| null}`, and `tenants` and `workspaces` likewise. `next` is the `after` of the following page, and null on the last |
+
+Each item has the shape the single read returns: `GET /v1/organizations/{organization_id}`,
+`GET /v1/tenants/{tenant_id}` and `GET /v1/workspaces/{workspace_id}`.
+
+| List | Filters |
+| :-- | :-- |
+| `GET /v1/organizations` | `status` = `active` \| `suspended` \| `retired`; `classification` = `provider` \| `customer` \| `partner` \| `publisher` |
+| `GET /v1/tenants` | `status` = `requested` \| `provisioning` \| `active` \| `failed` \| `suspended` \| `offboarding` \| `retired`; `organization_id` = a UUID |
+| `GET /v1/workspaces` | `status` = `active` \| `archived` \| `retired` |
+
+Without `status` every state is listed, `retired` included, because a retired record is
+still the record of something that existed. The two provider lists run on the provider
+pool, so each page writes the privileged-access record with the caller's
+`X-Administrative-Reason` before it reads, as every provider read does. The Workspace list
+runs on the tenant pool in a read-only transaction, and Row-Level Security confines it to the
+caller's Tenant: there is no parameter that could name another.
 
 Every mutation requires an `Idempotency-Key`, the optimistic `version` of the record the
 caller was shown, an authenticated actor, and a reason where the operation is
@@ -653,6 +699,7 @@ resolution, and Tenant activation refused.
 | Conforms to | EAD-005 §5.3 — pooled, bridge, silo, and regional isolation profiles |
 | Enterprise constraint | EAD-003 — one authority per fact; an external reference does not copy the record |
 | Enterprise constraint | EAD-004 §6.6 — critical mutations define duplicate protection at the business boundary |
+| Conforms to | STD-GLB-001 1.3.0 §Pagination — the list form: `after`, `limit` 1 to 100, key order, `next` |
 | Depends on | `TDD-foundation-platform-001` — outbox, envelope, idempotency |
 | Consumed by | `TDD-organization-control-002` — Membership references `tenant.tenant` and `workspace.workspace` |
 | Consumed by | `TDD-organization-control-004` — offboarding drives the Tenant terminal transitions |

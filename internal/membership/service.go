@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/anshacerbia2/foundation-platform/event"
@@ -153,38 +154,89 @@ func (s *Service) GrantWithin(ctx context.Context, tx db.Tx, req GrantRequest) (
 		record.ValidFrom, nullableTime(record.ValidUntil), record.Provenance); err != nil {
 		return Result{}, fmt.Errorf("membership: insert: %w", err)
 	}
-	if err := s.appendEvent(ctx, tx, ActionGrant, record, securityVersion, acceptedAt); err != nil {
+	if err := s.appendEvent(ctx, tx, ActionGrant, record, securityVersion, acceptedAt, ""); err != nil {
 		return Result{}, err
 	}
 
 	return Result{Membership: record, AcceptedAt: acceptedAt, TenantSecurityVersion: securityVersion}, nil
 }
 
-// Suspend withholds the context reversibly.
-func (s *Service) Suspend(ctx context.Context, membershipID id.UUID) (Result, error) {
-	return s.transition(ctx, ActionSuspend, membershipID)
+// Command is one requested Membership transition.
+type Command struct {
+	MembershipID id.UUID
+
+	// ExpectedVersion is the `membership_version` of the Membership the caller was shown. Required:
+	// TDD-organization-control-002 §API has every mutation name the version it acted on, and two
+	// administrators acting on one Membership from two views would otherwise have the second action
+	// land on a state neither of them saw.
+	ExpectedVersion int64
+
+	// Reason says why. Required for a revocation, which is irreversible; recorded whenever it is
+	// given, on the transition's membership.membership_event row.
+	Reason string
 }
 
-// Revoke withholds it permanently.
-func (s *Service) Revoke(ctx context.Context, membershipID id.UUID) (Result, error) {
-	return s.transition(ctx, ActionRevoke, membershipID)
+func (c Command) validate(action Action) error {
+	switch {
+	case c.MembershipID.IsNil():
+		return fmt.Errorf("%w: a membership identifier is required", ErrInvalid)
+	case c.ExpectedVersion <= 0:
+		return fmt.Errorf("%w: the expected version the caller was shown is required", ErrInvalid)
+	case action == ActionRevoke && strings.TrimSpace(c.Reason) == "":
+		return ErrReasonRequired
+	}
+	return nil
+}
+
+// Suspend withholds the context reversibly.
+func (s *Service) Suspend(ctx context.Context, cmd Command) (Result, error) {
+	return s.transition(ctx, ActionSuspend, cmd)
+}
+
+// Revoke withholds it permanently, and requires a reason.
+func (s *Service) Revoke(ctx context.Context, cmd Command) (Result, error) {
+	return s.transition(ctx, ActionRevoke, cmd)
 }
 
 // Restore returns a suspended Membership to active.
-func (s *Service) Restore(ctx context.Context, membershipID id.UUID) (Result, error) {
-	return s.transition(ctx, ActionRestore, membershipID)
+func (s *Service) Restore(ctx context.Context, cmd Command) (Result, error) {
+	return s.transition(ctx, ActionRestore, cmd)
 }
 
-const selectForUpdate = `SELECT membership_id::text,
+// membershipColumns is every column a read returns, in the order scanMembership reads them.
+const membershipColumns = `membership_id::text,
        principal_id::text,
        tenant_id::text,
        coalesce(workspace_id::text, ''),
        subject_type,
        status,
-       membership_version
+       membership_version,
+       valid_from,
+       valid_until,
+       provenance`
+
+const selectForUpdate = `SELECT ` + membershipColumns + `
 FROM membership.membership
 WHERE membership_id = $1
 FOR UPDATE`
+
+// selectOne is the plain read. Not selectForUpdate: a read takes no lock, and PostgreSQL refuses
+// FOR UPDATE inside the read-only transaction a read runs in.
+const selectOne = `SELECT ` + membershipColumns + `
+FROM membership.membership
+WHERE membership_id = $1`
+
+// listStatement is one keyset page of the bound Tenant's Memberships, in creation order. Row-Level
+// Security confines it to the Tenant; no parameter names one. Each filter is skipped when empty, and
+// the caller asks for one row more than the page so it knows whether another follows.
+const listStatement = `SELECT ` + membershipColumns + `
+FROM membership.membership
+WHERE ($1::text = '' OR status = $1::text)
+  AND ($2::uuid IS NULL OR workspace_id = $2::uuid)
+  AND ($3::uuid IS NULL OR principal_id = $3::uuid)
+  AND ($4::uuid IS NULL OR membership_id > $4::uuid)
+ORDER BY membership_id
+LIMIT $5`
 
 // updateStatement increments the version in the same statement that changes the status.
 //
@@ -199,7 +251,10 @@ SET status = $2,
 WHERE membership_id = $1
 RETURNING membership_version`
 
-func (s *Service) transition(ctx context.Context, action Action, membershipID id.UUID) (Result, error) {
+func (s *Service) transition(ctx context.Context, action Action, cmd Command) (Result, error) {
+	if err := cmd.validate(action); err != nil {
+		return Result{}, err
+	}
 	if _, ok := db.ScopeFrom(ctx); !ok {
 		return Result{}, db.ErrNoScope
 	}
@@ -207,7 +262,7 @@ func (s *Service) transition(ctx context.Context, action Action, membershipID id
 	var result Result
 	if err := db.WithTenantScope(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
 		var err error
-		result, err = s.TransitionWithin(ctx, tx, action, membershipID)
+		result, err = s.TransitionWithin(ctx, tx, action, cmd)
 		return err
 	}); err != nil {
 		return Result{}, err
@@ -223,18 +278,18 @@ func (s *Service) transition(ctx context.Context, action Action, membershipID id
 // with no event, which is a context that authority has withdrawn and no consumer will ever hear
 // about.
 //
-// The rules are not relaxed for the bulk path. Every refusal, version increment, and event is the
-// same code a single suspension runs, because a bulk path with its own copy of the state machine is
-// a second state machine that will eventually disagree with the first.
-func (s *Service) TransitionWithin(ctx context.Context, tx db.Tx, action Action,
-	membershipID id.UUID) (Result, error) {
-	if membershipID.IsNil() {
-		return Result{}, fmt.Errorf("%w: a membership identifier is required", ErrInvalid)
+// The rules are not relaxed for the bulk path. Every refusal, version check, version increment, and
+// event is the same code a single suspension runs, because a bulk path with its own copy of the
+// state machine is a second state machine that will eventually disagree with the first. The freeze
+// names the version of the row it locked.
+func (s *Service) TransitionWithin(ctx context.Context, tx db.Tx, action Action, cmd Command) (Result, error) {
+	if err := cmd.validate(action); err != nil {
+		return Result{}, err
 	}
 
 	acceptedAt := s.now().UTC()
 
-	current, err := load(ctx, tx, membershipID)
+	current, err := load(ctx, tx, selectForUpdate, cmd.MembershipID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -246,6 +301,14 @@ func (s *Service) TransitionWithin(ctx context.Context, tx db.Tx, action Action,
 		return Result{}, err
 	}
 
+	// After the state check, as a Tenant or Workspace transition does: a caller acting on a stale
+	// view usually has both wrong, and "restore is not permitted from active" says what happened
+	// where "version 4 is not version 5" says only that something did.
+	if current.Version != cmd.ExpectedVersion {
+		return Result{}, fmt.Errorf("%w: expected %d, stored %d",
+			ErrVersionMismatch, cmd.ExpectedVersion, current.Version)
+	}
+
 	securityVersion, err := tenantSecurityVersion(ctx, tx, current.TenantID)
 	if err != nil {
 		return Result{}, err
@@ -253,23 +316,104 @@ func (s *Service) TransitionWithin(ctx context.Context, tx db.Tx, action Action,
 
 	var updatedVersion int64
 	if err := tx.QueryRow(ctx, updateStatement,
-		membershipID.String(), string(next)).Scan(&updatedVersion); err != nil {
+		cmd.MembershipID.String(), string(next)).Scan(&updatedVersion); err != nil {
 		return Result{}, fmt.Errorf("membership: update status: %w", err)
 	}
 
 	current.Status = next
 	current.Version = updatedVersion
 
-	if err := s.appendEvent(ctx, tx, action, current, securityVersion, acceptedAt); err != nil {
+	if err := s.appendEvent(ctx, tx, action, current, securityVersion, acceptedAt,
+		strings.TrimSpace(cmd.Reason)); err != nil {
 		return Result{}, err
 	}
 
 	return Result{Membership: current, AcceptedAt: acceptedAt, TenantSecurityVersion: securityVersion}, nil
 }
 
+// Get reads one Membership in the bound Tenant. One in another Tenant is absent under Row-Level
+// Security, and answers ErrNotFound.
+func (s *Service) Get(ctx context.Context, membershipID id.UUID) (Membership, error) {
+	if membershipID.IsNil() {
+		return Membership{}, fmt.Errorf("%w: a membership identifier is required", ErrInvalid)
+	}
+	var record Membership
+	if err := db.WithTenantRead(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
+		var err error
+		record, err = load(ctx, tx, selectOne, membershipID)
+		return err
+	}); err != nil {
+		return Membership{}, err
+	}
+	return record, nil
+}
+
+// ListQuery selects one page of the bound Tenant's Memberships (STD-GLB-001 1.3.0 §Pagination).
+type ListQuery struct {
+	// After is the last membership_id of the previous page; the nil identifier starts at the first.
+	After id.UUID
+
+	// Limit is the page size, 1 to db.MaxListLimit; zero takes db.DefaultListLimit.
+	Limit int
+
+	// Status narrows the list to one state; empty is every state, revoked included.
+	Status State
+
+	// WorkspaceID narrows it to the Memberships scoped to one Workspace; nil is every scope.
+	WorkspaceID id.UUID
+
+	// PrincipalID narrows it to one Principal's Memberships; nil is every Principal.
+	PrincipalID id.UUID
+}
+
+// Page is one page of Memberships in creation order. Next is the After of the following page, and
+// nil on the last.
+type Page struct {
+	Memberships []Membership
+	Next        *id.UUID
+}
+
+// List reads one page of the bound Tenant's Memberships.
+func (s *Service) List(ctx context.Context, query ListQuery) (Page, error) {
+	limit, err := db.ListLimit(query.Limit)
+	if err != nil {
+		return Page{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	if query.Status != "" && !query.Status.Valid() {
+		return Page{}, fmt.Errorf("%w: status must be active, suspended or revoked", ErrInvalid)
+	}
+
+	page := Page{Memberships: []Membership{}}
+	if err := db.WithTenantRead(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, listStatement, string(query.Status),
+			db.Keyset(query.WorkspaceID), db.Keyset(query.PrincipalID), db.Keyset(query.After), limit+1)
+		if err != nil {
+			return fmt.Errorf("membership: list: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			record, err := scanMembership(rows)
+			if err != nil {
+				return err
+			}
+			page.Memberships = append(page.Memberships, record)
+		}
+		return rows.Err()
+	}); err != nil {
+		return Page{}, err
+	}
+
+	if len(page.Memberships) > limit {
+		page.Memberships = page.Memberships[:limit]
+		next := page.Memberships[limit-1].MembershipID
+		page.Next = &next
+	}
+	return page, nil
+}
+
 // appendEvent writes the event inside the caller's transaction.
 func (s *Service) appendEvent(ctx context.Context, tx db.Tx, action Action, record Membership,
-	securityVersion int64, occurredAt time.Time) error {
+	securityVersion int64, occurredAt time.Time, reason string) error {
 	if s.beforeAppend != nil {
 		if err := s.beforeAppend(ctx); err != nil {
 			return err
@@ -307,18 +451,46 @@ func (s *Service) appendEvent(ctx context.Context, tx db.Tx, action Action, reco
 	// delivery receipt names only an event, and this says which Membership, at which point in its
 	// history, that event concerns. The version is the event's own, fixed here -- unlike the stream
 	// position, which a replay reassigns.
+	//
+	// The same row records who acted, for which request, and why: the step TDD-organization-control-002
+	// §Revocation names and that had nowhere to land, because a tenant-scoped transition writes no
+	// privileged-access row.
+	scope, ok := db.ScopeFrom(ctx)
+	if !ok {
+		return db.ErrNoScope
+	}
 	if _, err := tx.Exec(ctx, recordEventStatement, envelope.ID.String(), record.MembershipID.String(),
-		record.TenantID.String(), record.Version, string(eventType)); err != nil {
+		record.TenantID.String(), record.Version, string(eventType),
+		db.Keyset(scope.Actor()), db.Keyset(scope.Correlation()), nullableText(reason)); err != nil {
 		return fmt.Errorf("membership: record the event's version: %w", err)
 	}
 	return nil
 }
 
 const recordEventStatement = `INSERT INTO membership.membership_event
-    (event_id, membership_id, tenant_id, membership_version, event_type)
-VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5)`
+    (event_id, membership_id, tenant_id, membership_version, event_type, actor_id, correlation_id, reason)
+VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6::uuid, $7::uuid, $8)`
 
-func load(ctx context.Context, tx db.Tx, membershipID id.UUID) (Membership, error) {
+// rowScanner is what scanMembership reads from: one row of a QueryRow or of a Query.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func load(ctx context.Context, tx db.Tx, statement string, membershipID id.UUID) (Membership, error) {
+	record, err := scanMembership(tx.QueryRow(ctx, statement, membershipID.String()))
+	if errors.Is(err, errScan) {
+		// Under Row-Level Security a Membership in another Tenant is simply absent, which is the
+		// correct answer to give: reporting that it exists elsewhere would leak the existence of
+		// a row this caller may not read.
+		return Membership{}, fmt.Errorf("%w: %s", ErrNotFound, membershipID)
+	}
+	return record, err
+}
+
+// errScan marks a row that could not be read, which for a single read is an absent one.
+var errScan = errors.New("membership: scan")
+
+func scanMembership(r rowScanner) (Membership, error) {
 	var (
 		record       Membership
 		rawID        string
@@ -326,14 +498,12 @@ func load(ctx context.Context, tx db.Tx, membershipID id.UUID) (Membership, erro
 		rawTenant    string
 		rawWorkspace string
 		status       string
+		validUntil   *time.Time
 	)
-	if err := tx.QueryRow(ctx, selectForUpdate, membershipID.String()).Scan(
-		&rawID, &rawPrincipal, &rawTenant, &rawWorkspace,
-		&record.SubjectType, &status, &record.Version); err != nil {
-		// Under Row-Level Security a Membership in another Tenant is simply absent, which is the
-		// correct answer to give: reporting that it exists elsewhere would leak the existence of
-		// a row this caller may not read.
-		return Membership{}, fmt.Errorf("%w: %s", ErrNotFound, membershipID)
+	if err := r.Scan(&rawID, &rawPrincipal, &rawTenant, &rawWorkspace,
+		&record.SubjectType, &status, &record.Version,
+		&record.ValidFrom, &validUntil, &record.Provenance); err != nil {
+		return Membership{}, fmt.Errorf("%w: %w", errScan, err)
 	}
 
 	parsed, err := parseAll(rawID, rawPrincipal, rawTenant, rawWorkspace)
@@ -341,6 +511,9 @@ func load(ctx context.Context, tx db.Tx, membershipID id.UUID) (Membership, erro
 		return Membership{}, err
 	}
 	record.MembershipID, record.PrincipalID, record.TenantID, record.WorkspaceID = parsed[0], parsed[1], parsed[2], parsed[3]
+	if validUntil != nil {
+		record.ValidUntil = *validUntil
+	}
 	record.Status = State(status)
 	if !record.Status.Valid() {
 		return Membership{}, fmt.Errorf("membership: stored status %q is not in the state machine", status)
@@ -413,6 +586,13 @@ func nullableUUID(value id.UUID) any {
 
 func nullableTime(value time.Time) any {
 	if value.IsZero() {
+		return nil
+	}
+	return value
+}
+
+func nullableText(value string) any {
+	if value == "" {
 		return nil
 	}
 	return value

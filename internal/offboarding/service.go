@@ -145,7 +145,7 @@ func (s *Service) Begin(ctx context.Context, req BeginRequest) (Offboarding, err
 	return record, nil
 }
 
-const selectFreezeBatch = `SELECT membership_id::text
+const selectFreezeBatch = `SELECT membership_id::text, membership_version
 FROM membership.membership
 WHERE tenant_id = $1
   AND status = 'active'
@@ -184,10 +184,16 @@ func (s *Service) FreezeBatch(ctx context.Context, tenantID id.UUID, size int, r
 		if err != nil {
 			return fmt.Errorf("offboarding: select freeze batch: %w", err)
 		}
-		var ids []id.UUID
+		// Each with the version the batch locked, which is the version its suspension names: the
+		// freeze is held to the same optimistic check as a single suspension, and under the lock
+		// it cannot be stale.
+		var batch []membership.Command
 		for rows.Next() {
-			var raw string
-			if err := rows.Scan(&raw); err != nil {
+			var (
+				raw     string
+				version int64
+			)
+			if err := rows.Scan(&raw, &version); err != nil {
 				rows.Close()
 				return fmt.Errorf("offboarding: scan freeze batch: %w", err)
 			}
@@ -196,7 +202,7 @@ func (s *Service) FreezeBatch(ctx context.Context, tenantID id.UUID, size int, r
 				rows.Close()
 				return fmt.Errorf("offboarding: stored membership id %q: %w", raw, err)
 			}
-			ids = append(ids, parsed)
+			batch = append(batch, membership.Command{MembershipID: parsed, ExpectedVersion: version, Reason: reason})
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -206,8 +212,8 @@ func (s *Service) FreezeBatch(ctx context.Context, tenantID id.UUID, size int, r
 		// Every suspension in this batch, and every priority event it produces, commit together.
 		// A Membership suspended without its event is a context authority has withdrawn that no
 		// consumer will ever hear about.
-		for _, membershipID := range ids {
-			if _, err := s.memberships.TransitionWithin(ctx, tx, membership.ActionSuspend, membershipID); err != nil {
+		for _, cmd := range batch {
+			if _, err := s.memberships.TransitionWithin(ctx, tx, membership.ActionSuspend, cmd); err != nil {
 				return err
 			}
 			frozen++

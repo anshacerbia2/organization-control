@@ -840,3 +840,56 @@ func TestThePayloadCarriesNoIdentifier(t *testing.T) {
 		t.Error("the envelope omits the correlation a consumer needs")
 	}
 }
+
+// TestTheListIsAKeysetPageOfTheBoundTenant is STD-GLB-001 1.3.0 §Pagination over invitations: key
+// order, `next` on a full page and null on the last, a state filter, and Row-Level Security
+// confining the list to the caller's Tenant.
+func TestTheListIsAKeysetPageOfTheBoundTenant(t *testing.T) {
+	f := newFixture(t)
+	tenantID := f.seedTenant(t, "active")
+	otherTenant := f.seedTenant(t, "active")
+	ctx := f.scopeFor(tenantID)
+
+	first := f.issue(t, tenantID, "first@list.example")
+	second := f.issue(t, tenantID, "second@list.example")
+	third := f.issue(t, tenantID, "third@list.example")
+	f.issue(t, otherTenant, "elsewhere@list.example")
+	if _, err := f.service.Revoke(ctx, second.Invitation.InvitationID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	page, err := f.service.List(ctx, ListQuery{Limit: 2})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Invitations) != 2 || page.Invitations[0].InvitationID != first.Invitation.InvitationID ||
+		page.Invitations[1].InvitationID != second.Invitation.InvitationID {
+		t.Fatalf("first page is not the first two invitations in creation order: %+v", page.Invitations)
+	}
+	if page.Next == nil || *page.Next != second.Invitation.InvitationID {
+		t.Fatalf("next = %v, want the last item of the page", page.Next)
+	}
+
+	last, err := f.service.List(ctx, ListQuery{Limit: 2, After: *page.Next})
+	if err != nil {
+		t.Fatalf("List after: %v", err)
+	}
+	if len(last.Invitations) != 1 || last.Invitations[0].InvitationID != third.Invitation.InvitationID || last.Next != nil {
+		t.Fatalf("last page = %+v, next %v; want the third invitation and no cursor", last.Invitations, last.Next)
+	}
+
+	revoked, err := f.service.List(ctx, ListQuery{State: StateRevoked})
+	if err != nil {
+		t.Fatalf("List revoked: %v", err)
+	}
+	if len(revoked.Invitations) != 1 || revoked.Invitations[0].InvitationID != second.Invitation.InvitationID {
+		t.Errorf("the revoked filter returned %+v", revoked.Invitations)
+	}
+
+	if _, err := f.service.List(ctx, ListQuery{State: "sent"}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("an unknown state: error = %v, want ErrInvalid", err)
+	}
+	if _, err := f.service.List(ctx, ListQuery{Limit: -1}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("limit -1: error = %v, want ErrInvalid", err)
+	}
+}

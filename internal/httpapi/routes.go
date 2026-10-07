@@ -165,17 +165,24 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 
 	// Tenant-scoped. None of these paths names a Tenant, so there is no client-supplied Tenant for
 	// a handler to mistake for the authoritative one.
+	// The lists take `after`, `limit` and named filters (STD-GLB-001 1.3.0 §Pagination). A list path
+	// has no trailing segment, so `GET /v1/workspaces` and `GET /v1/workspaces/{workspace_id}` are
+	// distinct patterns, and a GET cannot collide with the POST routes sharing a path.
+	api.HandleFunc("GET /v1/memberships", h.listMemberships)
+	api.HandleFunc("GET /v1/memberships/{membership_id}", h.getMembership)
 	api.HandleFunc("POST /v1/memberships", h.grantMembership)
 	api.HandleFunc("POST /v1/memberships/{membership_id}/suspend", h.suspendMembership)
 	api.HandleFunc("POST /v1/memberships/{membership_id}/restore", h.restoreMembership)
 	api.HandleFunc("POST /v1/memberships/{membership_id}/revoke", h.revokeMembership)
 
+	api.HandleFunc("GET /v1/workspaces", h.listWorkspaces)
 	api.HandleFunc("POST /v1/workspaces", h.createWorkspace)
 	api.HandleFunc("GET /v1/workspaces/{workspace_id}", h.getWorkspace)
 	api.HandleFunc("POST /v1/workspaces/{workspace_id}/archive", h.archiveWorkspace)
 	api.HandleFunc("POST /v1/workspaces/{workspace_id}/restore", h.restoreWorkspace)
 	api.HandleFunc("POST /v1/workspaces/{workspace_id}/retire", h.retireWorkspace)
 
+	api.HandleFunc("GET /v1/invitations", h.listInvitations)
 	api.HandleFunc("POST /v1/invitations", h.issueInvitation)
 	api.HandleFunc("GET /v1/invitations/{invitation_id}", h.getInvitation)
 	api.HandleFunc("POST /v1/invitations/{invitation_id}/revoke", h.revokeInvitation)
@@ -185,12 +192,14 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/invitations/verify-identity", h.recordVerifiedIdentity)
 	api.HandleFunc("POST /v1/invitations/expire-lapsed", h.expireLapsedInvitations)
 
+	api.HandleFunc("GET /v1/organizations", h.listOrganizations)
 	api.HandleFunc("POST /v1/organizations", h.registerOrganization)
 	api.HandleFunc("GET /v1/organizations/{organization_id}", h.getOrganization)
 	api.HandleFunc("POST /v1/organizations/{organization_id}/suspend", h.suspendOrganization)
 	api.HandleFunc("POST /v1/organizations/{organization_id}/restore", h.restoreOrganization)
 	api.HandleFunc("POST /v1/organizations/{organization_id}/retire", h.retireOrganization)
 
+	api.HandleFunc("GET /v1/tenants", h.listTenants)
 	api.HandleFunc("POST /v1/tenants", h.requestTenant)
 	api.HandleFunc("GET /v1/tenants/{tenant_id}", h.getTenant)
 	api.HandleFunc("POST /v1/tenants/{tenant_id}/activate", h.activateTenant)

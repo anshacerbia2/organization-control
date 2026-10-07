@@ -58,12 +58,25 @@ func (h *handlers) grantMembership(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusCreated, viewMembershipResult(result))
 }
 
+// membershipCommand is the body the three Membership transitions take.
+//
+// `expected_version` is required: TDD-organization-control-002 §API has every mutation name the
+// version of the record the caller was shown, and a mismatch answers 409 rather than landing on a
+// state the caller never saw. The service refuses a missing one, so the rule lives in one place.
+type membershipCommand struct {
+	ExpectedVersion int64 `json:"expected_version"`
+}
+
 // membershipTransition is the shape the three lifecycle routes share.
 //
 // One helper rather than three near-identical handlers, because three copies is where the fourth
 // transition gets added to two of them.
-func (h *handlers) membershipTransition(w http.ResponseWriter, r *http.Request,
-	apply func(*http.Request, id.UUID) (membership.Result, error)) {
+//
+// The reason is the X-Administrative-Reason header, as on every provider route. A revocation is
+// irreversible, so it requires one from a tenant caller too and is refused here, before anything is
+// read, when the header is absent; a suspension or restoration records one when it is sent.
+func (h *handlers) membershipTransition(w http.ResponseWriter, r *http.Request, action membership.Action,
+	apply func(*http.Request, membership.Command) (membership.Result, error)) {
 	if _, ok := requireTenant(w, r); !ok {
 		return
 	}
@@ -71,7 +84,20 @@ func (h *handlers) membershipTransition(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	result, err := apply(r, membershipID)
+	if action == membership.ActionRevoke && reason(r) == "" {
+		platform.Problem(w, r, platform.ValidationFailed,
+			"A revocation is irreversible and must carry the "+ReasonHeader+" header")
+		return
+	}
+	body, ok := decode[membershipCommand](w, r)
+	if !ok {
+		return
+	}
+	result, err := apply(r, membership.Command{
+		MembershipID:    membershipID,
+		ExpectedVersion: body.ExpectedVersion,
+		Reason:          reason(r),
+	})
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -80,21 +106,133 @@ func (h *handlers) membershipTransition(w http.ResponseWriter, r *http.Request,
 }
 
 func (h *handlers) suspendMembership(w http.ResponseWriter, r *http.Request) {
-	h.membershipTransition(w, r, func(r *http.Request, membershipID id.UUID) (membership.Result, error) {
-		return h.services.Memberships.Suspend(r.Context(), membershipID)
-	})
+	h.membershipTransition(w, r, membership.ActionSuspend,
+		func(r *http.Request, cmd membership.Command) (membership.Result, error) {
+			return h.services.Memberships.Suspend(r.Context(), cmd)
+		})
 }
 
 func (h *handlers) restoreMembership(w http.ResponseWriter, r *http.Request) {
-	h.membershipTransition(w, r, func(r *http.Request, membershipID id.UUID) (membership.Result, error) {
-		return h.services.Memberships.Restore(r.Context(), membershipID)
-	})
+	h.membershipTransition(w, r, membership.ActionRestore,
+		func(r *http.Request, cmd membership.Command) (membership.Result, error) {
+			return h.services.Memberships.Restore(r.Context(), cmd)
+		})
 }
 
 func (h *handlers) revokeMembership(w http.ResponseWriter, r *http.Request) {
-	h.membershipTransition(w, r, func(r *http.Request, membershipID id.UUID) (membership.Result, error) {
-		return h.services.Memberships.Revoke(r.Context(), membershipID)
+	h.membershipTransition(w, r, membership.ActionRevoke,
+		func(r *http.Request, cmd membership.Command) (membership.Result, error) {
+			return h.services.Memberships.Revoke(r.Context(), cmd)
+		})
+}
+
+func (h *handlers) getMembership(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireTenant(w, r); !ok {
+		return
+	}
+	membershipID, ok := pathUUID(w, r, "membership_id")
+	if !ok {
+		return
+	}
+	record, err := h.services.Memberships.Get(r.Context(), membershipID)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond(w, http.StatusOK, viewMembership(record))
+}
+
+type membershipPageView struct {
+	Memberships []membershipView `json:"memberships"`
+	Next        *string          `json:"next"`
+}
+
+// listMemberships serves `GET /v1/memberships?after=&limit=&status=&workspace_id=&principal_id=`.
+func (h *handlers) listMemberships(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireTenant(w, r); !ok {
+		return
+	}
+	params, ok := readList(w, r, []string{"status"}, []string{"workspace_id", "principal_id"})
+	if !ok {
+		return
+	}
+	page, err := h.services.Memberships.List(r.Context(), membership.ListQuery{
+		After:       params.After,
+		Limit:       params.Limit,
+		Status:      membership.State(params.Filters["status"]),
+		WorkspaceID: params.IDs["workspace_id"],
+		PrincipalID: params.IDs["principal_id"],
 	})
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	view := membershipPageView{Memberships: make([]membershipView, 0, len(page.Memberships)), Next: nextCursor(page.Next)}
+	for _, record := range page.Memberships {
+		view.Memberships = append(view.Memberships, viewMembership(record))
+	}
+	respond(w, http.StatusOK, view)
+}
+
+type workspacePageView struct {
+	Workspaces []workspaceView `json:"workspaces"`
+	Next       *string         `json:"next"`
+}
+
+// listWorkspaces serves `GET /v1/workspaces?after=&limit=&status=`.
+func (h *handlers) listWorkspaces(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireTenant(w, r); !ok {
+		return
+	}
+	params, ok := readList(w, r, []string{"status"}, nil)
+	if !ok {
+		return
+	}
+	page, err := h.services.Workspaces.List(r.Context(), workspace.ListQuery{
+		After:  params.After,
+		Limit:  params.Limit,
+		Status: workspace.State(params.Filters["status"]),
+	})
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	view := workspacePageView{Workspaces: make([]workspaceView, 0, len(page.Workspaces)), Next: nextCursor(page.Next)}
+	for _, record := range page.Workspaces {
+		view.Workspaces = append(view.Workspaces, viewWorkspace(record))
+	}
+	respond(w, http.StatusOK, view)
+}
+
+type invitationPageView struct {
+	Invitations []invitationView `json:"invitations"`
+	Next        *string          `json:"next"`
+}
+
+// listInvitations serves `GET /v1/invitations?after=&limit=&state=`. Each item is the view a single
+// read returns, which carries neither the target identifier nor its hash.
+func (h *handlers) listInvitations(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireTenant(w, r); !ok {
+		return
+	}
+	params, ok := readList(w, r, []string{"state"}, nil)
+	if !ok {
+		return
+	}
+	page, err := h.services.Invitations.List(r.Context(), invitation.ListQuery{
+		After: params.After,
+		Limit: params.Limit,
+		State: invitation.State(params.Filters["state"]),
+	})
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	view := invitationPageView{Invitations: make([]invitationView, 0, len(page.Invitations)), Next: nextCursor(page.Next)}
+	for _, record := range page.Invitations {
+		view.Invitations = append(view.Invitations, viewInvitation(record))
+	}
+	respond(w, http.StatusOK, view)
 }
 
 type createWorkspaceRequest struct {

@@ -489,3 +489,55 @@ func TestAnAbsentOrganizationIsNotFound(t *testing.T) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
 }
+
+// TestTheListIsAKeysetPageWithItsAccessRecorded is STD-GLB-001 1.3.0 §Pagination over the registry:
+// key order, `next` on a full page and null on the last, filters holding for every page, and each
+// page recorded as privileged access before it is read.
+func TestTheListIsAKeysetPageWithItsAccessRecorded(t *testing.T) {
+	f := newFixture(t)
+
+	// A UUIDv7 minted before the three registrations sorts after everything already in the
+	// registry and before them, so a list starting after it holds exactly these three.
+	before := mustID(t)
+	first := f.register(t, ClassificationCustomer, nil)
+	second := f.register(t, ClassificationPartner, nil)
+	third := f.register(t, ClassificationCustomer, nil)
+
+	page, err := f.service.List(f.ctx, ListQuery{After: before, Limit: 2}, "the registry screen")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Organizations) != 2 || page.Organizations[0].OrganizationID != first.OrganizationID ||
+		page.Organizations[1].OrganizationID != second.OrganizationID {
+		t.Fatalf("first page is not the first two registrations in creation order: %+v", page.Organizations)
+	}
+	if page.Next == nil || *page.Next != second.OrganizationID {
+		t.Fatalf("next = %v, want the last item of the page", page.Next)
+	}
+	last, err := f.service.List(f.ctx, ListQuery{After: *page.Next, Limit: 2}, "the registry screen")
+	if err != nil {
+		t.Fatalf("List after: %v", err)
+	}
+	if len(last.Organizations) != 1 || last.Organizations[0].OrganizationID != third.OrganizationID || last.Next != nil {
+		t.Fatalf("last page = %+v, next %v; want the third registration and no cursor", last.Organizations, last.Next)
+	}
+
+	partners, err := f.service.List(f.ctx, ListQuery{After: before, Classification: ClassificationPartner,
+		Status: StateActive}, "the registry screen")
+	if err != nil {
+		t.Fatalf("List partners: %v", err)
+	}
+	if len(partners.Organizations) != 1 || partners.Organizations[0].OrganizationID != second.OrganizationID {
+		t.Errorf("the classification filter returned %+v", partners.Organizations)
+	}
+
+	if _, err := f.service.List(f.ctx, ListQuery{}, ""); !errors.Is(err, db.ErrReasonRequired) {
+		t.Errorf("a list without a reason: error = %v, want db.ErrReasonRequired", err)
+	}
+	if _, err := f.service.List(f.ctx, ListQuery{Classification: "vendor"}, "x"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("an unknown classification: error = %v, want ErrInvalid", err)
+	}
+	if _, err := f.service.List(f.ctx, ListQuery{Limit: 101}, "x"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("limit 101: error = %v, want ErrInvalid", err)
+	}
+}

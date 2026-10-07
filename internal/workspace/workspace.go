@@ -443,19 +443,105 @@ func (s *Service) Get(ctx context.Context, workspaceID id.UUID) (Workspace, erro
 	return record, nil
 }
 
+// ListQuery selects one page of the bound Tenant's Workspaces (STD-GLB-001 1.3.0 §Pagination).
+type ListQuery struct {
+	// After is the last workspace_id of the previous page; the nil identifier starts at the first.
+	After id.UUID
+
+	// Limit is the page size, 1 to db.MaxListLimit; zero takes db.DefaultListLimit.
+	Limit int
+
+	// Status narrows the list to one state; empty is every state, retired included.
+	Status State
+}
+
+// Page is one page of Workspaces in creation order. Next is the After of the following page, and
+// nil on the last.
+type Page struct {
+	Workspaces []Workspace
+	Next       *id.UUID
+}
+
+// listStatement is one keyset page of the bound Tenant's Workspaces, in creation order. Row-Level
+// Security confines it to the Tenant; no parameter names one.
+const listStatement = `SELECT workspace_id::text,
+       tenant_id::text,
+       display_name,
+       workspace_type,
+       status,
+       version,
+       created_at
+FROM workspace.workspace
+WHERE ($1::text = '' OR status = $1::text)
+  AND ($2::uuid IS NULL OR workspace_id > $2::uuid)
+ORDER BY workspace_id
+LIMIT $3`
+
+// List reads one page of the bound Tenant's Workspaces, in a read-only transaction.
+func (s *Service) List(ctx context.Context, query ListQuery) (Page, error) {
+	limit, err := db.ListLimit(query.Limit)
+	if err != nil {
+		return Page{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	if query.Status != "" && !query.Status.Valid() {
+		return Page{}, fmt.Errorf("%w: status must be active, archived or retired", ErrInvalid)
+	}
+
+	page := Page{Workspaces: []Workspace{}}
+	if err := db.WithTenantRead(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, listStatement, string(query.Status), db.Keyset(query.After), limit+1)
+		if err != nil {
+			return fmt.Errorf("workspace: list: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			record, err := scanWorkspace(rows)
+			if err != nil {
+				return err
+			}
+			page.Workspaces = append(page.Workspaces, record)
+		}
+		return rows.Err()
+	}); err != nil {
+		return Page{}, err
+	}
+
+	if len(page.Workspaces) > limit {
+		page.Workspaces = page.Workspaces[:limit]
+		next := page.Workspaces[limit-1].WorkspaceID
+		page.Next = &next
+	}
+	return page, nil
+}
+
+// rowScanner is what scanWorkspace reads from: one row of a QueryRow or of a Query.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
 func load(ctx context.Context, tx db.Tx, workspaceID id.UUID) (Workspace, error) {
+	record, err := scanWorkspace(tx.QueryRow(ctx, selectForUpdate, workspaceID.String()))
+	if errors.Is(err, errScan) {
+		// Under Row-Level Security a Workspace in another Tenant is simply absent, which is the
+		// correct answer: reporting that it exists elsewhere would disclose a row this caller may
+		// not read.
+		return Workspace{}, fmt.Errorf("%w: %s", ErrNotFound, workspaceID)
+	}
+	return record, err
+}
+
+// errScan marks a row that could not be read, which for a single read is an absent one.
+var errScan = errors.New("workspace: scan")
+
+func scanWorkspace(r rowScanner) (Workspace, error) {
 	var (
 		record           Workspace
 		rawID, rawTenant string
 		status           string
 	)
-	if err := tx.QueryRow(ctx, selectForUpdate, workspaceID.String()).Scan(
-		&rawID, &rawTenant, &record.DisplayName, &record.Type, &status,
+	if err := r.Scan(&rawID, &rawTenant, &record.DisplayName, &record.Type, &status,
 		&record.Version, &record.CreatedAt); err != nil {
-		// Under Row-Level Security a Workspace in another Tenant is simply absent, which is the
-		// correct answer: reporting that it exists elsewhere would disclose a row this caller may
-		// not read.
-		return Workspace{}, fmt.Errorf("%w: %s", ErrNotFound, workspaceID)
+		return Workspace{}, fmt.Errorf("%w: %w", errScan, err)
 	}
 
 	parsed, err := id.Parse(rawID)
