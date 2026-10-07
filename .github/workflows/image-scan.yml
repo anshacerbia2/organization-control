@@ -1,0 +1,32 @@
+name: image-scan
+
+# STD-GLB-009 1.4.0 §Container Images: every image this repository ships or runs is scanned on every
+# change and daily, because a new advisory changes an unchanged image's findings. The gate fails on
+# a High or Critical vulnerability with a fix; scripts/image-scan.sh says how.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The targets that ship: the service and the migrate image every one-off task runs on. The
+      # build stage and the atlas stage are copied from and never run.
+      - name: build the shipped targets
+        run: |
+          docker build --target service -t scan/organization-control-service .
+          docker build --target migrate -t scan/organization-control-migrate .
+
+      - name: scan
+        run: scripts/image-scan.sh scan/organization-control-service scan/organization-control-migrate
