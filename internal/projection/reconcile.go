@@ -316,7 +316,20 @@ func readStates(ctx context.Context, tx db.Tx, statement string, into map[id.UUI
 // lane exists for.
 const ReconciledEventType = "com.scnehaux.organization.projection.repair.reconciled"
 
-// PublishReconciled appends the repair event for a sweep.
+// recordReconciliation stamps the consumer with the run, whatever it found, so its reconciliation
+// age is a fact rather than an inference from the event stream. A retired consumer matches nothing:
+// its record stays as it was when it was retired.
+const recordReconciliation = `UPDATE projection.consumer
+SET last_reconciled_at = $2, last_reconciled_mark = $3, last_reconciled_findings = $4
+WHERE consumer_id = $1 AND retired_at IS NULL`
+
+// PublishReconciled records the sweep against its consumer and, when it found something, appends
+// the repair event, in one transaction.
+//
+// Recorded on every sweep, clean ones included: a clean sweep is the evidence that the consumer's
+// copy was compared and agreed, and it is what the projection health screen reads as the consumer's
+// reconciliation age (TDD-organization-control-002 1.13.0 §Reconciliation). Until 1.13.0 nothing
+// recorded a run, so the age could not be served.
 //
 // One event per sweep rather than one per finding. The repair is a set operation — a consumer
 // applies the authoritative values it was told about — and a finding-per-event stream would let a
@@ -327,7 +340,11 @@ const ReconciledEventType = "com.scnehaux.organization.projection.repair.reconci
 // large sweep delay exactly the events the lane is reserved for.
 func (r *Reconciler) PublishReconciled(ctx context.Context, result Result) error {
 	if len(result.Findings) == 0 {
-		return nil
+		return db.WithProviderScope(ctx, r.pool,
+			"record reconciliation for "+result.ConsumerID,
+			func(ctx context.Context, tx db.Tx) error {
+				return recordRun(ctx, tx, result)
+			})
 	}
 
 	eventType, err := event.ParseType(ReconciledEventType)
@@ -357,9 +374,20 @@ func (r *Reconciler) PublishReconciled(ctx context.Context, result Result) error
 	return db.WithProviderScope(ctx, r.pool,
 		"publish reconciliation for "+result.ConsumerID,
 		func(ctx context.Context, tx db.Tx) error {
+			if err := recordRun(ctx, tx, result); err != nil {
+				return err
+			}
 			if err := outbox.Append(ctx, tx, aggregate, envelope); err != nil {
 				return fmt.Errorf("projection: append reconciled event: %w", err)
 			}
 			return nil
 		})
+}
+
+func recordRun(ctx context.Context, tx db.Tx, result Result) error {
+	if _, err := tx.Exec(ctx, recordReconciliation, result.ConsumerID, result.RunAt, result.Mark,
+		len(result.Findings)); err != nil {
+		return fmt.Errorf("projection: record reconciliation: %w", err)
+	}
+	return nil
 }

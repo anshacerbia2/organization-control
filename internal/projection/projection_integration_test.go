@@ -658,6 +658,65 @@ func TestASweepPublishesOneEventOnlyWhenItFoundSomething(t *testing.T) {
 	}
 }
 
+// TestEverySweepIsRecordedAgainstItsConsumer: the reconciliation age the projection health screen
+// shows is a recorded fact, written by clean sweeps as well as by ones that found something
+// (TDD-organization-control-002 1.13.0 §Reconciliation).
+func TestEverySweepIsRecordedAgainstItsConsumer(t *testing.T) {
+	f := newFixture(t)
+	consumerID := f.register(t)
+
+	never, err := f.registry.Get(f.ctx, consumerID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if never.LastReconciledAt != nil || never.ReconciliationAge(f.fixed) != nil {
+		t.Errorf("a consumer never reconciled reads as reconciled at %v", never.LastReconciledAt)
+	}
+
+	if err := f.reconciler.PublishReconciled(f.ctx, Result{ConsumerID: consumerID, Mark: 5, RunAt: f.fixed}); err != nil {
+		t.Fatalf("PublishReconciled on a clean sweep: %v", err)
+	}
+	clean, err := f.registry.Get(f.ctx, consumerID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	switch {
+	case clean.LastReconciledAt == nil || !clean.LastReconciledAt.Equal(f.fixed):
+		t.Errorf("a clean sweep recorded its run at %v, want %v", clean.LastReconciledAt, f.fixed)
+	case clean.LastReconciledMark == nil || *clean.LastReconciledMark != 5:
+		t.Errorf("a clean sweep recorded mark %v, want 5", clean.LastReconciledMark)
+	case clean.LastReconciledFindings == nil || *clean.LastReconciledFindings != 0:
+		t.Errorf("a clean sweep recorded %v findings, want 0", clean.LastReconciledFindings)
+	}
+	if age := clean.ReconciliationAge(f.fixed.Add(90 * time.Second)); age == nil || *age != 90*time.Second {
+		t.Errorf("reconciliation age %v, want 90s", age)
+	}
+
+	later := f.fixed.Add(time.Minute)
+	dirty := Result{ConsumerID: consumerID, Mark: 6, RunAt: later,
+		Findings: []Finding{{Classification: ClassExtra, MembershipID: mustID(t), ProjectedVersion: 1}}}
+	if err := f.reconciler.PublishReconciled(f.ctx, dirty); err != nil {
+		t.Fatalf("PublishReconciled: %v", err)
+	}
+	_ = f.reconciledEvents(t, consumerID)
+	page, err := f.registry.List(f.ctx, ConsumerListQuery{After: "", Limit: 100}, "projection suite read")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, listed := range page.Consumers {
+		if listed.ConsumerID != consumerID {
+			continue
+		}
+		if listed.LastReconciledAt == nil || !listed.LastReconciledAt.Equal(later) ||
+			listed.LastReconciledFindings == nil || *listed.LastReconciledFindings != 1 {
+			t.Errorf("the list reads the sweep as at %v with %v findings, want %v with 1",
+				listed.LastReconciledAt, listed.LastReconciledFindings, later)
+		}
+		return
+	}
+	t.Skip("the consumer is not on the first page of a shared registry; the single read covered it")
+}
+
 func (f *fixture) reconciledEvents(t *testing.T, consumerID string) int {
 	t.Helper()
 	var count int

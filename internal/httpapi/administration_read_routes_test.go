@@ -236,7 +236,7 @@ func TestTheReadSideShapesNameWhatIsNotYetReached(t *testing.T) {
 		t.Errorf("an unresolved field is omitted rather than null:\n%s", waiting)
 	}
 
-	listed := marshal(viewListedConsumer(projection.ListedConsumer{State: projection.ConsumerActive, Stale: true}))
+	listed := marshal(viewListedConsumer(projection.ListedConsumer{State: projection.ConsumerActive, Stale: true}, time.Now()))
 	for _, want := range []string{`"state":"active"`, `"stale":true`, `"event_types":[]`, `"max_accepted_age_seconds":0`} {
 		if !strings.Contains(listed, want) {
 			t.Errorf("a listed consumer lacks %s:\n%s", want, listed)

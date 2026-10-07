@@ -110,6 +110,14 @@ type Consumer struct {
 	// a stream position from them.
 	LastReportedMark *int64
 	LastReportedAt   *time.Time
+
+	// LastReconciledAt, LastReconciledMark and LastReconciledFindings are the last reconciliation run
+	// against this consumer's report: when this service ran it, the mark the report stated, and how
+	// many findings it produced. A measurement this service made, unlike the two above. Nil until a
+	// reconciliation has run.
+	LastReconciledAt       *time.Time
+	LastReconciledMark     *int64
+	LastReconciledFindings *int
 }
 
 // Registration is a consumer declaring what it needs.
@@ -431,7 +439,10 @@ const selectConsumer = `SELECT c.consumer_id,
        c.snapshot_mark,
        c.last_reported_mark,
        c.last_reported_at,
-       coalesce(s.event_types, '{}')
+       coalesce(s.event_types, '{}'),
+       c.last_reconciled_at,
+       c.last_reconciled_mark,
+       c.last_reconciled_findings
 FROM projection.consumer c
 LEFT JOIN platform.subscription s ON s.consumer = c.consumer_id AND s.retired_at IS NULL
 WHERE c.consumer_id = $1 AND c.retired_at IS NULL`
@@ -458,7 +469,8 @@ func load(ctx context.Context, tx db.Tx, consumerID string, consumer *Consumer) 
 	if err := tx.QueryRow(ctx, selectConsumer, consumerID).Scan(
 		&consumer.ConsumerID, &principal, &consumer.ProjectionVersion, &consumer.MaxAcceptedAge,
 		&behavior, &consumer.RegisteredAt, &consumer.SnapshotMark,
-		&consumer.LastReportedMark, &consumer.LastReportedAt, &consumer.EventTypes); err != nil {
+		&consumer.LastReportedMark, &consumer.LastReportedAt, &consumer.EventTypes,
+		&consumer.LastReconciledAt, &consumer.LastReconciledMark, &consumer.LastReconciledFindings); err != nil {
 		return fmt.Errorf("%w: %s", ErrNotRegistered, consumerID)
 	}
 	return decodeStored(consumer, principal, behavior)
@@ -541,7 +553,10 @@ const listStatement = `SELECT c.consumer_id,
        c.last_reported_mark,
        c.last_reported_at,
        coalesce(s.event_types, '{}'),
-       c.retired_at
+       c.retired_at,
+       c.last_reconciled_at,
+       c.last_reconciled_mark,
+       c.last_reconciled_findings
 FROM projection.consumer c
 LEFT JOIN platform.subscription s ON s.consumer = c.consumer_id AND s.retired_at IS NULL
 WHERE ($1::text = ''
@@ -583,7 +598,8 @@ func (r *Registry) List(ctx context.Context, query ConsumerListQuery, reason str
 			)
 			if err := rows.Scan(&item.ConsumerID, &principal, &item.ProjectionVersion, &item.MaxAcceptedAge,
 				&behavior, &item.RegisteredAt, &item.SnapshotMark, &item.LastReportedMark,
-				&item.LastReportedAt, &item.EventTypes, &item.RetiredAt); err != nil {
+				&item.LastReportedAt, &item.EventTypes, &item.RetiredAt, &item.LastReconciledAt,
+				&item.LastReconciledMark, &item.LastReconciledFindings); err != nil {
 				return fmt.Errorf("projection: scan consumer list: %w", err)
 			}
 			if err := decodeStored(&item.Consumer, principal, behavior); err != nil {
@@ -687,4 +703,15 @@ func (c Consumer) Age(now time.Time) (time.Duration, bool) {
 	}
 	age := now.Sub(*c.LastReportedAt)
 	return age, age > c.MaxAcceptedAge
+}
+
+// ReconciliationAge reports how long ago this service last reconciled the consumer's report, or nil
+// when it never has (TDD-organization-control-002 §Reconciliation). Read on the clock the run was
+// stamped with, as Age is.
+func (c Consumer) ReconciliationAge(now time.Time) *time.Duration {
+	if c.LastReconciledAt == nil {
+		return nil
+	}
+	age := now.Sub(*c.LastReconciledAt)
+	return &age
 }

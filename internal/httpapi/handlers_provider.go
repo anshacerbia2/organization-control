@@ -786,7 +786,7 @@ func (h *handlers) registerConsumer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	respond(w, http.StatusCreated, viewConsumer(record))
+	respond(w, http.StatusCreated, viewConsumer(record, time.Now()))
 }
 
 // retireConsumer withdraws a consumer: its registration, its subscription, and what it was still
@@ -829,9 +829,10 @@ func (h *handlers) listConsumers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	now := time.Now()
 	view := consumerPageView{Consumers: make([]listedConsumerView, 0, len(page.Consumers)), Next: page.Next}
 	for _, record := range page.Consumers {
-		view.Consumers = append(view.Consumers, viewListedConsumer(record))
+		view.Consumers = append(view.Consumers, viewListedConsumer(record, now))
 	}
 	respond(w, http.StatusOK, view)
 }
@@ -861,7 +862,7 @@ func (h *handlers) getConsumer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	respond(w, http.StatusOK, viewConsumer(record))
+	respond(w, http.StatusOK, viewConsumer(record, time.Now()))
 }
 
 type progressRequest struct {
@@ -898,7 +899,7 @@ func (h *handlers) recordProgress(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	respond(w, http.StatusOK, viewConsumer(record))
+	respond(w, http.StatusOK, viewConsumer(record, time.Now()))
 }
 
 type bootstrapRequest struct {
@@ -931,7 +932,7 @@ func (h *handlers) bootstrapConsumer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	respond(w, http.StatusOK, viewConsumer(record))
+	respond(w, http.StatusOK, viewConsumer(record, time.Now()))
 }
 
 type snapshotRequest struct {
