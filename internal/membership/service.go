@@ -78,6 +78,10 @@ type Result struct {
 	// TenantSecurityVersion is carried in the event, so it is returned as well: a caller
 	// correlating its own audit record with what consumers received needs the same pair.
 	TenantSecurityVersion int64
+
+	// EventID names the event the transition published, which is what the enforcement read reports
+	// on (TDD-organization-control-002 1.10.0, ADR-ORG-004 §5.2).
+	EventID id.UUID
 }
 
 const insertStatement = `INSERT INTO membership.membership
@@ -154,11 +158,13 @@ func (s *Service) GrantWithin(ctx context.Context, tx db.Tx, req GrantRequest) (
 		record.ValidFrom, nullableTime(record.ValidUntil), record.Provenance); err != nil {
 		return Result{}, fmt.Errorf("membership: insert: %w", err)
 	}
-	if err := s.appendEvent(ctx, tx, ActionGrant, record, securityVersion, acceptedAt, ""); err != nil {
+	eventID, err := s.appendEvent(ctx, tx, ActionGrant, record, securityVersion, acceptedAt, "")
+	if err != nil {
 		return Result{}, err
 	}
 
-	return Result{Membership: record, AcceptedAt: acceptedAt, TenantSecurityVersion: securityVersion}, nil
+	return Result{Membership: record, AcceptedAt: acceptedAt, TenantSecurityVersion: securityVersion,
+		EventID: eventID}, nil
 }
 
 // Command is one requested Membership transition.
@@ -296,17 +302,9 @@ func (s *Service) TransitionWithin(ctx context.Context, tx db.Tx, action Action,
 
 	// Resolved before anything is written. A refused transition must leave no trace, and a check
 	// performed after the update would rely on the rollback rather than on not having tried.
-	next, _, err := Resolve(action, current.Status)
+	next, err := decide(action, current, cmd.ExpectedVersion)
 	if err != nil {
 		return Result{}, err
-	}
-
-	// After the state check, as a Tenant or Workspace transition does: a caller acting on a stale
-	// view usually has both wrong, and "restore is not permitted from active" says what happened
-	// where "version 4 is not version 5" says only that something did.
-	if current.Version != cmd.ExpectedVersion {
-		return Result{}, fmt.Errorf("%w: expected %d, stored %d",
-			ErrVersionMismatch, cmd.ExpectedVersion, current.Version)
 	}
 
 	securityVersion, err := tenantSecurityVersion(ctx, tx, current.TenantID)
@@ -323,12 +321,33 @@ func (s *Service) TransitionWithin(ctx context.Context, tx db.Tx, action Action,
 	current.Status = next
 	current.Version = updatedVersion
 
-	if err := s.appendEvent(ctx, tx, action, current, securityVersion, acceptedAt,
-		strings.TrimSpace(cmd.Reason)); err != nil {
+	eventID, err := s.appendEvent(ctx, tx, action, current, securityVersion, acceptedAt,
+		strings.TrimSpace(cmd.Reason))
+	if err != nil {
 		return Result{}, err
 	}
 
-	return Result{Membership: current, AcceptedAt: acceptedAt, TenantSecurityVersion: securityVersion}, nil
+	return Result{Membership: current, AcceptedAt: acceptedAt, TenantSecurityVersion: securityVersion,
+		EventID: eventID}, nil
+}
+
+// decide is the state machine and the optimistic check a transition applies to the Membership it
+// read, and nothing else. The single transition and a batch preview both call it, so a preview
+// cannot promise what the command would refuse (ADR-ORG-004 §5.1).
+//
+// The version is checked after the state, as a Tenant or Workspace transition does: a caller acting
+// on a stale view usually has both wrong, and "restore is not permitted from active" says what
+// happened where "version 4 is not version 5" says only that something did.
+func decide(action Action, current Membership, expectedVersion int64) (State, error) {
+	next, _, err := Resolve(action, current.Status)
+	if err != nil {
+		return "", err
+	}
+	if current.Version != expectedVersion {
+		return "", fmt.Errorf("%w: expected %d, stored %d",
+			ErrVersionMismatch, expectedVersion, current.Version)
+	}
+	return next, nil
 }
 
 // Get reads one Membership in the bound Tenant. One in another Tenant is absent under Row-Level
@@ -413,20 +432,20 @@ func (s *Service) List(ctx context.Context, query ListQuery) (Page, error) {
 
 // appendEvent writes the event inside the caller's transaction.
 func (s *Service) appendEvent(ctx context.Context, tx db.Tx, action Action, record Membership,
-	securityVersion int64, occurredAt time.Time, reason string) error {
+	securityVersion int64, occurredAt time.Time, reason string) (id.UUID, error) {
 	if s.beforeAppend != nil {
 		if err := s.beforeAppend(ctx); err != nil {
-			return err
+			return id.UUID{}, err
 		}
 	}
 
 	eventType, err := EventType(action)
 	if err != nil {
-		return err
+		return id.UUID{}, err
 	}
 	envelope, err := event.New(system.Source, eventType, occurredAt, NewPayload(record, securityVersion))
 	if err != nil {
-		return fmt.Errorf("membership: build envelope: %w", err)
+		return id.UUID{}, fmt.Errorf("membership: build envelope: %w", err)
 	}
 
 	// The aggregate is the Membership, which is also the partition key a producer uses. Kafka
@@ -443,7 +462,7 @@ func (s *Service) appendEvent(ctx context.Context, tx db.Tx, action Action, reco
 	}
 
 	if err := outbox.Append(ctx, tx, record.MembershipID, envelope, opts...); err != nil {
-		return fmt.Errorf("membership: append event: %w", err)
+		return id.UUID{}, fmt.Errorf("membership: append event: %w", err)
 	}
 
 	// Which version this event carries, recorded in the same transaction as the event itself, so the
@@ -455,21 +474,25 @@ func (s *Service) appendEvent(ctx context.Context, tx db.Tx, action Action, reco
 	// The same row records who acted, for which request, and why: the step TDD-organization-control-002
 	// §Revocation names and that had nowhere to land, because a tenant-scoped transition writes no
 	// privileged-access row.
+	//
+	// recorded_at is the accepted instant rather than the column's default, so the enforcement read
+	// measures the budget from the time the response returned (TDD-organization-control-002 1.10.0).
 	scope, ok := db.ScopeFrom(ctx)
 	if !ok {
-		return db.ErrNoScope
+		return id.UUID{}, db.ErrNoScope
 	}
 	if _, err := tx.Exec(ctx, recordEventStatement, envelope.ID.String(), record.MembershipID.String(),
 		record.TenantID.String(), record.Version, string(eventType),
-		db.Keyset(scope.Actor()), db.Keyset(scope.Correlation()), nullableText(reason)); err != nil {
-		return fmt.Errorf("membership: record the event's version: %w", err)
+		db.Keyset(scope.Actor()), db.Keyset(scope.Correlation()), nullableText(reason), occurredAt); err != nil {
+		return id.UUID{}, fmt.Errorf("membership: record the event's version: %w", err)
 	}
-	return nil
+	return envelope.ID, nil
 }
 
 const recordEventStatement = `INSERT INTO membership.membership_event
-    (event_id, membership_id, tenant_id, membership_version, event_type, actor_id, correlation_id, reason)
-VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6::uuid, $7::uuid, $8)`
+    (event_id, membership_id, tenant_id, membership_version, event_type, actor_id, correlation_id, reason,
+     recorded_at)
+VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6::uuid, $7::uuid, $8, $9)`
 
 // rowScanner is what scanMembership reads from: one row of a QueryRow or of a Query.
 type rowScanner interface {

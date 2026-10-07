@@ -336,6 +336,25 @@ POST  /v1/memberships/{membership_id}/revoke    {"expected_version": 3}   X-Admi
 A stale version answers `409` and changes nothing. The actor, the correlation and the reason are kept
 on the transition's `membership.membership_event` row.
 
+What a provider reads about an offboarding (TDD-organization-control-003 1.7.0, -004 1.7.0):
+
+```text
+GET   /v1/offboardings                       ?stage=freeze|obligations|release|retired&tenant_id=<uuid>
+GET   /v1/offboardings/{offboarding_id}      the stage-entry instants, the deprovisioning, active_memberships
+GET   /v1/offboardings/{offboarding_id}/obligations   {"outstanding": [...], "obligations": [...]}
+GET   /v1/tenants/{tenant_id}                adds offboarding_id and active_memberships
+```
+
+A Tenant administrator acts on Memberships in bulk, and reads whether a transition is enforced
+(TDD-organization-control-002 1.10.0, ADR-ORG-004):
+
+```text
+POST  /v1/membership-batches                 {"action":"revoke","membership_ids":[...]}   preview, 1 to 500
+POST  /v1/membership-batches/{batch_id}/execute   {"fail_on_errors": n}   Idempotency-Key
+GET   /v1/membership-batches/{batch_id}
+GET   /v1/memberships/{membership_id}/enforcement   accepted | propagating | enforced | over_budget
+```
+
 ### Locally: `.env` and the Makefile
 
 Nothing above needs to be typed. `.env.example` carries a working local set; the `Makefile` loads

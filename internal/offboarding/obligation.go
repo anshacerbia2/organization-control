@@ -2,6 +2,7 @@ package offboarding
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -125,13 +126,17 @@ const selectObligation = `SELECT obligation_id::text,
        state,
        due_at,
        completed_at,
-       coalesce(detail, '')
+       coalesce(detail, ''),
+       resolved_by::text,
+       resolved_at
 FROM operation.offboarding_obligation
 WHERE obligation_id = $1
 FOR UPDATE`
 
+// resolveObligation records the outcome and who reported it. resolved_by and resolved_at are set for
+// every outcome, a failure included, where completed_at is set only for the two that resolve.
 const resolveObligation = `UPDATE operation.offboarding_obligation
-SET state = $2, completed_at = $3, detail = $4
+SET state = $2, completed_at = $3, detail = $4, resolved_by = $5, resolved_at = $6
 WHERE obligation_id = $1`
 
 // Resolve records a domain's outcome for one obligation.
@@ -150,6 +155,12 @@ func (s *Service) Resolve(ctx context.Context, res Resolution) (Obligation, erro
 	case res.State != ObligationCompleted && strings.TrimSpace(res.Detail) == "":
 		return Obligation{}, fmt.Errorf("%w: %s requires a detail", ErrInvalid, res.State)
 	}
+
+	scope, ok := db.ScopeFrom(ctx)
+	if !ok {
+		return Obligation{}, db.ErrNoScope
+	}
+	resolver := scope.Actor()
 
 	var obligation Obligation
 	at := s.now().UTC()
@@ -176,12 +187,16 @@ func (s *Service) Resolve(ctx context.Context, res Resolution) (Obligation, erro
 				completedAt = at
 			}
 			if _, err := tx.Exec(ctx, resolveObligation,
-				res.ObligationID.String(), string(res.State), completedAt, res.Detail); err != nil {
+				res.ObligationID.String(), string(res.State), completedAt, res.Detail,
+				resolver.String(), at); err != nil {
 				return fmt.Errorf("offboarding: resolve obligation: %w", err)
 			}
 
 			loaded.State = res.State
 			loaded.Detail = res.Detail
+			resolvedAt := at
+			loaded.ResolvedBy = &resolver
+			loaded.ResolvedAt = &resolvedAt
 			if res.State.Resolved() {
 				stamped := at
 				loaded.CompletedAt = &stamped
@@ -210,6 +225,85 @@ func (s *Service) Outstanding(ctx context.Context, offboardingID id.UUID) ([]str
 	return out, nil
 }
 
+// Board is the obligation board of one offboarding: the outstanding names the release refusal uses,
+// and every obligation row.
+type Board struct {
+	Outstanding []string
+	Obligations []Obligation
+}
+
+const offboardingExists = `SELECT EXISTS (SELECT 1 FROM operation.offboarding WHERE offboarding_id = $1)`
+
+// boardStatement reads every obligation in the board's order (TDD-organization-experience-003 §The
+// Obligation Board): open rows past due first, the most overdue first; then the other open rows by
+// due date, undated last; then every settled or failed row in the order it was raised. "Past due"
+// is judged against the clock passed as $2, so the order and the instant it describes are one.
+const boardStatement = `SELECT obligation_id::text,
+       offboarding_id::text,
+       tenant_id::text,
+       domain,
+       obligation_type,
+       state,
+       due_at,
+       completed_at,
+       coalesce(detail, ''),
+       resolved_by::text,
+       resolved_at
+FROM operation.offboarding_obligation
+WHERE offboarding_id = $1
+ORDER BY CASE WHEN state = 'open' AND due_at < $2 THEN 0
+              WHEN state = 'open' THEN 1
+              ELSE 2 END,
+         CASE WHEN state = 'open' THEN due_at END ASC NULLS LAST,
+         obligation_id`
+
+// Board reads the obligation board in one transaction, so the names and the rows describe one
+// instant. An unknown offboarding is ErrNotFound rather than an empty board: an empty board says
+// nothing is owed, which is a claim about a process that does not exist.
+func (s *Service) Board(ctx context.Context, offboardingID id.UUID) (Board, error) {
+	if offboardingID.IsNil() {
+		return Board{}, fmt.Errorf("%w: an offboarding identifier is required", ErrInvalid)
+	}
+	now := s.now().UTC()
+	board := Board{Outstanding: []string{}, Obligations: []Obligation{}}
+	if err := db.WithProviderScope(ctx, s.provider,
+		"read the obligation board of "+offboardingID.String(),
+		func(ctx context.Context, tx db.Tx) error {
+			var exists bool
+			if err := tx.QueryRow(ctx, offboardingExists, offboardingID.String()).Scan(&exists); err != nil {
+				return fmt.Errorf("offboarding: read offboarding: %w", err)
+			}
+			if !exists {
+				return fmt.Errorf("%w: offboarding %s", ErrNotFound, offboardingID)
+			}
+
+			outstanding, err := outstandingObligations(ctx, tx, offboardingID)
+			if err != nil {
+				return err
+			}
+			if outstanding != nil {
+				board.Outstanding = outstanding
+			}
+
+			rows, err := tx.Query(ctx, boardStatement, offboardingID.String(), now)
+			if err != nil {
+				return fmt.Errorf("offboarding: read obligations: %w", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				obligation, err := scanObligation(rows)
+				if err != nil {
+					return err
+				}
+				board.Obligations = append(board.Obligations, obligation)
+			}
+			return rows.Err()
+		}); err != nil {
+		return Board{}, err
+	}
+	return board, nil
+}
+
 // SetLegalHold places or lifts a hold.
 //
 // Permitted at any stage before retirement, because a hold arrives when the legal position changes
@@ -236,6 +330,9 @@ func (s *Service) SetLegalHold(ctx context.Context, offboardingID id.UUID, hold 
 				return fmt.Errorf("offboarding: set legal hold: %w", err)
 			}
 			loaded.LegalHold = hold
+			if err := derive(ctx, tx, &loaded); err != nil {
+				return err
+			}
 			record = loaded
 			return nil
 		}); err != nil {
@@ -245,16 +342,33 @@ func (s *Service) SetLegalHold(ctx context.Context, offboardingID id.UUID, hold 
 }
 
 func loadObligation(ctx context.Context, tx db.Tx, obligationID id.UUID) (Obligation, error) {
+	obligation, err := scanObligation(tx.QueryRow(ctx, selectObligation, obligationID.String()))
+	if errors.Is(err, errScan) {
+		return Obligation{}, fmt.Errorf("%w: obligation %s", ErrNotFound, obligationID)
+	}
+	return obligation, err
+}
+
+// scanObligation reads one row in the column order selectObligation and boardStatement share.
+func scanObligation(row interface{ Scan(dest ...any) error }) (Obligation, error) {
 	var (
 		obligation                               Obligation
 		rawObligation, rawOffboarding, rawTenant string
 		rawState                                 string
+		rawResolver                              *string
 	)
-	if err := tx.QueryRow(ctx, selectObligation, obligationID.String()).Scan(
+	if err := row.Scan(
 		&rawObligation, &rawOffboarding, &rawTenant, &obligation.Domain,
 		&obligation.Type, &rawState, &obligation.DueAt, &obligation.CompletedAt,
-		&obligation.Detail); err != nil {
-		return Obligation{}, fmt.Errorf("%w: obligation %s", ErrNotFound, obligationID)
+		&obligation.Detail, &rawResolver, &obligation.ResolvedAt); err != nil {
+		return Obligation{}, fmt.Errorf("%w: %w", errScan, err)
+	}
+	if rawResolver != nil {
+		parsed, err := id.Parse(*rawResolver)
+		if err != nil {
+			return Obligation{}, fmt.Errorf("offboarding: stored identifier %q: %w", *rawResolver, err)
+		}
+		obligation.ResolvedBy = &parsed
 	}
 
 	for target, raw := range map[*id.UUID]string{

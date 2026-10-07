@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.9.0
+  version: 1.10.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -234,11 +234,74 @@ nullable because rows written before them have no value to give; every row writt
 actor, the correlation when the request had one, and the reason when one arrived. A revocation always
 has one, because the route refuses a revocation without it.
 
+From 1.10.0 `recorded_at` is written as the transition's `accepted_at`, the instant the response
+returns and the event's envelope carries, rather than defaulted to the transaction's start. The two
+differed by the time between the transaction opening and the clock read; the enforcement read
+(§Enforcement Evidence) measures the budget from `accepted_at`, so the row must hold that value and
+not a neighbour of it. Rows written before 1.10.0 keep the default.
+
 It records which Membership, at which version, a published event concerns. A delivery receipt
 names only an event, and a stream position is reassigned by a replay, so neither can say whether
 one event is newer than another. This can. The `SUPERSEDED` dead-letter resolution reads it
 (`TDD-organization-control-005`). The row is immutable: no runtime role holds `UPDATE` or
 `DELETE`, and the foreign key keeps a Membership with published events from being deleted.
+
+### Membership Batches
+
+A bulk action is stored as a batch (`ADR-ORG-004` §5.1), from 1.10.0:
+
+```sql
+CREATE TABLE membership.membership_batch (
+    batch_id          UUID        PRIMARY KEY,
+    tenant_id         UUID        NOT NULL REFERENCES tenant.tenant(tenant_id),
+    action            TEXT        NOT NULL,   -- suspend | restore | revoke
+    state             TEXT        NOT NULL,   -- previewed | executing | executed
+    reason            TEXT,                   -- X-Administrative-Reason; required for revoke
+    correlation_id    UUID        NOT NULL,   -- a continuation keeps its parent's
+    continues         UUID,                   -- the batch whose failed items this resubmits
+    created_by        UUID        NOT NULL,
+    created_at        TIMESTAMPTZ NOT NULL,
+    expires_at        TIMESTAMPTZ NOT NULL,   -- created_at + 15 minutes
+    would_change      INTEGER     NOT NULL,
+    would_not_change  INTEGER     NOT NULL,
+    fail_on_errors    INTEGER,                -- null: no allowance, every item is attempted
+    executed_by       UUID,
+    executed_at       TIMESTAMPTZ,
+    completed_at      TIMESTAMPTZ,
+    CONSTRAINT membership_batch_tenant_scope_unique UNIQUE (tenant_id, batch_id)
+);
+
+CREATE TABLE membership.membership_batch_item (
+    batch_id          UUID        NOT NULL,
+    tenant_id         UUID        NOT NULL,
+    position          INTEGER     NOT NULL,   -- the order the request named the item in
+    membership_id     UUID        NOT NULL,   -- as named; no foreign key, so a refusal can be recorded
+    principal_id      UUID,                   -- null when the Membership was not found
+    current_status    TEXT,
+    version_read      BIGINT,                 -- the version execution is held to
+    resulting_status  TEXT,                   -- null when refused
+    refusal           JSONB,                  -- {type, title, status, detail}: the single command's problem
+    outcome           TEXT,                   -- succeeded | failed | not_attempted; null until executed
+    outcome_reason    TEXT,                   -- not_attempted: refused_at_preview | error_allowance
+    accepted_at       TIMESTAMPTZ,            -- succeeded
+    event_id          UUID,                   -- succeeded: the event the transition published
+    resulting_version BIGINT,                 -- succeeded: the membership_version it produced
+    problem           JSONB,                  -- failed: the single command's problem
+    PRIMARY KEY (batch_id, position),
+    CONSTRAINT membership_batch_item_once UNIQUE (batch_id, membership_id),
+    FOREIGN KEY (tenant_id, batch_id) REFERENCES membership.membership_batch (tenant_id, batch_id)
+);
+```
+
+Both are in the `membership` schema, so Row-Level Security confines them to the Tenant like every
+other table there, and `organization_rt` holds `SELECT`, `INSERT` and `UPDATE` on them and nothing
+else. The item carries `tenant_id` and a composite foreign key for the reason
+`TDD-organization-control-004` §"Why the obligation carries `tenant_id`" gives.
+
+The batch is stored rather than recomputed because the preview is binding. Execution is held to the
+version each item was read at, and the only place that version survives between two requests is
+here. An expired batch (`expires_at` passed while `previewed`) is reported as `expired` and refused
+at execution; nothing purges it yet (ROADMAP item 30).
 
 ### Consumer Registry
 
@@ -354,6 +417,10 @@ POST   /v1/memberships
 POST   /v1/memberships/{membership_id}/suspend   {"expected_version": n}
 POST   /v1/memberships/{membership_id}/revoke    {"expected_version": n}, X-Administrative-Reason
 POST   /v1/memberships/{membership_id}/restore   {"expected_version": n}
+GET    /v1/memberships/{membership_id}/enforcement
+POST   /v1/membership-batches                     X-Administrative-Reason (required for revoke)
+GET    /v1/membership-batches/{batch_id}
+POST   /v1/membership-batches/{batch_id}/execute  Idempotency-Key
 POST   /v1/projections/snapshot
 POST   /v1/projections/reconcile
 GET    /v1/projections/consumers/{consumer_id}
@@ -401,6 +468,165 @@ read. Suspend and restore take the header when it is sent. Whatever reason arriv
 the acting `principal_id` and the request's correlation identifier on the transition's
 `membership.membership_event` row, in the same transaction (§Event History). The offboarding freeze
 suspends each Membership at the version it locked and records the freeze's own reason.
+
+**A transition names its event.** From 1.10.0 the response to grant, suspend, restore and revoke
+carries `event_id`, the identifier of the event the transition published, beside `accepted_at`. It
+is what the enforcement read reports on and what a client correlates a batch item with.
+
+### Membership Batches
+
+A Tenant administrator's bulk suspend, restore or revoke is a batch the server previews and then
+executes (`ADR-ORG-004` §5.1; `SAD-004` §8.3). All three routes are tenant-scoped: the Tenant is the
+caller's, Row-Level Security confines the batch and every Membership it names, and a provider or
+consumer caller is refused `403`, as on the single transition.
+
+**The preview.** `POST /v1/membership-batches`:
+
+```json
+{"action": "suspend" | "restore" | "revoke",
+ "membership_ids": ["<uuid>", ...],
+ "continues": "<batch_id>"}
+```
+
+- `membership_ids` holds 1 to 500 identifiers, each a UUID and none repeated. An empty list, a
+  repeat, or more than 500 is `400`. SCIM answers too many operations with `413` (RFC 7644
+  §3.7.4); foundation-platform's problem registry is closed and has no `413` type, so the bound is
+  refused as `validation-failed` and the detail names it.
+- `X-Administrative-Reason` is required for `revoke` (`400` before anything is read, as on the single
+  route) and recorded on the batch whenever it is sent.
+- `continues`, optional, names an executed batch of the same Tenant whose failed items this
+  resubmits. The new batch keeps that batch's `correlation_id`; a batch that does not continue one
+  takes the request's.
+
+Each item runs through the single transition's own checks, in one transaction that writes the batch
+and nothing else: the Membership is read under the Tenant's policy, the command is validated
+(`ExpectedVersion` being the version just read), and the state machine resolves the action, through
+the same functions `TransitionWithin` calls. An item that would be refused records the problem
+document the single command would return (`type`, `title`, `status`, `detail`), so a Membership of
+another Tenant is `not-found`, a revoked one `state-transition-refused`, and a restore of an active
+one `state-transition-refused`. A preview writes no Membership, no event and no outbox row
+(AIP-163, `ADR-ORG-004` [R2]). The response is `201` with the batch view.
+
+**The execution.** `POST /v1/membership-batches/{batch_id}/execute`, with an optional body
+`{"fail_on_errors": n}` (a whole number, `0` or more; absent, every item is attempted), and an
+`Idempotency-Key`, honoured as on every mutation.
+
+- The batch moves from `previewed` to `executing` in a first transaction, under its row lock; the
+  idempotency claim commits with it. A second execute is `409` `state-transition-refused`; a replay
+  of the same key answers the stored response with `Idempotent-Replay: true`.
+- A batch past `expires_at` is refused `409` `state-transition-refused`, with nothing written. Its
+  view reports `expired`, and every item `not_attempted` with reason `expired`.
+- Each item that would change runs `TransitionWithin` in its own transaction, named with the
+  version the preview read, and records its outcome in that transaction. A Membership changed since
+  the preview fails with `409` `version-conflict` and is not applied (AIP-154, RFC 9110 §13.1.1). A
+  success publishes the same event, with the same actor, correlation and reason on its
+  `membership_event` row, as the single command.
+- A failure records the problem the single command would return, in a transaction of its own.
+- `fail_on_errors` is SCIM's `failOnErrors` (RFC 7644 §3.7): the number of failures tolerated.
+  The failure after the last tolerated one stops the run, and every item not yet attempted is
+  `not_attempted` with reason `error_allowance`. `0` stops at the first failure.
+- Items refused at preview are `not_attempted` with reason `refused_at_preview`.
+- The batch becomes `executed`, and the response is `200` with the batch view whatever the items'
+  outcomes, as SCIM and Graph report per-operation status inside a successful batch response
+  (`ADR-ORG-004` [R1][R7]).
+
+A process that dies mid-execution leaves the batch `executing`, with the items it finished
+recorded and the rest without an outcome; it is not resumed, and a retry with the same key is
+refused as in progress rather than replayed (the window `internal/httpapi/idempotency.go` names).
+
+**The view.** `GET /v1/membership-batches/{batch_id}`, and the body of both commands:
+
+```json
+{
+  "batch_id": "<uuid>", "action": "revoke",
+  "state": "previewed" | "executing" | "executed" | "expired",
+  "reason": "..." | null, "correlation_id": "<uuid>", "continues": "<uuid>" | null,
+  "created_by": "<uuid>", "created_at": "<ts>", "expires_at": "<ts>",
+  "executed_at": "<ts>" | null, "completed_at": "<ts>" | null, "fail_on_errors": 2 | null,
+  "counts": {"would_change": 2, "would_not_change": 1,
+             "succeeded": 1, "failed": 1, "not_attempted": 1},
+  "items": [
+    {"membership_id": "<uuid>", "principal_id": "<uuid>" | null,
+     "current_status": "active" | null, "version": 3 | null,
+     "resulting_status": "revoked" | null,
+     "refusal": {"type": "...", "title": "...", "status": 409, "detail": "..."} | null,
+     "outcome": null
+              | {"status": "succeeded", "accepted_at": "<ts>", "event_id": "<uuid>", "version": 4}
+              | {"status": "failed", "problem": {"type": "...", "title": "...", "status": 409, "detail": "..."}}
+              | {"status": "not_attempted", "reason": "refused_at_preview" | "error_allowance" | "expired"}}
+  ]
+}
+```
+
+Items are in the order the request named them. `outcome` is null until the batch executes; the
+three execution counts are `0` until then. A batch of another Tenant is `404`.
+
+### Enforcement Evidence
+
+`GET /v1/memberships/{membership_id}/enforcement` reports the evidence for the Membership's latest
+transition and the state derived from it (`ADR-ORG-004` §5.2), never from the response alone:
+
+```json
+{
+  "membership_id": "<uuid>", "event_id": "<uuid>",
+  "transition": "grant" | "suspend" | "restore" | "revoke",
+  "accepted_at": "<ts>", "published_at": "<ts>" | null, "budget_seconds": 10,
+  "consumers": [{"consumer_id": "identity-control",
+                 "evidence": "consumer_applied" | "transport_accepted" | "pending" | "dead_lettered",
+                 "recorded_at": "<ts>" | null}],
+  "state": "accepted" | "propagating" | "enforced" | "over_budget",
+  "evaluated_at": "<ts>"
+}
+```
+
+- **The transition** is the `membership_event` row with the highest `membership_version`, read under
+  the Tenant's policy, so another Tenant's Membership is `404`. A Membership with no recorded event
+  (written before the history existed) is `404` too, and the detail says so.
+- **The subscribed consumers** are the deliveries the event was owed: the
+  `platform.outbox_delivery` rows `outbox.Append` wrote for it, one per consumer whose subscription
+  named the event's type when it committed (§Consumer Registry). Not today's subscriptions: a
+  consumer that subscribed afterwards was never sent the event, and one retired afterwards was.
+  A delivery abandoned at its consumer's retirement (`failure_class` `abandoned`) is excluded: it
+  is "neither evidence nor debt", and its consumer no longer enforces anything.
+- **A consumer's evidence** is `consumer_applied` when its `platform.delivery_receipt` says so;
+  otherwise `dead_lettered` when an unresolved `platform.dead_letter` row holds the delivery;
+  otherwise `transport_accepted` when the receipt says that; otherwise `pending`. `recorded_at` is
+  the receipt's.
+- **`published_at`** is the earliest `published_at` among the event's deliveries, null while none
+  is published.
+- **`budget_seconds`** is the propagation subtotal of §Enforcement Budget, 10.
+
+| State | When |
+| :-- | :-- |
+| `enforced` | Every subscribed consumer has `consumer_applied`, or the event was owed to none |
+| `over_budget` | Not enforced, and a consumer is `dead_lettered` or `evaluated_at` is more than `budget_seconds` after `accepted_at` |
+| `propagating` | Not enforced and not over budget, and at least one delivery is published |
+| `accepted` | Otherwise: committed, not yet published |
+
+An event owed to no consumer is `enforced` because no projection holds the Membership: authority is
+the only copy, and `:verify` reads it. The empty `consumers` list says so rather than implying an
+applied consumer. `transport_accepted` is `propagating`, not `enforced`: delivery is not acting on
+an event (RFC 8936, `ADR-ORG-004` [R8]).
+
+**Read as the tenant role, with four narrow grants** (`internal/controldb/grants.sql`). The read runs
+in `db.WithTenantRead`, like every other read of a Tenant's Membership. No path in this repository
+reads platform tables for a tenant caller through another role, and the provider role would file a
+privileged-access record for a Tenant administrator reading their own Tenant, which is the
+cross-Tenant evidence that table exists to keep. So `organization_rt` gains:
+
+- `SELECT (event_id, membership_id, membership_version, event_type, recorded_at)` on
+  `membership.membership_event`. Row-Level Security confines it to the Tenant. The columns carry no
+  actor, correlation or reason, and the role still holds no `UPDATE` or `DELETE`, which is what the
+  immutability of the history rests on.
+- `SELECT (event_id, consumer, published_at, failure_class)` on `platform.outbox_delivery`;
+- `SELECT (event_id, consumer, evidence, recorded_at)` on `platform.delivery_receipt`;
+- `SELECT (event_id, consumer, resolved_at)` on `platform.dead_letter`.
+
+The three platform grants are column-level and carry no payload, envelope, failure detail or
+resolution record. The platform tables have no Row-Level Security, so the boundary is the statement:
+it reaches them only by the `event_id` the Tenant's own policy returned. The role still holds no
+`INSERT` on `delivery_receipt`, which is what keeps a request path from forging the evidence that
+closes a security debt (`TDD-organization-control-005`).
 
 `:verify` is the authoritative fresh check, reserved for high-risk operations and
 never placed on an ordinary request path. Its use is measured: a consumer whose
@@ -711,6 +937,19 @@ the sum, because that is the number incident response works from.
 - Dropping `workspace_tenant_scope_unique` fails the migration test.
 - Every transition outside the state machine is refused.
 
+### Batches and Enforcement Evidence
+
+- A preview's refusal is the problem the single command returns for the same Membership, and a
+  preview writes no Membership, event or outbox row.
+- An item whose Membership changed after the preview fails with `version-conflict` and the others
+  succeed, each with its event.
+- Past `fail_on_errors`, the remaining items are `not_attempted`; an expired batch is refused at
+  execution; a second execution is refused and the same `Idempotency-Key` replays.
+- Another Tenant's Membership is `not-found` in a preview, and another Tenant's batch is `404`.
+- The enforcement state follows the receipts and dead letters: `accepted` before publication,
+  `propagating` on transport acceptance, `enforced` on every subscribed consumer's
+  `consumer_applied`, `over_budget` past the budget or on a dead letter.
+
 ### Projection
 
 - A consumer that has not registered receives no snapshot.
@@ -815,6 +1054,10 @@ finding, and consumer misuse of the fresh-check path.
 | Conforms to | STD-IAM-001 §3.4 — enforcement delay is propagation plus remaining token lifetime |
 | Conforms to | STD-GLB-001 — RFC 7807 problem details |
 | Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/memberships`: `after`, `limit` 1 to 100, key order, `next` |
+| Governed by | ADR-ORG-004 §5.1 — a bulk action is a batch the server previews, then executes; §5.2 — revocation is shown by its evidence |
+| Conforms to | SAD-004 §8.3 — bulk operations validate each item independently and return a per-item outcome |
+| Conforms to | STD-GLB-001 1.3.0 — the batch is bounded (500 items) and versioned under `/v1/` |
+| Consumed by | `TDD-organization-experience-001` §Bulk Operations, §Presenting Revocation Honestly |
 | Enterprise constraint | EAD-003 — projection contract with freshness, stale behavior, and reconciliation |
 | Enterprise constraint | EAD-006 — Membership, Entitlement, and Permission are distinct |
 | Enterprise constraint | EAD-002 — no universal synchronous control-plane fan-in |

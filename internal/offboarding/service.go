@@ -133,6 +133,9 @@ func (s *Service) Begin(ctx context.Context, req BeginRequest) (Offboarding, err
 				record.Reason, record.LegalHold, record.CorrelationID.String(), record.StartedAt); err != nil {
 				return fmt.Errorf("offboarding: insert record: %w", err)
 			}
+			if err := derive(ctx, tx, &record); err != nil {
+				return err
+			}
 
 			return s.publish(ctx, tx, "started", record.OffboardingID, StagePayload{
 				OffboardingID: record.OffboardingID, TenantID: record.TenantID,
@@ -234,6 +237,7 @@ const selectOffboarding = `SELECT offboarding_id::text,
        correlation_id::text,
        started_at,
        frozen_at,
+       released_at,
        retired_at
 FROM operation.offboarding
 WHERE offboarding_id = $1
@@ -243,6 +247,8 @@ const advanceStage = `UPDATE operation.offboarding SET stage = $2 WHERE offboard
 
 const stampFrozen = `UPDATE operation.offboarding SET stage = $2, frozen_at = $3 WHERE offboarding_id = $1`
 
+const stampReleased = `UPDATE operation.offboarding SET stage = $2, released_at = $3 WHERE offboarding_id = $1`
+
 // CompleteFreeze advances from freeze to obligations once no active Membership remains.
 //
 // The check is a count rather than the caller's word for it. A caller that stopped batching early —
@@ -251,8 +257,7 @@ const stampFrozen = `UPDATE operation.offboarding SET stage = $2, frozen_at = $3
 func (s *Service) CompleteFreeze(ctx context.Context, offboardingID id.UUID) (Offboarding, error) {
 	return s.advance(ctx, offboardingID, StageFreeze, func(ctx context.Context, tx db.Tx, record Offboarding) error {
 		var remaining int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM membership.membership
-		    WHERE tenant_id = $1 AND status = 'active'`, record.TenantID.String()).Scan(&remaining); err != nil {
+		if err := tx.QueryRow(ctx, countActiveMemberships, record.TenantID.String()).Scan(&remaining); err != nil {
 			return fmt.Errorf("offboarding: count active memberships: %w", err)
 		}
 		if remaining > 0 {
@@ -503,6 +508,11 @@ func (s *Service) advance(ctx context.Context, offboardingID id.UUID, from Stage
 					return fmt.Errorf("offboarding: advance stage: %w", err)
 				}
 				loaded.FrozenAt = &at
+			case StageRelease:
+				if _, err := tx.Exec(ctx, stampReleased, offboardingID.String(), string(next), at); err != nil {
+					return fmt.Errorf("offboarding: advance stage: %w", err)
+				}
+				loaded.ReleasedAt = &at
 			case StageRetired:
 				if _, err := tx.Exec(ctx, `UPDATE operation.offboarding
 				    SET stage = $2, retired_at = $3 WHERE offboarding_id = $1`,
@@ -516,6 +526,9 @@ func (s *Service) advance(ctx context.Context, offboardingID id.UUID, from Stage
 				}
 			}
 			loaded.Stage = next
+			if err := derive(ctx, tx, &loaded); err != nil {
+				return err
+			}
 			record = loaded
 
 			name, publishes := stageEventName(next)
@@ -590,10 +603,14 @@ func load(ctx context.Context, tx db.Tx, offboardingID id.UUID) (Offboarding, er
 	if err := tx.QueryRow(ctx, selectOffboarding, offboardingID.String()).Scan(
 		&rawOffboarding, &rawTenant, &rawStage, &rawInitiator, &record.Reason,
 		&record.LegalHold, &rawCorrelation, &record.StartedAt,
-		&record.FrozenAt, &record.RetiredAt); err != nil {
+		&record.FrozenAt, &record.ReleasedAt, &record.RetiredAt); err != nil {
 		return Offboarding{}, fmt.Errorf("%w: offboarding %s", ErrNotFound, offboardingID)
 	}
+	return record, decodeRecord(&record, rawOffboarding, rawTenant, rawInitiator, rawCorrelation, rawStage)
+}
 
+// decodeRecord parses the identifiers and the stage a statement read as text.
+func decodeRecord(record *Offboarding, rawOffboarding, rawTenant, rawInitiator, rawCorrelation, rawStage string) error {
 	for target, raw := range map[*id.UUID]string{
 		&record.OffboardingID: rawOffboarding,
 		&record.TenantID:      rawTenant,
@@ -602,31 +619,222 @@ func load(ctx context.Context, tx db.Tx, offboardingID id.UUID) (Offboarding, er
 	} {
 		parsed, err := id.Parse(raw)
 		if err != nil {
-			return Offboarding{}, fmt.Errorf("offboarding: stored identifier %q: %w", raw, err)
+			return fmt.Errorf("offboarding: stored identifier %q: %w", raw, err)
 		}
 		*target = parsed
 	}
 
 	record.Stage = Stage(rawStage)
 	if !record.Stage.Valid() {
-		return Offboarding{}, fmt.Errorf("offboarding: stored stage %q is not a stage", rawStage)
+		return fmt.Errorf("offboarding: stored stage %q is not a stage", rawStage)
 	}
+	return nil
+}
+
+// countActiveMemberships is what the freeze has left: the Tenant's Memberships still `active`.
+const countActiveMemberships = `SELECT count(*) FROM membership.membership
+WHERE tenant_id = $1 AND status = 'active'`
+
+// The two derived parts of the view, as the columns and the join every read of it shares.
+//
+// The count is the one CompleteFreeze gates on and the deprovisioning is the one retirement gates
+// on (deprovisioningStatement), so the view and the gates cannot disagree about either. Read in the
+// statement rather than per row, so a page of a hundred is one statement and not two hundred.
+const (
+	derivedColumns = `(SELECT count(*) FROM membership.membership m
+        WHERE m.tenant_id = o.tenant_id AND m.status = 'active'),
+       d.state,
+       d.detail,
+       d.requested_at,
+       d.resolved_at`
+
+	deprovisioningJoin = `LEFT JOIN LATERAL (
+    SELECT r.state, r.detail, r.requested_at, r.resolved_at
+    FROM tenant.provisioning_request r
+    WHERE r.tenant_id = o.tenant_id
+      AND r.desired_profile->>'operation' = 'deprovision'
+      AND r.desired_profile->>'offboarding_id' = o.offboarding_id::text
+    ORDER BY r.requested_at DESC, r.request_id DESC
+    LIMIT 1
+) d ON true`
+
+	recordColumns = `o.offboarding_id::text,
+       o.tenant_id::text,
+       o.stage,
+       o.initiated_by::text,
+       o.reason,
+       o.legal_hold,
+       o.correlation_id::text,
+       o.started_at,
+       o.frozen_at,
+       o.released_at,
+       o.retired_at,
+       ` + derivedColumns
+)
+
+// derivedStatement reads the derived parts for a record a mutation already holds.
+const derivedStatement = `SELECT ` + derivedColumns + `
+FROM operation.offboarding o
+` + deprovisioningJoin + `
+WHERE o.offboarding_id = $1`
+
+// viewStatement reads one whole offboarding without locking it.
+const viewStatement = `SELECT ` + recordColumns + `
+FROM operation.offboarding o
+` + deprovisioningJoin + `
+WHERE o.offboarding_id = $1`
+
+// listStatement is one keyset page of offboardings, in the order they began.
+const listStatement = `SELECT ` + recordColumns + `
+FROM operation.offboarding o
+` + deprovisioningJoin + `
+WHERE ($1::text = '' OR o.stage = $1::text)
+  AND ($2::uuid IS NULL OR o.tenant_id = $2::uuid)
+  AND ($3::uuid IS NULL OR o.offboarding_id > $3::uuid)
+ORDER BY o.offboarding_id
+LIMIT $4`
+
+// derived holds the nullable columns derivedColumns reads.
+type derived struct {
+	state, detail           *string
+	requestedAt, resolvedAt *time.Time
+}
+
+func (d derived) apply(record *Offboarding, active int) {
+	record.ActiveMemberships = active
+	record.Deprovisioning = nil
+	if d.state == nil || d.requestedAt == nil {
+		return
+	}
+	record.Deprovisioning = &Deprovisioning{
+		State: *d.state, Detail: d.detail, RequestedAt: *d.requestedAt, ResolvedAt: d.resolvedAt,
+	}
+}
+
+// derive fills the derived parts of a record a mutation holds, in the mutation's transaction, so
+// the answer describes the state the mutation produced.
+func derive(ctx context.Context, tx db.Tx, record *Offboarding) error {
+	var (
+		active int
+		d      derived
+	)
+	if err := tx.QueryRow(ctx, derivedStatement, record.OffboardingID.String()).Scan(
+		&active, &d.state, &d.detail, &d.requestedAt, &d.resolvedAt); err != nil {
+		return fmt.Errorf("offboarding: read derived view: %w", err)
+	}
+	d.apply(record, active)
+	return nil
+}
+
+// errScan marks a row that could not be read, which for a single read is an absent one.
+var errScan = errors.New("offboarding: scan")
+
+// scanView reads one row of recordColumns.
+func scanView(row interface{ Scan(dest ...any) error }) (Offboarding, error) {
+	var (
+		record                                 Offboarding
+		rawOffboarding, rawTenant              string
+		rawInitiator, rawCorrelation, rawStage string
+		active                                 int
+		d                                      derived
+	)
+	if err := row.Scan(&rawOffboarding, &rawTenant, &rawStage, &rawInitiator, &record.Reason,
+		&record.LegalHold, &rawCorrelation, &record.StartedAt,
+		&record.FrozenAt, &record.ReleasedAt, &record.RetiredAt,
+		&active, &d.state, &d.detail, &d.requestedAt, &d.resolvedAt); err != nil {
+		return Offboarding{}, fmt.Errorf("%w: %w", errScan, err)
+	}
+	if err := decodeRecord(&record, rawOffboarding, rawTenant, rawInitiator, rawCorrelation, rawStage); err != nil {
+		return Offboarding{}, err
+	}
+	d.apply(&record, active)
 	return record, nil
 }
 
 // Get reads one offboarding, which is how a restart discovers where to resume.
+//
+// It locks nothing. A read that took the row lock the stage advances take would queue an operator's
+// screen behind a freeze, and the stage it reports is the one committed when it ran either way.
 func (s *Service) Get(ctx context.Context, offboardingID id.UUID) (Offboarding, error) {
+	if offboardingID.IsNil() {
+		return Offboarding{}, fmt.Errorf("%w: an offboarding identifier is required", ErrInvalid)
+	}
 	var record Offboarding
 	if err := db.WithProviderScope(ctx, s.provider,
 		"read offboarding "+offboardingID.String(),
 		func(ctx context.Context, tx db.Tx) error {
 			var err error
-			record, err = load(ctx, tx, offboardingID)
+			record, err = scanView(tx.QueryRow(ctx, viewStatement, offboardingID.String()))
+			if errors.Is(err, errScan) {
+				return fmt.Errorf("%w: offboarding %s", ErrNotFound, offboardingID)
+			}
 			return err
 		}); err != nil {
 		return Offboarding{}, err
 	}
 	return record, nil
+}
+
+// ListQuery selects one page of offboardings (STD-GLB-001 1.3.0 §Pagination).
+type ListQuery struct {
+	// After is the last offboarding_id of the previous page; the nil identifier starts at the first.
+	After id.UUID
+
+	// Limit is the page size, 1 to db.MaxListLimit; zero takes db.DefaultListLimit.
+	Limit int
+
+	// Stage narrows the list to one stage; empty is every stage, retired included.
+	Stage Stage
+
+	// TenantID narrows it to one Tenant's offboardings; nil is every Tenant.
+	TenantID id.UUID
+}
+
+// Page is one page of offboardings in the order they began. Next is the After of the following
+// page, and nil on the last.
+type Page struct {
+	Offboardings []Offboarding
+	Next         *id.UUID
+}
+
+// List reads one page of offboardings across the estate.
+//
+// Provider-scoped like every read here, with the caller's reason recorded before the page is read.
+func (s *Service) List(ctx context.Context, query ListQuery, reason string) (Page, error) {
+	limit, err := db.ListLimit(query.Limit)
+	if err != nil {
+		return Page{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	if query.Stage != "" && !query.Stage.Valid() {
+		return Page{}, fmt.Errorf("%w: stage must be freeze, obligations, release or retired", ErrInvalid)
+	}
+
+	page := Page{Offboardings: []Offboarding{}}
+	if err := db.WithProviderScope(ctx, s.provider, reason, func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, listStatement, string(query.Stage),
+			db.Keyset(query.TenantID), db.Keyset(query.After), limit+1)
+		if err != nil {
+			return fmt.Errorf("offboarding: list: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			record, err := scanView(rows)
+			if err != nil {
+				return fmt.Errorf("offboarding: scan list: %w", err)
+			}
+			page.Offboardings = append(page.Offboardings, record)
+		}
+		return rows.Err()
+	}); err != nil {
+		return Page{}, err
+	}
+
+	if len(page.Offboardings) > limit {
+		page.Offboardings = page.Offboardings[:limit]
+		next := page.Offboardings[limit-1].OffboardingID
+		page.Next = &next
+	}
+	return page, nil
 }
 
 func (s *Service) publish(ctx context.Context, tx db.Tx, name string, aggregate id.UUID,

@@ -176,7 +176,43 @@ type Offboarding struct {
 	CorrelationID id.UUID
 	StartedAt     time.Time
 	FrozenAt      *time.Time
-	RetiredAt     *time.Time
+
+	// ReleasedAt is the instant the offboarding entered release. Null on a row that passed release
+	// before the column existed: that instant was never recorded.
+	ReleasedAt *time.Time
+
+	RetiredAt *time.Time
+
+	// Deprovisioning is the most recent deprovisioning command recorded for this offboarding, the
+	// one retirement is gated on, and nil before release.
+	Deprovisioning *Deprovisioning
+
+	// ActiveMemberships is the count of the Tenant's Memberships still `active`, read in the
+	// transaction that read the record: what the freeze has left to suspend.
+	ActiveMemberships int
+}
+
+// ObligationsAt is the instant the offboarding entered obligations.
+//
+// It is FrozenAt, and not a copy of it. Completing the freeze and entering obligations are one
+// transaction stamped with one instant, so a second column would store one fact twice and could
+// only ever disagree with the first by being wrong.
+func (o Offboarding) ObligationsAt() *time.Time {
+	return o.FrozenAt
+}
+
+// Deprovisioning is the latest deprovisioning command for an offboarding and what was reported
+// back for it.
+type Deprovisioning struct {
+	// State is `requested` until an outcome is recorded, then `realized`, `failed`, or
+	// `unresolved`.
+	State string
+
+	// Detail is the reported explanation, nil when none was given.
+	Detail *string
+
+	RequestedAt time.Time
+	ResolvedAt  *time.Time
 }
 
 // Obligation is one row of operation.offboarding_obligation.
@@ -190,6 +226,12 @@ type Obligation struct {
 	DueAt         *time.Time
 	CompletedAt   *time.Time
 	Detail        string
+
+	// ResolvedBy and ResolvedAt are who reported the latest outcome and when: completed, waived and
+	// failed alike, where CompletedAt is set only for the two resolving states. Nil while open, and
+	// on a row resolved before the columns existed.
+	ResolvedBy *id.UUID
+	ResolvedAt *time.Time
 }
 
 // eventTypes are the offboarding-owned events.

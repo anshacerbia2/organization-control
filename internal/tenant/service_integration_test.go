@@ -713,3 +713,63 @@ func TestTheListIsAKeysetPageWithItsAccessRecorded(t *testing.T) {
 		t.Errorf("a list without a reason: error = %v, want db.ErrReasonRequired", err)
 	}
 }
+
+// TestTheSingleReadCountsAndFindsTheOffboarding is TDD-organization-control-003 1.7.0: the single
+// read carries the count of the Tenant's active Memberships and its offboarding, computed by the
+// API, and an absent offboarding is nil rather than an error.
+func TestTheSingleReadCountsAndFindsTheOffboarding(t *testing.T) {
+	f := newFixture(t)
+	seeded := f.seed(t, StateActive, "active")
+	other := f.seed(t, StateActive, "active")
+
+	insertMembership := func(tenantID id.UUID, status string) {
+		membershipID := mustID(t)
+		f.exec(t, `INSERT INTO membership.membership
+		    (membership_id, principal_id, tenant_id, subject_type, status, membership_version, valid_from, provenance)
+		    VALUES ($1, $2, $3, 'human', $4, 1, now(), 'tenant suite')`,
+			membershipID.String(), mustID(t).String(), tenantID.String(), status)
+	}
+	for _, status := range []string{"active", "active", "suspended", "revoked"} {
+		insertMembership(seeded.TenantID, status)
+	}
+	insertMembership(other.TenantID, "active")
+	t.Cleanup(func() {
+		for _, tenantID := range []id.UUID{seeded.TenantID, other.TenantID} {
+			f.exec(t, `DELETE FROM operation.offboarding WHERE tenant_id = $1`, tenantID.String())
+			f.exec(t, `DELETE FROM membership.membership WHERE tenant_id = $1`, tenantID.String())
+		}
+	})
+
+	detail, err := f.service.Detail(f.ctx, seeded.TenantID)
+	if err != nil {
+		t.Fatalf("Detail: %v", err)
+	}
+	if detail.TenantID != seeded.TenantID || detail.Status != StateActive {
+		t.Errorf("the record is %+v", detail.Record)
+	}
+	if detail.ActiveMemberships != 2 {
+		t.Errorf("active_memberships = %d, want 2: suspended, revoked and another Tenant's are not counted",
+			detail.ActiveMemberships)
+	}
+	if detail.OffboardingID != nil {
+		t.Errorf("offboarding_id = %s with no offboarding begun", detail.OffboardingID)
+	}
+
+	offboardingID := mustID(t)
+	f.exec(t, `INSERT INTO operation.offboarding
+	    (offboarding_id, tenant_id, stage, initiated_by, reason, correlation_id)
+	    VALUES ($1, $2, 'freeze', $3, 'tenant suite', $4)`,
+		offboardingID.String(), seeded.TenantID.String(), mustID(t).String(), mustID(t).String())
+
+	detail, err = f.service.Detail(f.ctx, seeded.TenantID)
+	if err != nil {
+		t.Fatalf("Detail: %v", err)
+	}
+	if detail.OffboardingID == nil || *detail.OffboardingID != offboardingID {
+		t.Errorf("offboarding_id = %v, want %s", detail.OffboardingID, offboardingID)
+	}
+
+	if _, err := f.service.Detail(f.ctx, mustID(t)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an absent Tenant: error = %v, want ErrNotFound", err)
+	}
+}

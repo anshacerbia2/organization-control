@@ -174,6 +174,12 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/memberships/{membership_id}/suspend", h.suspendMembership)
 	api.HandleFunc("POST /v1/memberships/{membership_id}/restore", h.restoreMembership)
 	api.HandleFunc("POST /v1/memberships/{membership_id}/revoke", h.revokeMembership)
+	api.HandleFunc("GET /v1/memberships/{membership_id}/enforcement", h.membershipEnforcement)
+
+	// Bulk actions on Memberships (ADR-ORG-004 §5.1): previewed, then executed.
+	api.HandleFunc("POST /v1/membership-batches", h.previewMembershipBatch)
+	api.HandleFunc("GET /v1/membership-batches/{batch_id}", h.getMembershipBatch)
+	api.HandleFunc("POST /v1/membership-batches/{batch_id}/execute", h.executeMembershipBatch)
 
 	api.HandleFunc("GET /v1/workspaces", h.listWorkspaces)
 	api.HandleFunc("POST /v1/workspaces", h.createWorkspace)
@@ -228,6 +234,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/provisioning/failed", h.failProvisioning)
 	api.HandleFunc("POST /v1/provisioning/sweep-unresolved", h.sweepProvisioning)
 
+	api.HandleFunc("GET /v1/offboardings", h.listOffboardings)
 	api.HandleFunc("POST /v1/offboardings", h.beginOffboarding)
 	api.HandleFunc("GET /v1/offboardings/{offboarding_id}", h.getOffboarding)
 	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/freeze", h.freezeOffboarding)

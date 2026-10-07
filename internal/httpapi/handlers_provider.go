@@ -125,12 +125,12 @@ func (h *handlers) getTenant(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	record, err := h.services.Tenants.Get(r.Context(), tenantID)
+	detail, err := h.services.Tenants.Detail(r.Context(), tenantID)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	respond(w, http.StatusOK, viewTenantRecord(record))
+	respond(w, http.StatusOK, viewTenantDetail(detail))
 }
 
 // provisionTenant records that the desired state has left, and retries a failed attempt.
@@ -449,6 +449,38 @@ func (h *handlers) getOffboarding(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusOK, viewOffboarding(record))
 }
 
+type offboardingPageView struct {
+	Offboardings []offboardingView `json:"offboardings"`
+	Next         *string           `json:"next"`
+}
+
+// listOffboardings serves `GET /v1/offboardings?after=&limit=&stage=&tenant_id=`. Each page records
+// the access with the caller's reason before it reads.
+func (h *handlers) listOffboardings(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	params, ok := readList(w, r, []string{"stage"}, []string{"tenant_id"})
+	if !ok {
+		return
+	}
+	page, err := h.services.Offboardings.List(r.Context(), offboarding.ListQuery{
+		After:    params.After,
+		Limit:    params.Limit,
+		Stage:    offboarding.Stage(params.Filters["stage"]),
+		TenantID: params.IDs["tenant_id"],
+	}, reason(r))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	view := offboardingPageView{Offboardings: make([]offboardingView, 0, len(page.Offboardings)), Next: nextCursor(page.Next)}
+	for _, record := range page.Offboardings {
+		view.Offboardings = append(view.Offboardings, viewOffboarding(record))
+	}
+	respond(w, http.StatusOK, view)
+}
+
 // freezeOffboarding runs one batch and reports how many rows it froze.
 //
 // One batch per call, not a loop to completion. The freeze holds `FOR UPDATE SKIP LOCKED` over a
@@ -589,8 +621,11 @@ func (h *handlers) raiseObligation(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusCreated, viewObligation(record))
 }
 
+// outstandingResponse is the obligation board. `outstanding` is the list of names it always was;
+// `obligations` is every row, from TDD-organization-control-004 1.7.0.
 type outstandingResponse struct {
-	Outstanding []string `json:"outstanding"`
+	Outstanding []string         `json:"outstanding"`
+	Obligations []obligationView `json:"obligations"`
 }
 
 func (h *handlers) outstandingObligations(w http.ResponseWriter, r *http.Request) {
@@ -601,17 +636,21 @@ func (h *handlers) outstandingObligations(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	outstanding, err := h.services.Offboardings.Outstanding(r.Context(), offboardingID)
+	board, err := h.services.Offboardings.Board(r.Context(), offboardingID)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	// An empty slice rather than a nil one, so the field marshals as `[]` and not `null`. A client
+	// Empty slices rather than nil ones, so both fields marshal as `[]` and not `null`. A client
 	// that reads `null` as "unknown" would treat a clean Tenant as one it could not assess.
-	if outstanding == nil {
-		outstanding = []string{}
+	view := outstandingResponse{Outstanding: board.Outstanding, Obligations: make([]obligationView, 0, len(board.Obligations))}
+	if view.Outstanding == nil {
+		view.Outstanding = []string{}
 	}
-	respond(w, http.StatusOK, outstandingResponse{Outstanding: outstanding})
+	for _, obligation := range board.Obligations {
+		view.Obligations = append(view.Obligations, viewObligation(obligation))
+	}
+	respond(w, http.StatusOK, view)
 }
 
 type resolveObligationRequest struct {
