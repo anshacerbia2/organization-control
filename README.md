@@ -345,6 +345,16 @@ GET   /v1/offboardings/{offboarding_id}/obligations   {"outstanding": [...], "ob
 GET   /v1/tenants/{tenant_id}                adds offboarding_id and active_memberships
 ```
 
+A Tenant administrator acts on Memberships in bulk, and reads whether a transition is enforced
+(TDD-organization-control-002 1.10.0, ADR-ORG-004):
+
+```text
+POST  /v1/membership-batches                 {"action":"revoke","membership_ids":[...]}   preview, 1 to 500
+POST  /v1/membership-batches/{batch_id}/execute   {"fail_on_errors": n}   Idempotency-Key
+GET   /v1/membership-batches/{batch_id}
+GET   /v1/memberships/{membership_id}/enforcement   accepted | propagating | enforced | over_budget
+```
+
 ### Locally: `.env` and the Makefile
 
 Nothing above needs to be typed. `.env.example` carries a working local set; the `Makefile` loads
