@@ -107,6 +107,7 @@ var registry = map[string]error{
 	"offboarding.ErrAlreadyResolved":          offboarding.ErrAlreadyResolved,
 	"offboarding.ErrAmbiguousOutcome":         offboarding.ErrAmbiguousOutcome,
 	"offboarding.ErrDeprovisioningIncomplete": offboarding.ErrDeprovisioningIncomplete,
+	"offboarding.ErrNotReversible":            offboarding.ErrNotReversible,
 
 	"projection.ErrInvalid":               projection.ErrInvalid,
 	"projection.ErrPageSize":              projection.ErrPageSize,

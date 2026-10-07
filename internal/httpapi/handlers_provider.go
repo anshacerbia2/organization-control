@@ -505,7 +505,13 @@ func (h *handlers) freezeOffboarding(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	affected, err := h.services.Offboardings.FreezeBatch(r.Context(), record.TenantID, body.Size, reason(r))
+	// A freeze belongs to the freeze stage. After a cancellation it would suspend Memberships in a
+	// Tenant that is back (ADR-ORG-006); the batch also checks the Tenant itself, in its transaction.
+	if record.Stage != offboarding.StageFreeze {
+		writeError(w, r, fmt.Errorf("%w: %s is at %s, not freeze", offboarding.ErrStageRefused, offboardingID, record.Stage))
+		return
+	}
+	affected, err := h.services.Offboardings.FreezeBatch(r.Context(), offboardingID, record.TenantID, body.Size, reason(r))
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -559,6 +565,31 @@ func (h *handlers) retireOffboarding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record, err := h.services.Offboardings.Retire(r.Context(), offboardingID, body.ExpectedVersion)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond(w, http.StatusOK, viewOffboarding(record))
+}
+
+// cancelOffboarding cancels an offboarding before release, taking the Tenant version the caller was
+// shown (ADR-ORG-006 §5.1). The reason header, which requireProvider insists on, is the cancellation's
+// recorded reason.
+func (h *handlers) cancelOffboarding(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	offboardingID, ok := pathUUID(w, r, "offboarding_id")
+	if !ok {
+		return
+	}
+	body, ok := decode[providerCommand](w, r)
+	if !ok {
+		return
+	}
+	record, err := h.services.Offboardings.Cancel(r.Context(), offboarding.CancelRequest{
+		OffboardingID: offboardingID, ExpectedVersion: body.ExpectedVersion, Reason: reason(r),
+	})
 	if err != nil {
 		writeError(w, r, err)
 		return

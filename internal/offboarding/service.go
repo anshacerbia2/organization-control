@@ -77,8 +77,12 @@ type BeginRequest struct {
 }
 
 const insertOffboarding = `INSERT INTO operation.offboarding
-    (offboarding_id, tenant_id, stage, initiated_by, reason, legal_hold, correlation_id, started_at)
-VALUES ($1, $2, 'freeze', $3, $4, $5, $6, $7)`
+    (offboarding_id, tenant_id, stage, initiated_by, reason, legal_hold, correlation_id, started_at, prior_status)
+VALUES ($1, $2, 'freeze', $3, $4, $5, $6, $7, $8)`
+
+// lockTenantStatus reads the status the offboarding records as prior_status, under the row lock the
+// transition then takes, so the status recorded is the one the transition moved from.
+const lockTenantStatus = `SELECT status FROM tenant.tenant WHERE tenant_id = $1 FOR UPDATE`
 
 // Begin transitions the Tenant into offboarding and creates the record the process resumes from,
 // in one transaction.
@@ -117,6 +121,13 @@ func (s *Service) Begin(ctx context.Context, req BeginRequest) (Offboarding, err
 
 	if err := db.WithProviderScope(ctx, s.provider, req.Reason,
 		func(ctx context.Context, tx db.Tx) error {
+			// The status a cancellation returns the Tenant to (ADR-ORG-006 §5.2). An absent Tenant
+			// reads nothing here and is refused by the transition below, as before.
+			var prior string
+			if err := tx.QueryRow(ctx, lockTenantStatus, req.TenantID.String()).Scan(&prior); err == nil {
+				record.PriorStatus = prior
+			}
+
 			// The Tenant transition runs first, so its refusals are the ones the caller sees. A
 			// Tenant already offboarding or retired is refused by the state machine, and no record
 			// is written for a transition that did not happen.
@@ -130,7 +141,8 @@ func (s *Service) Begin(ctx context.Context, req BeginRequest) (Offboarding, err
 
 			if _, err := tx.Exec(ctx, insertOffboarding,
 				record.OffboardingID.String(), record.TenantID.String(), record.InitiatedBy.String(),
-				record.Reason, record.LegalHold, record.CorrelationID.String(), record.StartedAt); err != nil {
+				record.Reason, record.LegalHold, record.CorrelationID.String(), record.StartedAt,
+				nullableText(record.PriorStatus)); err != nil {
 				return fmt.Errorf("offboarding: insert record: %w", err)
 			}
 			if err := derive(ctx, tx, &record); err != nil {
@@ -173,9 +185,14 @@ FOR UPDATE SKIP LOCKED`
 // recorded with the reason first, and the suspensions run on the tenant pool under that Tenant's
 // policy. A provider scope reaching WithTenantScope is refused, so the route could not freeze
 // before this.
-func (s *Service) FreezeBatch(ctx context.Context, tenantID id.UUID, size int, reason string) (int, error) {
-	if tenantID.IsNil() {
-		return 0, fmt.Errorf("%w: a tenant identifier is required", ErrInvalid)
+//
+// Each suspension is recorded in membership.offboarding_freeze in the same transaction, so a
+// cancellation restores exactly what the freeze suspended (ADR-ORG-006 §5.2). A batch is refused once
+// the Tenant is no longer `offboarding`: after a cancellation, a freeze would suspend Memberships in a
+// Tenant that is back.
+func (s *Service) FreezeBatch(ctx context.Context, offboardingID, tenantID id.UUID, size int, reason string) (int, error) {
+	if offboardingID.IsNil() || tenantID.IsNil() {
+		return 0, fmt.Errorf("%w: an offboarding and a tenant identifier are required", ErrInvalid)
 	}
 	if size <= 0 {
 		return 0, fmt.Errorf("%w: a positive batch size is required", ErrInvalid)
@@ -183,6 +200,14 @@ func (s *Service) FreezeBatch(ctx context.Context, tenantID id.UUID, size int, r
 
 	var frozen int
 	if err := db.WithProviderInTenant(ctx, s.provider, s.tenantPool, tenantID, reason, func(ctx context.Context, tx db.Tx) error {
+		var status string
+		if err := tx.QueryRow(ctx, tenantStatusStatement, tenantID.String()).Scan(&status); err != nil {
+			return fmt.Errorf("offboarding: read the Tenant's status: %w", err)
+		}
+		if status != string(tenant.StateOffboarding) {
+			return fmt.Errorf("%w: the Tenant is %s, not offboarding; there is nothing to freeze",
+				ErrStageRefused, status)
+		}
 		rows, err := tx.Query(ctx, selectFreezeBatch, tenantID.String(), size)
 		if err != nil {
 			return fmt.Errorf("offboarding: select freeze batch: %w", err)
@@ -219,6 +244,10 @@ func (s *Service) FreezeBatch(ctx context.Context, tenantID id.UUID, size int, r
 			if _, err := s.memberships.TransitionWithin(ctx, tx, membership.ActionSuspend, cmd); err != nil {
 				return err
 			}
+			if _, err := tx.Exec(ctx, insertFrozen,
+				offboardingID.String(), tenantID.String(), cmd.MembershipID.String()); err != nil {
+				return fmt.Errorf("offboarding: record the frozen Membership: %w", err)
+			}
 			frozen++
 		}
 		return nil
@@ -227,6 +256,13 @@ func (s *Service) FreezeBatch(ctx context.Context, tenantID id.UUID, size int, r
 	}
 	return frozen, nil
 }
+
+// tenantStatusStatement reads the Tenant's status under its own policy, as the tenant role may.
+const tenantStatusStatement = `SELECT status FROM tenant.tenant WHERE tenant_id = $1`
+
+// insertFrozen records one Membership the freeze suspended.
+const insertFrozen = `INSERT INTO membership.offboarding_freeze (offboarding_id, tenant_id, membership_id)
+VALUES ($1, $2, $3)`
 
 const selectOffboarding = `SELECT offboarding_id::text,
        tenant_id::text,
@@ -238,7 +274,11 @@ const selectOffboarding = `SELECT offboarding_id::text,
        started_at,
        frozen_at,
        released_at,
-       retired_at
+       retired_at,
+       coalesce(prior_status, ''),
+       cancelled_by::text,
+       cancel_reason,
+       cancelled_at
 FROM operation.offboarding
 WHERE offboarding_id = $1
 FOR UPDATE`
@@ -600,13 +640,31 @@ func load(ctx context.Context, tx db.Tx, offboardingID id.UUID) (Offboarding, er
 		rawOffboarding, rawTenant              string
 		rawInitiator, rawCorrelation, rawStage string
 	)
+	var rawCanceller *string
 	if err := tx.QueryRow(ctx, selectOffboarding, offboardingID.String()).Scan(
 		&rawOffboarding, &rawTenant, &rawStage, &rawInitiator, &record.Reason,
 		&record.LegalHold, &rawCorrelation, &record.StartedAt,
-		&record.FrozenAt, &record.ReleasedAt, &record.RetiredAt); err != nil {
+		&record.FrozenAt, &record.ReleasedAt, &record.RetiredAt,
+		&record.PriorStatus, &rawCanceller, &record.CancelReason, &record.CancelledAt); err != nil {
 		return Offboarding{}, fmt.Errorf("%w: offboarding %s", ErrNotFound, offboardingID)
 	}
+	if err := decodeCanceller(&record, rawCanceller); err != nil {
+		return Offboarding{}, err
+	}
 	return record, decodeRecord(&record, rawOffboarding, rawTenant, rawInitiator, rawCorrelation, rawStage)
+}
+
+// decodeCanceller parses who cancelled the offboarding, when anyone did.
+func decodeCanceller(record *Offboarding, raw *string) error {
+	if raw == nil {
+		return nil
+	}
+	parsed, err := id.Parse(*raw)
+	if err != nil {
+		return fmt.Errorf("offboarding: stored cancelled_by %q: %w", *raw, err)
+	}
+	record.CancelledBy = &parsed
+	return nil
 }
 
 // decodeRecord parses the identifiers and the stage a statement read as text.
@@ -643,6 +701,12 @@ WHERE tenant_id = $1 AND status = 'active'`
 const (
 	derivedColumns = `(SELECT count(*) FROM membership.membership m
         WHERE m.tenant_id = o.tenant_id AND m.status = 'active'),
+       (SELECT count(*) FROM membership.offboarding_freeze f
+        WHERE f.offboarding_id = o.offboarding_id),
+       (SELECT count(*) FROM membership.offboarding_freeze f
+        JOIN membership.membership m ON m.membership_id = f.membership_id
+        WHERE f.offboarding_id = o.offboarding_id AND o.stage = 'cancelled'
+          AND f.restored_at IS NULL AND m.status = 'suspended'),
        d.state,
        d.detail,
        d.requested_at,
@@ -669,6 +733,10 @@ const (
        o.frozen_at,
        o.released_at,
        o.retired_at,
+       coalesce(o.prior_status, ''),
+       o.cancelled_by::text,
+       o.cancel_reason,
+       o.cancelled_at,
        ` + derivedColumns
 )
 
@@ -694,14 +762,17 @@ WHERE ($1::text = '' OR o.stage = $1::text)
 ORDER BY o.offboarding_id
 LIMIT $4`
 
-// derived holds the nullable columns derivedColumns reads.
+// derived holds the columns derivedColumns reads.
 type derived struct {
+	active, frozen, pending int
 	state, detail           *string
 	requestedAt, resolvedAt *time.Time
 }
 
-func (d derived) apply(record *Offboarding, active int) {
-	record.ActiveMemberships = active
+func (d derived) apply(record *Offboarding) {
+	record.ActiveMemberships = d.active
+	record.FrozenMemberships = d.frozen
+	record.RestorePending = d.pending
 	record.Deprovisioning = nil
 	if d.state == nil || d.requestedAt == nil {
 		return
@@ -714,15 +785,12 @@ func (d derived) apply(record *Offboarding, active int) {
 // derive fills the derived parts of a record a mutation holds, in the mutation's transaction, so
 // the answer describes the state the mutation produced.
 func derive(ctx context.Context, tx db.Tx, record *Offboarding) error {
-	var (
-		active int
-		d      derived
-	)
+	var d derived
 	if err := tx.QueryRow(ctx, derivedStatement, record.OffboardingID.String()).Scan(
-		&active, &d.state, &d.detail, &d.requestedAt, &d.resolvedAt); err != nil {
+		&d.active, &d.frozen, &d.pending, &d.state, &d.detail, &d.requestedAt, &d.resolvedAt); err != nil {
 		return fmt.Errorf("offboarding: read derived view: %w", err)
 	}
-	d.apply(record, active)
+	d.apply(record)
 	return nil
 }
 
@@ -735,19 +803,23 @@ func scanView(row interface{ Scan(dest ...any) error }) (Offboarding, error) {
 		record                                 Offboarding
 		rawOffboarding, rawTenant              string
 		rawInitiator, rawCorrelation, rawStage string
-		active                                 int
+		rawCanceller                           *string
 		d                                      derived
 	)
 	if err := row.Scan(&rawOffboarding, &rawTenant, &rawStage, &rawInitiator, &record.Reason,
 		&record.LegalHold, &rawCorrelation, &record.StartedAt,
 		&record.FrozenAt, &record.ReleasedAt, &record.RetiredAt,
-		&active, &d.state, &d.detail, &d.requestedAt, &d.resolvedAt); err != nil {
+		&record.PriorStatus, &rawCanceller, &record.CancelReason, &record.CancelledAt,
+		&d.active, &d.frozen, &d.pending, &d.state, &d.detail, &d.requestedAt, &d.resolvedAt); err != nil {
 		return Offboarding{}, fmt.Errorf("%w: %w", errScan, err)
 	}
 	if err := decodeRecord(&record, rawOffboarding, rawTenant, rawInitiator, rawCorrelation, rawStage); err != nil {
 		return Offboarding{}, err
 	}
-	d.apply(&record, active)
+	if err := decodeCanceller(&record, rawCanceller); err != nil {
+		return Offboarding{}, err
+	}
+	d.apply(&record)
 	return record, nil
 }
 
@@ -854,4 +926,12 @@ func (s *Service) publish(ctx context.Context, tx db.Tx, name string, aggregate 
 		return fmt.Errorf("offboarding: append %s: %w", name, err)
 	}
 	return nil
+}
+
+// nullableText stores an empty string as NULL.
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

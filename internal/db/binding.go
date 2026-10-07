@@ -76,6 +76,7 @@ type Scope struct {
 	tenantID    id.UUID
 	provider    bool
 	consumer    bool
+	self        bool
 	actor       id.UUID
 	correlation id.UUID
 
@@ -124,6 +125,24 @@ func ConsumerScope(actor, correlation id.UUID) (Scope, error) {
 	}
 	return Scope{consumer: true, actor: actor, correlation: correlation}, nil
 }
+
+// SelfScope resolves a person reading their own records, and nothing else (ADR-ORG-005 §5.1).
+//
+// The actor is the Principal whose rows the read may reach. It opens only WithSelfRead, which binds
+// that Principal and nothing more; every other entry point refuses it, so a self caller cannot reach
+// a Tenant's records or the provider's.
+func SelfScope(actor, correlation id.UUID) (Scope, error) {
+	if actor.IsNil() {
+		return Scope{}, errors.New("db: a self scope requires an acting subject")
+	}
+	if correlation.IsNil() {
+		return Scope{}, errors.New("db: a self scope requires a correlation identifier")
+	}
+	return Scope{self: true, actor: actor, correlation: correlation}, nil
+}
+
+// IsSelf reports whether this scope is a person's own.
+func (s Scope) IsSelf() bool { return s.self }
 
 // IsProvider reports whether this scope is the cross-Tenant provider one.
 func (s Scope) IsProvider() bool { return s.provider }
@@ -268,8 +287,8 @@ func WithTenantScope(ctx context.Context, pool *TenantPool, fn Body) error {
 	if scope.IsProvider() {
 		return fmt.Errorf("%w: a provider scope reached a tenant-scoped pool", ErrWrongScope)
 	}
-	if scope.IsConsumer() || scope.tenantID.IsNil() {
-		return fmt.Errorf("%w: a consumer scope reached a tenant-scoped pool", ErrWrongScope)
+	if scope.IsConsumer() || scope.IsSelf() || scope.tenantID.IsNil() {
+		return fmt.Errorf("%w: a consumer or self scope reached a tenant-scoped pool", ErrWrongScope)
 	}
 
 	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
@@ -326,7 +345,7 @@ func WithTenantRead(ctx context.Context, pool *TenantPool, fn Body) error {
 	if !ok {
 		return ErrNoScope
 	}
-	if scope.IsProvider() || scope.IsConsumer() || scope.tenantID.IsNil() {
+	if scope.IsProvider() || scope.IsConsumer() || scope.IsSelf() || scope.tenantID.IsNil() {
 		return fmt.Errorf("%w: only a tenant scope reads a Tenant", ErrWrongScope)
 	}
 	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
@@ -335,6 +354,60 @@ func WithTenantRead(ctx context.Context, pool *TenantPool, fn Body) error {
 		}
 		if err := bindTenant(ctx, tx, scope); err != nil {
 			return err
+		}
+		return fn(ctx, tx)
+	})
+}
+
+// SelfPool carries a person's read of their own records (ADR-ORG-005). It holds the tenant
+// connections and runs every transaction as `organization_self_rt`, which `organization_rt` may SET
+// ROLE to and does not inherit (TDD-organization-control-001 §Roles).
+//
+// A pool of its own type rather than a method on TenantPool, so a handler holding one cannot open
+// the other, and so tools/grantcheck derives the self role's privileges from the wrapper a body is
+// passed to.
+type SelfPool struct{ tx Transactor }
+
+// NewSelfPool wraps the tenant connections for self reads.
+func NewSelfPool(tx Transactor) (*SelfPool, error) {
+	if tx == nil {
+		return nil, errors.New("db: a transaction source is required")
+	}
+	return &SelfPool{tx: tx}, nil
+}
+
+// selfRole is the role every self transaction runs as.
+const selfRole = "organization_self_rt"
+
+// WithSelfRead runs fn in a read-only transaction as the self role, bound to the self scope's
+// Principal.
+//
+// It records no privileged access: the read reaches only the caller's own rows, which is not
+// provider access (ADR-ORG-005 §5.1). The role is set before the binding, so nothing in the
+// transaction runs with the tenant role's privileges, and LOCAL so the connection returns to the
+// pool as the tenant role. The self policies read app.principal_id with missing_ok false, so a
+// transaction that reached them unbound would raise rather than read.
+func WithSelfRead(ctx context.Context, pool *SelfPool, fn Body) error {
+	if pool == nil {
+		return errors.New("db: a self pool is required")
+	}
+	scope, ok := ScopeFrom(ctx)
+	if !ok {
+		return ErrNoScope
+	}
+	if !scope.IsSelf() {
+		return fmt.Errorf("%w: only a self scope opens the self pool", ErrWrongScope)
+	}
+	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+		if _, err := tx.Exec(ctx, `SET TRANSACTION READ ONLY`); err != nil {
+			return fmt.Errorf("db: enter read-only: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `SET LOCAL ROLE `+selfRole); err != nil {
+			return fmt.Errorf("db: become the self role: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`SELECT set_config('app.principal_id', $1, true)`, scope.actor.String()); err != nil {
+			return fmt.Errorf("db: bind self scope: %w", err)
 		}
 		return fn(ctx, tx)
 	})
@@ -535,6 +608,8 @@ func withRecordedScope(ctx context.Context, tx Transactor, recorder PrivilegedRe
 		return ErrNoScope
 	}
 	switch {
+	case scope.IsSelf():
+		return fmt.Errorf("%w: a self scope reached a recorded pool", ErrWrongScope)
 	case consumer && !scope.IsConsumer():
 		return fmt.Errorf("%w: only a consumer scope opens the consumer pool", ErrWrongScope)
 	case !consumer && !scope.IsProvider():

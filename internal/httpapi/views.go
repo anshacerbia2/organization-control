@@ -315,6 +315,15 @@ type offboardingView struct {
 	ReleasedAt        *time.Time          `json:"released_at"`
 	Deprovisioning    *deprovisioningView `json:"deprovisioning"`
 	ActiveMemberships int                 `json:"active_memberships"`
+
+	// From 1.8.0 (ADR-ORG-006), present and null until reached. prior_status is null on an
+	// offboarding begun before it was recorded, which cannot be cancelled.
+	PriorStatus       *string    `json:"prior_status"`
+	CancelledBy       *id.UUID   `json:"cancelled_by"`
+	CancelReason      *string    `json:"cancel_reason"`
+	CancelledAt       *time.Time `json:"cancelled_at"`
+	FrozenMemberships int        `json:"frozen_memberships"`
+	RestorePending    int        `json:"restore_pending"`
 }
 
 // deprovisioningView is the latest deprovisioning command and what was reported back for it.
@@ -332,6 +341,12 @@ func viewOffboarding(o offboarding.Offboarding) offboardingView {
 		CorrelationID: o.CorrelationID, StartedAt: o.StartedAt, FrozenAt: o.FrozenAt,
 		RetiredAt: o.RetiredAt, ObligationsAt: o.ObligationsAt(), ReleasedAt: o.ReleasedAt,
 		ActiveMemberships: o.ActiveMemberships,
+		CancelledBy:       o.CancelledBy, CancelReason: o.CancelReason, CancelledAt: o.CancelledAt,
+		FrozenMemberships: o.FrozenMemberships, RestorePending: o.RestorePending,
+	}
+	if o.PriorStatus != "" {
+		prior := o.PriorStatus
+		view.PriorStatus = &prior
 	}
 	if d := o.Deprovisioning; d != nil {
 		view.Deprovisioning = &deprovisioningView{

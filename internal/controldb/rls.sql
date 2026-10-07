@@ -213,6 +213,35 @@ CREATE POLICY tenant_consumer_read ON tenant.tenant
     USING (current_setting('app.provider_scope', false)::boolean);
 
 
+-- membership.membership, tenant.tenant and membership.tenant_admin_grant, read by the self role.
+--
+-- A person's own contexts (ADR-ORG-005): db.WithSelfRead sets the role and binds app.principal_id to
+-- the caller, and these SELECT policies show that Principal's rows and nothing else. A Tenant is
+-- visible when the Principal holds an active Membership in it; the subquery runs as the self role,
+-- under the Membership policy above it. missing_ok is false, as everywhere but the restrictive pair
+-- below, so an unbound self transaction raises rather than reading nothing. The tenant role does not
+-- inherit the self role, so none of these reaches a tenant transaction.
+DROP POLICY IF EXISTS membership_self_read ON membership.membership;
+CREATE POLICY membership_self_read ON membership.membership
+    FOR SELECT
+    TO organization_self_rt
+    USING (principal_id = current_setting('app.principal_id', false)::uuid);
+
+DROP POLICY IF EXISTS tenant_self_read ON tenant.tenant;
+CREATE POLICY tenant_self_read ON tenant.tenant
+    FOR SELECT
+    TO organization_self_rt
+    USING (EXISTS (SELECT 1 FROM membership.membership m
+                    WHERE m.tenant_id = tenant.tenant_id
+                      AND m.principal_id = current_setting('app.principal_id', false)::uuid
+                      AND m.status = 'active'));
+
+DROP POLICY IF EXISTS tenant_admin_grant_self_read ON membership.tenant_admin_grant;
+CREATE POLICY tenant_admin_grant_self_read ON membership.tenant_admin_grant
+    FOR SELECT
+    TO organization_self_rt
+    USING (principal_id = current_setting('app.principal_id', false)::uuid);
+
 -- membership.tenant_admin_grant, written by a provider only (ADR-ORG-003 §5.2).
 --
 -- The loop above gives the tenant role its policy here, as on every table in the schema. The writes

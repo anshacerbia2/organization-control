@@ -52,7 +52,8 @@ var RLSSchemas = []string{"tenant", "workspace", "membership", "invitation", "op
 
 // RuntimeRoles are the roles that carry request traffic under Row-Level Security. None may own a
 // table or hold an attribute that would make a policy inert.
-var RuntimeRoles = []string{"organization_rt", "organization_provider_rt", "organization_consumer_rt"}
+var RuntimeRoles = []string{"organization_rt", "organization_provider_rt", "organization_consumer_rt",
+	"organization_self_rt"}
 
 // AdditionalPolicies are the policies a table may carry beyond its tenant-scope and provider-scope
 // pair, by name. Anything else found on a protected table is a problem.
@@ -66,15 +67,18 @@ var RuntimeRoles = []string{"organization_rt", "organization_provider_rt", "orga
 // (organization_consumer_rt) so that a consumer credential is not the control plane's. Its snapshot
 // and fresh check read both across Tenants, through a SELECT policy of its own on each.
 //
+// The three self-read policies serve a person reading their own contexts (ADR-ORG-005), as
+// organization_self_rt, which the tenant role may SET ROLE to and does not inherit.
+//
 // membership.tenant_admin_grant is written by a provider only, as the tenant role inside one Tenant
 // (ADR-ORG-003). Two restrictive policies keep the tenant role's writes a provider's.
 var AdditionalPolicies = map[string][]string{
 	"membership.membership_event": {"membership_event_resolution_read"},
 	"membership.tenant_admin_grant": {"tenant_admin_grant_granted_by_provider",
-		"tenant_admin_grant_revoked_by_provider"},
+		"tenant_admin_grant_revoked_by_provider", "tenant_admin_grant_self_read"},
 	"tenant.tenant_event":   {"tenant_event_resolution_read"},
-	"membership.membership": {"membership_consumer_read"},
-	"tenant.tenant":         {"tenant_consumer_read"},
+	"membership.membership": {"membership_consumer_read", "membership_self_read"},
+	"tenant.tenant":         {"tenant_consumer_read", "tenant_self_read"},
 }
 
 // TableProtection is the posture of one table.

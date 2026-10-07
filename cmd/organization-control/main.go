@@ -268,6 +268,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("context service: %w", err)
 	}
+	// A person's own contexts, on the tenant connections as organization_self_rt, which those
+	// connections SET ROLE to for the one read and do not inherit (ADR-ORG-005, TDD-001 §Roles).
+	selfPool, err := db.NewSelfPool(tenantConns)
+	if err != nil {
+		return fmt.Errorf("self pool: %w", err)
+	}
+	contextList, err := occontext.NewContexts(providerPool, selfPool)
+	if err != nil {
+		return fmt.Errorf("context list: %w", err)
+	}
 	// Granting and revoking provider authority, in the provider scope like every provider route.
 	providerGrants, err := authority.NewAdministration(providerPool)
 	if err != nil {
@@ -331,7 +341,7 @@ func run() error {
 			Memberships: memberships, Tenants: tenants, Provisioning: provisioning,
 			Organizations: organizations,
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
-			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
+			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts, ContextList: contextList,
 			Replayer: replayer, Resolver: resolver,
 			ProviderGrants:       providerGrants,
 			ProviderActivations:  providerActivations,

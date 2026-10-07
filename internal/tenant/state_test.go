@@ -40,6 +40,9 @@ func TestEveryTransitionOutsideTheMachineIsRefused(t *testing.T) {
 		"begin-offboarding|active":    tenant.StateOffboarding,
 		"begin-offboarding|suspended": tenant.StateOffboarding,
 		"retire|offboarding":          tenant.StateRetired,
+
+		"cancel-offboarding-to-active|offboarding":    tenant.StateActive,
+		"cancel-offboarding-to-suspended|offboarding": tenant.StateSuspended,
 	}
 
 	covered := map[string]bool{}
@@ -134,6 +137,10 @@ func TestTheSecurityVersionIncrementsExactlyWhereContextIsInvalidated(t *testing
 		tenant.ActionRestore:          true,  // every cached denial is now wrong
 		tenant.ActionBeginOffboarding: true,  // context is frozen
 		tenant.ActionRetire:           true,  // every context is permanently invalid
+
+		// A consumer applies a Tenant event only above the version it holds (ADR-ORG-006 §5.2).
+		tenant.ActionCancelOffboardingToActive:    true, // every cached denial is now wrong
+		tenant.ActionCancelOffboardingToSuspended: true, // the status consumers hold is now wrong
 	}
 
 	for _, action := range tenant.Actions() {

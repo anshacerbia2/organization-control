@@ -246,3 +246,90 @@ func TestTheReadSideShapesNameWhatIsNotYetReached(t *testing.T) {
 		t.Errorf("an active consumer names a retirement:\n%s", listed)
 	}
 }
+
+// TestTheContextListKeepsItsCallers is ADR-ORG-005 §5.1 at the routes: a self caller is answered
+// without a reason, a provider needs one, and a tenant caller, an eligible provider and a consumer
+// reading another person's contexts are refused before the database. The parameters are the list's.
+func TestTheContextListKeepsItsCallers(t *testing.T) {
+	t.Parallel()
+
+	principal := mustID(t)
+	path := "/v1/principals/" + principal.String() + "/contexts"
+	audit := map[string]string{ReasonHeader: "an audit"}
+	self := Caller{Subject: principal, Self: true}
+	eligible := providerCaller(t)
+	eligible.Provider, eligible.Eligible = false, true
+
+	for _, tc := range []struct {
+		name    string
+		caller  Caller
+		path    string
+		headers map[string]string
+		status  int
+	}{
+		{"a tenant caller on another person's", tenantCaller(t), path, audit, http.StatusForbidden},
+		{"an eligible provider on another person's", eligible, path, audit, http.StatusForbidden},
+		{"a consumer on another person's", consumerCallerFixture(t, "foundation-reference"), path, audit, http.StatusForbidden},
+		{"a provider without a reason", providerCaller(t), path, nil, http.StatusBadRequest},
+		{"a provider naming no UUID", providerCaller(t), "/v1/principals/nobody/contexts", audit, http.StatusBadRequest},
+		{"a self limit of zero", self, path + "?limit=0", nil, http.StatusBadRequest},
+		{"a self cursor that is not a UUID", self, path + "?after=x", nil, http.StatusBadRequest},
+		{"a filter the list does not take", self, path + "?status=active", nil, http.StatusBadRequest},
+		{"a self caller on someone else's", Caller{Subject: mustID(t), Self: true}, path, nil, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			caller := tc.caller
+			recorder := get(t, mounted(t, &caller), tc.path, tc.headers)
+			if recorder.Code != tc.status {
+				t.Fatalf("%s answered %d, want %d:\n%s", tc.path, recorder.Code, tc.status, recorder.Body.String())
+			}
+		})
+	}
+}
+
+// TestTheCancelRouteNamesAVersionAndAReason is ADR-ORG-006 §5.1 at the route: a provider command
+// with the Tenant version and a reason, refused before the database without either, and refused to
+// a tenant caller. The view carries the cancellation, present and null until it happens.
+func TestTheCancelRouteNamesAVersionAndAReason(t *testing.T) {
+	t.Parallel()
+
+	path := "/v1/offboardings/" + mustID(t).String() + "/cancel"
+	audit := map[string]string{ReasonHeader: "begun by mistake"}
+	for _, tc := range []struct {
+		name    string
+		caller  Caller
+		body    string
+		headers map[string]string
+		status  int
+	}{
+		{"a tenant caller", tenantCaller(t), `{"expected_version":3}`, audit, http.StatusForbidden},
+		{"no reason", providerCaller(t), `{"expected_version":3}`, nil, http.StatusBadRequest},
+		{"no body", providerCaller(t), ``, audit, http.StatusBadRequest},
+		{"a misspelled version", providerCaller(t), `{"expected_versoin":3}`, audit, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			caller := tc.caller
+			recorder := post(t, mounted(t, &caller), path, tc.body, tc.headers)
+			if recorder.Code != tc.status {
+				t.Fatalf("answered %d, want %d:\n%s", recorder.Code, tc.status, recorder.Body.String())
+			}
+		})
+	}
+
+	raw, err := json.Marshal(viewOffboarding(offboarding.Offboarding{Stage: offboarding.StageFreeze}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"prior_status":null`, `"cancelled_by":null`, `"cancel_reason":null`,
+		`"cancelled_at":null`, `"frozen_memberships":0`, `"restore_pending":0`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("a begun offboarding lacks %s:\n%s", want, raw)
+		}
+	}
+	raw, _ = json.Marshal(viewOffboarding(offboarding.Offboarding{Stage: offboarding.StageCancelled, PriorStatus: "suspended"}))
+	if !strings.Contains(string(raw), `"prior_status":"suspended"`) || !strings.Contains(string(raw), `"stage":"cancelled"`) {
+		t.Errorf("a cancelled offboarding reads:\n%s", raw)
+	}
+}

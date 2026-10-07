@@ -86,6 +86,13 @@ const (
 	// the rest of the work is.
 	ActionBeginOffboarding Action = "begin-offboarding"
 	ActionRetire           Action = "retire"
+
+	// ActionCancelOffboardingToActive and ActionCancelOffboardingToSuspended return a Tenant whose
+	// offboarding is cancelled to the status it held when the offboarding began (ADR-ORG-006 §5.2,
+	// TDD-organization-control-003 1.9.0). Two actions because a rule has one destination; the
+	// offboarding picks one from the status it recorded, and nothing else issues either.
+	ActionCancelOffboardingToActive    Action = "cancel-offboarding-to-active"
+	ActionCancelOffboardingToSuspended Action = "cancel-offboarding-to-suspended"
 )
 
 // rule is one row of the state machine.
@@ -143,6 +150,18 @@ var transitions = map[Action]rule{
 	ActionRetire: {
 		from: []State{StateOffboarding}, to: StateRetired,
 		securityVersion: true, stamp: "retired_at",
+	},
+	// Both increment, because a consumer applies a Tenant event only above the version it holds: one
+	// that did not would be discarded and leave the consumer at `offboarding`. Both clear
+	// offboarding_started_at, which records the current offboarding, and leave suspended_at alone: a
+	// suspension in force before the offboarding is still in force.
+	ActionCancelOffboardingToActive: {
+		from: []State{StateOffboarding}, to: StateActive,
+		securityVersion: true, clear: "offboarding_started_at",
+	},
+	ActionCancelOffboardingToSuspended: {
+		from: []State{StateOffboarding}, to: StateSuspended,
+		securityVersion: true, clear: "offboarding_started_at",
 	},
 }
 
@@ -231,6 +250,12 @@ var eventTypes = map[Action]string{
 	ActionRestore:          "com.scnehaux.organization.tenant.security.restored",
 	ActionBeginOffboarding: "com.scnehaux.organization.tenant.security.suspended",
 	ActionRetire:           "com.scnehaux.organization.tenant.lifecycle.retired",
+
+	// The types every consumer already applies, with tenant_status saying which state the Tenant is
+	// in: a cancellation restores access the way a restore does, or leaves the Tenant suspended the
+	// way a suspension does. A new type would reach no consumer until each subscribed to it.
+	ActionCancelOffboardingToActive:    "com.scnehaux.organization.tenant.security.restored",
+	ActionCancelOffboardingToSuspended: "com.scnehaux.organization.tenant.security.suspended",
 }
 
 // silentActions publish nothing, deliberately.

@@ -48,15 +48,26 @@ const (
 
 	// StageRetired is terminal.
 	StageRetired Stage = "retired"
+
+	// StageCancelled is terminal too: the offboarding was cancelled before release, and what it
+	// removed was restored (ADR-ORG-006).
+	StageCancelled Stage = "cancelled"
 )
 
 // Valid reports whether the stage is one this service persists. Mirrors `offboarding_stage_check`.
 func (s Stage) Valid() bool {
 	switch s {
-	case StageFreeze, StageObligations, StageRelease, StageRetired:
+	case StageFreeze, StageObligations, StageRelease, StageRetired, StageCancelled:
 		return true
 	}
 	return false
+}
+
+// Cancellable reports whether an offboarding at this stage may be cancelled: before release only.
+// Release begins deprovisioning, after which the data an obligation exists for may be gone, so every
+// platform ADR-ORG-006 §4 cites stops reversal at its irreversible step.
+func (s Stage) Cancellable() bool {
+	return s == StageFreeze || s == StageObligations
 }
 
 // stageOrder is the only permitted progression, as data.
@@ -98,12 +109,16 @@ const (
 	// `open` does: a failure is not a resolution, and treating it as one would release data whose
 	// obligations are known to be unmet.
 	ObligationFailed ObligationState = "failed"
+
+	// ObligationCancelled is an open obligation closed with its offboarding's cancellation
+	// (ADR-ORG-006 §5.2). Terminal: nothing resolves it afterwards, and no resolution may set it.
+	ObligationCancelled ObligationState = "cancelled"
 )
 
 // Valid reports whether the state is one this service persists.
 func (o ObligationState) Valid() bool {
 	switch o {
-	case ObligationOpen, ObligationCompleted, ObligationWaived, ObligationFailed:
+	case ObligationOpen, ObligationCompleted, ObligationWaived, ObligationFailed, ObligationCancelled:
 		return true
 	}
 	return false
@@ -163,6 +178,12 @@ var (
 	// still in flight, or reported as failed. Separate from the ambiguous case because the two
 	// need different operator responses — one is waited on or retried, the other is investigated.
 	ErrDeprovisioningIncomplete = errors.New("offboarding: the deprovisioning is not realized")
+
+	// ErrNotReversible refuses to cancel an offboarding that began before the freeze recorded what it
+	// suspended. Its cancellation would have to guess which Memberships to restore, and a guess that
+	// restores a Membership suspended for its own reasons is the mistake ADR-ORG-006 §8 Alternative C
+	// rejects.
+	ErrNotReversible = errors.New("offboarding: the offboarding recorded nothing to restore")
 )
 
 // Offboarding is one row of operation.offboarding.
@@ -190,6 +211,23 @@ type Offboarding struct {
 	// ActiveMemberships is the count of the Tenant's Memberships still `active`, read in the
 	// transaction that read the record: what the freeze has left to suspend.
 	ActiveMemberships int
+
+	// PriorStatus is the Tenant's status when the offboarding began, `active` or `suspended`, which a
+	// cancellation returns it to. Empty on an offboarding begun before it was recorded, which cannot
+	// be cancelled.
+	PriorStatus string
+
+	// CancelledBy, CancelReason and CancelledAt record the cancellation; nil until there is one.
+	CancelledBy  *id.UUID
+	CancelReason *string
+	CancelledAt  *time.Time
+
+	// FrozenMemberships is how many Memberships the freeze record names: what a cancellation restores.
+	FrozenMemberships int
+
+	// RestorePending is how many of those a cancellation has not restored yet and are still
+	// suspended; 0 unless the offboarding is cancelled.
+	RestorePending int
 }
 
 // ObligationsAt is the instant the offboarding entered obligations.
@@ -246,6 +284,7 @@ var eventTypes = map[string]string{
 	"frozen":            "com.scnehaux.organization.tenant.offboarding.frozen",
 	"obligation-raised": "com.scnehaux.organization.tenant.offboarding.obligation-raised",
 	"released":          "com.scnehaux.organization.tenant.offboarding.released",
+	"cancelled":         "com.scnehaux.organization.tenant.offboarding.cancelled",
 }
 
 // EventType returns the validated type for one offboarding event.

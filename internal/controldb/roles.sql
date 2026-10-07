@@ -71,6 +71,14 @@ BEGIN
     -- snapshot, its progress, the frontier and the fresh check. It ran as the provider role before,
     -- so a leaked consumer credential was a leaked control plane. It reads Memberships and Tenants
     -- and writes four columns of its own registry row, and nothing else.
+    -- A person reading their own contexts (ADR-ORG-005). No login of its own: the tenant connections
+    -- SET LOCAL ROLE to it for that one read, and grants.sql makes it a role organization_rt may set
+    -- and does not inherit. It reads three tables' named columns for one Principal and writes
+    -- nothing (TDD-organization-control-001 §Roles).
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_self_rt') THEN
+        CREATE ROLE organization_self_rt NOLOGIN NOSUPERUSER NOCREATEDB NOBYPASSRLS;
+    END IF;
+
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_consumer_rt') THEN
         CREATE ROLE organization_consumer_rt NOLOGIN NOSUPERUSER NOCREATEDB NOBYPASSRLS;
     END IF;
@@ -92,6 +100,7 @@ ALTER ROLE organization_provider_rt   NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROL
 ALTER ROLE organization_dispatch_rt   NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 ALTER ROLE organization_resolution_rt NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 ALTER ROLE organization_consumer_rt   NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+ALTER ROLE organization_self_rt       NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 
 -- The schemas are NOT created here. Atlas creates them, and that differs from
 -- identity-control on purpose.

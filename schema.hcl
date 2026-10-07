@@ -1076,6 +1076,58 @@ table "membership_batch" {
   }
 }
 
+// Which Memberships an offboarding's freeze suspended (TDD-organization-control-004 1.8.0,
+// ADR-ORG-006 §5.2), so that its cancellation restores those and no others: a Membership suspended
+// before the offboarding has no row and stays suspended.
+//
+// In membership rather than operation because the tenant role writes it, in the freeze batch's own
+// transaction, and that role reaches nothing in operation. RLS-protected by the schema loop, and the
+// composite foreign key keeps the copy of tenant_id honest, as on offboarding_obligation.
+table "offboarding_freeze" {
+  schema  = schema.membership
+  comment = "Memberships an offboarding's freeze suspended, and when a cancellation restored each. RLS-protected."
+
+  column "offboarding_id" {
+    null = false
+    type = uuid
+  }
+  column "tenant_id" {
+    null = false
+    type = uuid
+  }
+  column "membership_id" {
+    null = false
+    type = uuid
+  }
+  column "suspended_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "restored_at" {
+    null = true
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.offboarding_id, column.membership_id]
+  }
+
+  foreign_key "offboarding_freeze_offboarding_fk" {
+    columns     = [column.tenant_id, column.offboarding_id]
+    ref_columns = [table.offboarding.column.tenant_id, table.offboarding.column.offboarding_id]
+  }
+
+  foreign_key "offboarding_freeze_membership_fk" {
+    columns     = [column.membership_id]
+    ref_columns = [table.membership.column.membership_id]
+  }
+
+  index "offboarding_freeze_tenant_idx" {
+    columns = [column.tenant_id, column.offboarding_id]
+  }
+}
+
 // One Membership a batch names, what its preview found, and what its execution did.
 table "membership_batch_item" {
   schema  = schema.membership
@@ -1438,6 +1490,26 @@ table "offboarding" {
     null = true
     type = timestamptz
   }
+  // The Tenant's status when the offboarding began, which a cancellation returns it to
+  // (TDD-organization-control-004 1.8.0, ADR-ORG-006 §5.2). Null on an offboarding begun before the
+  // column existed, whose cancellation is refused: its freeze recorded nothing to restore.
+  column "prior_status" {
+    null = true
+    type = text
+  }
+  // Who cancelled the offboarding, why and when; all null until it is cancelled (ADR-ORG-006 §5.1).
+  column "cancelled_by" {
+    null = true
+    type = uuid
+  }
+  column "cancel_reason" {
+    null = true
+    type = text
+  }
+  column "cancelled_at" {
+    null = true
+    type = timestamptz
+  }
 
   primary_key {
     columns = [column.offboarding_id]
@@ -1449,7 +1521,16 @@ table "offboarding" {
   }
 
   check "offboarding_stage_check" {
-    expr = "stage IN ('freeze', 'obligations', 'release', 'retired')"
+    expr = "stage IN ('freeze', 'obligations', 'release', 'retired', 'cancelled')"
+  }
+
+  check "offboarding_prior_status_check" {
+    expr = "(prior_status IS NULL) OR (prior_status IN ('active', 'suspended'))"
+  }
+
+  // The stage and the three columns say the same thing: cancelled, by whom, why and when, or none.
+  check "offboarding_cancellation_check" {
+    expr = "((stage = 'cancelled') = (cancelled_at IS NOT NULL)) AND ((cancelled_at IS NULL) = (cancelled_by IS NULL)) AND ((cancelled_at IS NULL) = (cancel_reason IS NULL)) AND ((cancel_reason IS NULL) OR (btrim(cancel_reason) <> ''))"
   }
 
   // The target of the composite foreign key on offboarding_obligation, so a child row's
@@ -1534,7 +1615,7 @@ table "offboarding_obligation" {
   }
 
   check "obligation_state_check" {
-    expr = "state IN ('open', 'completed', 'waived', 'failed')"
+    expr = "state IN ('open', 'completed', 'waived', 'failed', 'cancelled')"
   }
 
   index "offboarding_obligation_tenant_idx" {
