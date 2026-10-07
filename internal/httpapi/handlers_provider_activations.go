@@ -83,6 +83,36 @@ func (h *handlers) listProviderActivations(w http.ResponseWriter, r *http.Reques
 	respond(w, http.StatusOK, map[string]any{"activations": views})
 }
 
+// heldGrantView is one of the caller's own grants. Narrower than providerGrantView on purpose: it
+// names no other Principal (granted_by, revoked_by), only what the holder needs to ask for an
+// activation.
+type heldGrantView struct {
+	GrantID   string    `json:"grant_id"`
+	Scope     string    `json:"scope"`
+	Kind      string    `json:"kind"`
+	GrantedAt time.Time `json:"granted_at"`
+}
+
+// listHeldProviderGrants is the caller's own unrevoked grants, eligible and emergency. An eligible
+// holder reaches no grant route, and POST /v1/provider-activations names a grant_id, so this is how
+// it learns what it can activate (TDD-organization-control-001 §Provider Activation).
+func (h *handlers) listHeldProviderGrants(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireGrantHolder(w, r); !ok {
+		return
+	}
+	records, err := h.services.ProviderActivations.Grants(r.Context(), reason(r))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	views := make([]heldGrantView, 0, len(records))
+	for _, record := range records {
+		views = append(views, heldGrantView{GrantID: record.ID.String(), Scope: record.Scope, Kind: record.Kind,
+			GrantedAt: record.GrantedAt})
+	}
+	respond(w, http.StatusOK, map[string]any{"grants": views})
+}
+
 type requestActivationRequest struct {
 	GrantID         string `json:"grant_id"`
 	DurationSeconds int    `json:"duration_seconds"`

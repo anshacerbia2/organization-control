@@ -614,7 +614,8 @@ func TestAnEligibleHolderReachesOnlyTheActivationRoutes(t *testing.T) {
 	cfg := AuthenticationConfig{Records: records, Consumers: true}
 	token := s.sign(t, providerClaims(holder))
 
-	for _, path := range []string{"/v1/provider-activations", "/v1/provider-activations/" + holder.String() + "/approve"} {
+	for _, path := range []string{"/v1/provider-activations", "/v1/provider-activations/grants",
+		"/v1/provider-activations/" + holder.String() + "/approve"} {
 		caller, called, recorder := authenticatedAt(t, s, cfg, token, path)
 		if !called || !caller.Eligible || caller.Provider {
 			t.Errorf("%s: an eligible holder resolved to %+v (called %t, status %d)", path, caller, called, recorder.Code)

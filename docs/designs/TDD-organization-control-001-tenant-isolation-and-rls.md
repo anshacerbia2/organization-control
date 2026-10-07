@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.15.0
+  version: 1.16.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-06
+  last_reviewed: 2026-10-07
   parent_sad: SAD-004
 ---
 
@@ -783,13 +783,24 @@ privileged-access record names it and its reason, but the API admits it to
 
 ```text
 GET   /v1/provider-activations                    pending, in force, and the last 100, newest first
+GET   /v1/provider-activations/grants             the caller's own unrevoked grants, eligible and emergency
 POST  /v1/provider-activations                    {"grant_id": ..., "duration_seconds": ...}
 POST  /v1/provider-activations/{id}/approve
 POST  /v1/provider-activations/{id}/deny
 POST  /v1/provider-activations/{id}/end
 ```
 
-Each command takes `X-Administrative-Reason`.
+Each route takes `X-Administrative-Reason`.
+
+**The holder reads its own grants.** A request names a `grant_id`, and `GET /v1/provider-grants`
+is a provider's, so without this an eligible holder could not learn what it can activate. Entra
+does the same: a user requests activation by "opening **My roles**" and selects a list "to see a
+list of your eligible Microsoft Entra roles" [R6]. The route reads the unrevoked grants whose
+`principal_id` is the caller's own, taken from the resolved scope and never from the request, and
+answers `200 {"grants": [{"grant_id", "scope", "kind", "granted_at"}]}`, newest first. It names no
+other Principal: `granted_by` and the revocation columns are left out. The read runs in the provider
+scope, so the privileged-access record names the caller and its reason, as on every activation
+route.
 
 **Built here.** Activations are built for both registered scopes, and the projection of
 `provider:identity-control` is §Provider Authority Projection. The 90-day validation of an
@@ -802,6 +813,7 @@ emergency grant is §Emergency Grant Validation.
 | R3 | Microsoft, *Approve requests for Azure resource roles in PIM*, <https://learn.microsoft.com/en-us/entra/id-governance/privileged-identity-management/pim-resource-roles-approval-workflow>, accessed 2026-10-02 |
 | R4 | Google Cloud, *Privileged Access Manager overview*, <https://docs.cloud.google.com/iam/docs/pam-overview>, accessed 2026-10-02 |
 | R5 | Microsoft, *Manage emergency access admin accounts*, <https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/security-emergency-access>, accessed 2026-10-02 |
+| R6 | Microsoft, *Activate Microsoft Entra roles in PIM*, <https://learn.microsoft.com/en-us/entra/id-governance/privileged-identity-management/pim-how-to-activate-role>, accessed 2026-10-07: "When you need to assume a Microsoft Entra role, you can request activation by opening **My roles** in Privileged Identity Management." and "Select **Microsoft Entra roles** to see a list of your eligible Microsoft Entra roles." |
 
 **The tradeoff.** A provider waits for an approver before acting, and at night that may mean an
 emergency grant, which is reported. The emergency grants are standing authority: few, watched,
@@ -1177,6 +1189,9 @@ administrative connection is explicitly not accepted as evidence.
 - An emergency grant is in force without an activation, every request it authorizes logs the
   report, and fewer than two in production are reported.
 - A revoked grant ends its activation's authority at the next request.
+- `GET /v1/provider-activations/grants` answers an eligible holder `200` with its own unrevoked
+  grants and neither another holder's nor a revoked one; a tenant caller is refused `403`, and a
+  request without `X-Administrative-Reason` `400`.
 
 ### Emergency Grant Validation
 

@@ -232,3 +232,55 @@ func TestWithApprovalOptionalAHolderActivatesWithAReason(t *testing.T) {
 		t.Error("a self-activation is not in force")
 	}
 }
+
+// A holder reads its own unrevoked grants, of either kind, and nobody else's: how an eligible holder
+// learns the grant_id it can activate (TDD-organization-control-001 §Provider Activation).
+func TestAHolderReadsOnlyItsOwnUnrevokedGrants(t *testing.T) {
+	service, admin, _, asFirst, first := activations(t, true)
+	second, third := newID(t), newID(t)
+	kept, err := admin.Grant(asFirst, second, Scope, KindEligible, "on-call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := admin.Grant(asFirst, second, ScopeIdentityControl, KindEligible, "identity on-call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Revoke(asFirst, revoked.ID, "no longer on the identity rota"); err != nil {
+		t.Fatal(err)
+	}
+	others, err := admin.Grant(asFirst, third, Scope, KindEligible, "another on-call")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	held, err := service.Grants(actingAs(t, context.Background(), second), "find what I can activate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(held) != 1 || held[0].ID != kept.ID || held[0].Principal != second || held[0].Kind != KindEligible ||
+		held[0].Scope != Scope || held[0].RevokedAt != nil {
+		t.Fatalf("the second holder read %+v; want only its unrevoked grant %s", held, kept.ID)
+	}
+	for _, record := range held {
+		if record.ID == others.ID || record.ID == revoked.ID {
+			t.Errorf("the second holder read grant %s, which is not its own unrevoked grant", record.ID)
+		}
+	}
+
+	// The bootstrap provider holds the emergency grant, and reads it as its own.
+	mine, err := service.Grants(asFirst, "find what I hold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mine) != 1 || mine[0].Principal != first || mine[0].Kind != KindEmergency {
+		t.Errorf("the bootstrap provider read %+v; want its one emergency grant", mine)
+	}
+
+	if _, err := service.Grants(context.Background(), "no scope"); !errors.Is(err, db.ErrNoScope) {
+		t.Errorf("an unscoped read answered %v, want db.ErrNoScope", err)
+	}
+	if _, err := service.Grants(actingAs(t, context.Background(), second), ""); err == nil {
+		t.Error("a read without a reason was accepted")
+	}
+}

@@ -168,6 +168,45 @@ const endActivationStatement = `UPDATE organization.provider_activation
 SET ended_by = $2, end_reason = $3, ended_at = now()
 WHERE activation_id = $1 AND decision = 'approved' AND ended_at IS NULL AND now() < ends_at`
 
+// heldGrantsStatement reads one Principal's unrevoked grants, of either kind and any scope, newest
+// first. The Principal is the caller's own, bound from the resolved scope, never from the request.
+const heldGrantsStatement = recordColumns + `
+WHERE principal_id = $1 AND revoked_at IS NULL
+ORDER BY granted_at DESC`
+
+// Grants reads the caller's own unrevoked grants: what it can activate, and any emergency grant it
+// holds. An eligible holder reaches no other route that names a grant, and a request for an
+// activation names one, so this is how it learns what it can ask for, as Entra lists a user's
+// eligible assignments under "My roles" before activation. Nobody else's grant is read.
+func (a *Activations) Grants(ctx context.Context, reason string) ([]Record, error) {
+	scope, ok := db.ScopeFrom(ctx)
+	if !ok {
+		return nil, db.ErrNoScope
+	}
+	holder := scope.Actor()
+
+	var records []Record
+	err := db.WithProviderScope(ctx, a.pool, reason, func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, heldGrantsStatement, holder.String())
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			record, err := scanRecord(rows)
+			if err != nil {
+				return err
+			}
+			records = append(records, record)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("authority: list the caller's provider grants: %w", err)
+	}
+	return records, nil
+}
+
 // List reads the pending requests, the activations in force, and the last hundred, newest first.
 func (a *Activations) List(ctx context.Context, reason string) ([]Activation, error) {
 	var activations []Activation
