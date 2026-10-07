@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.6.0
+  version: 1.7.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -363,7 +363,24 @@ for `GET /v1/registrations` (`TDD-identity-control-003` §API / Interface):
 | Response | `{"organizations": [...], "next": "<organization_id>" \| null}`, and `tenants` and `workspaces` likewise. `next` is the `after` of the following page, and null on the last |
 
 Each item has the shape the single read returns: `GET /v1/organizations/{organization_id}`,
-`GET /v1/tenants/{tenant_id}` and `GET /v1/workspaces/{workspace_id}`.
+`GET /v1/tenants/{tenant_id}` and `GET /v1/workspaces/{workspace_id}` — with one exception, below.
+
+From 1.7.0 the single Tenant read carries two fields the list items do not:
+
+| Field | Value |
+| :-- | :-- |
+| `offboarding_id` | The Tenant's offboarding (`TDD-organization-control-004`), the most recently begun if there were ever more than one; `null` when none was begun |
+| `active_memberships` | The count of the Tenant's Memberships whose status is `active` |
+
+Both are computed by this service in the transaction that reads the Tenant, so they describe the
+same instant as the record. `active_memberships` is the number an operator confirms before
+beginning an offboarding — the Memberships the freeze will suspend — and
+`TDD-organization-experience-001` §Irreversible Operations requires that count to come from the
+API rather than from the client: a client counting a paged Membership list would count what it had
+fetched, and it cannot fetch another Tenant's at all. `offboarding_id` is how a client gets from a
+Tenant in `offboarding` or `retired` to the process that put it there, without listing every
+offboarding. The list leaves both out because each is a further read per row, and the list is the
+screen that does not need them.
 
 | List | Filters |
 | :-- | :-- |
@@ -703,3 +720,4 @@ resolution, and Tenant activation refused.
 | Depends on | `TDD-foundation-platform-001` — outbox, envelope, idempotency |
 | Consumed by | `TDD-organization-control-002` — Membership references `tenant.tenant` and `workspace.workspace` |
 | Consumed by | `TDD-organization-control-004` — offboarding drives the Tenant terminal transitions |
+| Consumed by | `TDD-organization-experience-001` §Irreversible Operations — the affected-subject count, computed by the API |

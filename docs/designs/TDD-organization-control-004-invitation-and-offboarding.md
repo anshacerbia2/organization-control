@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.6.0
+  version: 1.7.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -171,6 +171,7 @@ CREATE TABLE operation.offboarding (
     correlation_id  UUID        NOT NULL,
     started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     frozen_at       TIMESTAMPTZ,
+    released_at     TIMESTAMPTZ,   -- from 1.7.0: the instant the offboarding entered release
     retired_at      TIMESTAMPTZ,
     CONSTRAINT offboarding_stage_check
         CHECK (stage IN ('freeze', 'obligations', 'release', 'retired')),
@@ -189,6 +190,8 @@ CREATE TABLE operation.offboarding_obligation (
     due_at          TIMESTAMPTZ,
     completed_at    TIMESTAMPTZ,
     detail          TEXT,
+    resolved_by     UUID,          -- from 1.7.0: who reported the latest outcome
+    resolved_at     TIMESTAMPTZ,   -- from 1.7.0: when, for completed, waived and failed alike
     CONSTRAINT obligation_state_check
         CHECK (state IN ('open', 'completed', 'waived', 'failed')),
     CONSTRAINT offboarding_obligation_parent_fk
@@ -196,6 +199,23 @@ CREATE TABLE operation.offboarding_obligation (
         REFERENCES operation.offboarding (tenant_id, offboarding_id)
 );
 ```
+
+Each stage has an entry instant, and from 1.7.0 every one is readable. `freeze` is entered at
+`started_at`. `obligations` is entered at `frozen_at`: completing the freeze and entering
+obligations are one transaction stamped with one instant, so the view serves `obligations_at` from
+`frozen_at` rather than storing the same fact twice (EAD-003). `release` is entered at
+`released_at`, stamped in the transaction that records the deprovisioning command, and `retired`
+at `retired_at`. Rows that passed a stage before 1.7.0 keep `released_at` null: the instant was
+never recorded, and inventing one from the deprovisioning request would state as a stage fact what
+is only a neighbouring row's timestamp.
+
+`resolved_by` and `resolved_at` record who reported an obligation's latest outcome, and when.
+`completed_at` is set only for the two resolving states, so without them a `failed` row carried no
+time at all and no row carried an actor, and the waiver an audit must be able to attribute was
+attributable only through the privileged-access record. The actor is the authenticated principal of
+the resolving request. A failed obligation later completed or waived is overwritten with the later
+outcome: the earlier one stays in the privileged-access record, and the row states what holds
+now. Rows resolved before 1.7.0 keep both null.
 
 `waived` is a separate state from `completed` on purpose. An obligation that was
 consciously waived by an accountable person and an obligation that was actually
@@ -290,6 +310,90 @@ Each item has the shape `GET /v1/invitations/{invitation_id}` returns, which car
 target identifier nor its hash (§Security Notes). `state` is the stored state: an invitation past
 `expires_at` that the sweep has not yet reached is still `pending`, with its `expires_at` in the
 past, and acceptance refuses it all the same (§Expiry Sweep).
+
+**The offboarding routes as served**, from 1.7.0, all provider-scoped: provider authority and
+`X-Administrative-Reason`, the access recorded before the transaction runs:
+
+```text
+GET    /v1/offboardings                      ?after=&limit=&stage=&tenant_id=
+POST   /v1/offboardings
+GET    /v1/offboardings/{offboarding_id}
+POST   /v1/offboardings/{offboarding_id}/freeze
+POST   /v1/offboardings/{offboarding_id}/complete-freeze
+POST   /v1/offboardings/{offboarding_id}/release
+POST   /v1/offboardings/{offboarding_id}/retire
+POST   /v1/offboardings/{offboarding_id}/legal-hold
+POST   /v1/offboardings/{offboarding_id}/obligations
+GET    /v1/offboardings/{offboarding_id}/obligations
+POST   /v1/offboardings/{offboarding_id}/deprovisioning
+POST   /v1/obligations/{obligation_id}/resolve
+```
+
+The list near the top of this section is the shape the flow was designed in; the block above is
+what a client calls. Beginning names its Tenant in the body, the four stage advances are
+`complete-freeze`, `release` and `retire` rather than one `:advance`, and an obligation is
+resolved by its own identifier, with the resolving domain and state in the body, rather than by a
+`:complete` and a `:waive` under its offboarding.
+
+The offboarding list follows STD-GLB-001 1.3.0 §Pagination in the form of every other list here:
+
+| Part | Form |
+| :-- | :-- |
+| Cursor | `after`: the `offboarding_id` of the last item of the previous page. Absent, the list starts at the first. Not a UUID: `400` |
+| Page size | `limit`: 50 when absent; a whole number from 1 to 100. Anything else, `0` included: `400`, never coerced |
+| Order | `offboarding_id`, a UUIDv7, so the order offboardings began in: the keyset `offboarding_id > $after ORDER BY offboarding_id LIMIT limit + 1` |
+| Filters | `stage` = `freeze` \| `obligations` \| `release` \| `retired`; `tenant_id` = a UUID. Each optional, each holding for every page; any other value: `400` |
+| Response | `{"offboardings": [...], "next": "<offboarding_id>" \| null}`, `next` null on the last page |
+
+Each page writes the privileged-access record with the caller's reason before it reads. A
+parameter the list does not take, or one given twice, is `400`. `tenant_id` is how a client gets
+from a Tenant to its offboarding; `GET /v1/tenants/{tenant_id}` also carries `offboarding_id`
+(`TDD-organization-control-003` §Lists).
+
+Each item has the shape `GET /v1/offboardings/{offboarding_id}` returns, and every route that
+answers with an offboarding answers with that shape:
+
+```json
+{
+  "offboarding_id": "<uuid>", "tenant_id": "<uuid>", "stage": "obligations",
+  "initiated_by": "<uuid>", "reason": "...", "legal_hold": false, "correlation_id": "<uuid>",
+  "started_at": "<ts>", "frozen_at": "<ts>",
+  "obligations_at": "<ts>" | null, "released_at": "<ts>" | null,
+  "deprovisioning": {"state": "requested|realized|failed|unresolved", "detail": "..." | null,
+                     "requested_at": "<ts>", "resolved_at": "<ts>" | null} | null,
+  "active_memberships": 0
+}
+```
+
+`frozen_at` and `retired_at` are omitted until reached, as before 1.7.0; the fields 1.7.0 adds are
+present and null until reached. `obligations_at` and `released_at` are stage-entry instants
+(§Data Model), so a view can show elapsed time in the current stage without inferring it.
+`deprovisioning` is the most recent deprovisioning command recorded for this offboarding — the one
+§"Where the deprovisioning outcome is recorded" gates retirement on — and null before release.
+`active_memberships` is the count of the Tenant's Memberships still `active`, computed by this
+service in the same transaction: what the freeze has left to do, and `0` once it is done.
+
+`GET /v1/offboardings/{offboarding_id}/obligations` answers with the obligation board:
+
+```json
+{
+  "outstanding": ["billing/final-invoice (failed)", "product/data-export (open)"],
+  "obligations": [
+    {"obligation_id": "<uuid>", "offboarding_id": "<uuid>", "tenant_id": "<uuid>",
+     "domain": "product", "type": "data-export", "state": "open",
+     "due_at": "<ts>", "completed_at": "<ts>", "detail": "...",
+     "resolved_by": "<uuid>", "resolved_at": "<ts>"}
+  ]
+}
+```
+
+`outstanding` is unchanged from before 1.7.0: the names the release refusal uses, sorted.
+`obligations` is every row, whatever its state, in the shape raising and resolving answer with.
+`due_at`, `completed_at`, `detail`, `resolved_by` and `resolved_at` are omitted when unset, so
+`resolved_by` and `resolved_at` appear on completed, waived and failed rows. The order is the
+board's (`TDD-organization-experience-003` §The Obligation Board): `open` rows past `due_at` first,
+the most overdue first; then the other `open` rows by `due_at`, undated last; then every other row
+in the order it was raised. An unknown offboarding is `404`.
 
 ### Published Events
 
@@ -550,6 +654,11 @@ reimplementing the comparison.
 - An ambiguous deprovisioning outcome holds the release stage and does not advance it.
 - A restart mid-offboarding resumes from the recorded stage.
 - A waived obligation is distinguishable from a completed one in the record.
+- Each stage entry is stamped once, and a failed advance stamps nothing.
+- The obligation board names who resolved each settled row and when, and sorts overdue
+  open rows first.
+- The offboarding list pages by key, filters by stage and Tenant, and records each page's
+  access with the caller's reason.
 
 ### Negative
 
@@ -614,7 +723,8 @@ deprovisioning outcome, invitation token enumeration, and legal hold release.
 | Conforms to | SAD-004 §5.5 — invitation possession never proves identity |
 | Conforms to | SAD-004 §5.6 — offboarding is resumable and infers completion from no single response |
 | Conforms to | SAD-004 §8.1 — anonymous lookup with enumeration resistance |
-| Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/invitations`: `after`, `limit` 1 to 100, key order, `next` |
+| Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/invitations` and `GET /v1/offboardings`: `after`, `limit` 1 to 100, key order, `next` |
+| Consumed by | `TDD-organization-experience-003` — the offboarding list, stage timeline and obligation board |
 | Enterprise constraint | EAD-003 — deletion accounts for projections, derived products, backups, evidence, and legal hold |
 | Depends on | `TDD-organization-control-002` — Membership creation and suspension |
 | Depends on | `TDD-organization-control-003` — Tenant state transitions this flow drives |
