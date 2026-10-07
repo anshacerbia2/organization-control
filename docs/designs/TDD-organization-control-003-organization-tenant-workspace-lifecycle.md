@@ -340,7 +340,7 @@ POST   /v1/workspaces/{workspace_id}/restore
 POST   /v1/workspaces/{workspace_id}/retire
 ```
 
-Until 1.6.0 this list wrote the transitions as `:suspend`, `:activate` and so on, and nested
+Until 1.6.0 this list wrote the transitions as `:suspend`, `:activate`, `:restore`, `:retire` and `:archive`, and nested
 Workspaces under `/v1/tenants/{tenant_id}/`. Neither was ever served. A transition is a path
 segment (`/suspend`), because every route on this surface is registered as a Go 1.22
 `net/http` pattern, where a wildcard fills a whole segment and `{id}:suspend` is not a
