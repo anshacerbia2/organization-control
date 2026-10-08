@@ -21,6 +21,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Daily: the wiring, and the restore drill, which STD-GLB-007 asks for at least every 90 days.
   schedule:
     - cron: "17 3 * * *"
   # Run by hand against branches, to prove the wiring against a change before it merges.
@@ -168,6 +169,36 @@ jobs:
           export KC_ADMIN_URL=http://localhost:8080
           pwsh -NoProfile -File scripts/dev-wiring-proof.ps1 -IdentityRepo .identity -KernelDeployDir .kernel/deploy/dev \
             -State "$RUNNER_TEMP/wiring/state.json"
+
+      # ROADMAP §Gates, production gate: restore evidence for the Organization Database, including
+      # the outbox, its delivery state, the receipts and the consumer registry (STD-GLB-002 §Restore
+      # Evidence, SAD-004 §6.6, TDD-organization-control-001 §Restore Evidence). An offboarding is
+      # begun so its state is in the backup; the filled stack is backed up with deploy/dev/backup.sh,
+      # its volume deleted, and restored with deploy/dev/restore.sh; schema, migration, every table,
+      # sequence and role are compared, the service restarted and read, and the recovery timed against
+      # the 15-minute RTO. Last, because it deletes the database.
+      - name: the Organization Database restores from its backup
+        run: |
+          # The caller's two secrets alone, as the wiring steps take them.
+          export IDENTITY_CALLER_PASSWORD="$(grep '^IDENTITY_CALLER_PASSWORD=' .identity/deploy/dev/.env | cut -d= -f2-)"
+          export IDENTITY_CALLER_KEY_FILE="$(grep '^IDENTITY_CALLER_KEY_FILE=' .identity/deploy/dev/.env | cut -d= -f2-)"
+          export KC_BASE_URL=https://localhost
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          bash scripts/dev-restore-drill.sh "$RUNNER_TEMP/restore-drill" .identity "$RUNNER_TEMP/wiring/state.json"
+
+      # The evidence, never the backup: the dump and the roles file hold role password hashes.
+      - name: keep the restore evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: restore-evidence
+          path: |
+            ${{ runner.temp }}/restore-drill/*.json
+            ${{ runner.temp }}/restore-drill/*.txt
+            ${{ runner.temp }}/restore-drill/*.sql
+            !${{ runner.temp }}/restore-drill/backup/**
+          if-no-files-found: ignore
+          retention-days: 90
 
       - name: stack logs
         if: failure()

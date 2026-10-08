@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.19.0
+  version: 1.20.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-07
+  last_reviewed: 2026-10-08
   parent_sad: SAD-004
 ---
 
@@ -1328,6 +1328,16 @@ administrative connection is explicitly not accepted as evidence.
   every attribution rule and every refusal, and a mutation to either walk rule turns them
   red.
 
+### Restore
+
+- `deploy-dev`'s restore drill (§Restore Evidence) backs the wired stack up, deletes its volume,
+  restores it, and compares every table, sequence, role and the schema with owners, grants and RLS
+  policies against the source. The restarted service must answer three provider reads identically.
+- A second `restore.sh` over the restored database is refused.
+- The drill's checks are load-bearing. One row of `platform.delivery_receipt` removed inside a
+  transaction that rolls back must change the fingerprint, and the same dump restored into a
+  cluster without its roles must stop on a role that does not exist.
+
 ### Negative
 
 - A request carrying a Tenant identifier that differs from the resolved administrative
@@ -1403,6 +1413,69 @@ finding rather than a validation error.
 Runbooks required before production: unset-binding investigation, `WITH CHECK`
 rejection triage, provider-access review, and suspected cross-tenant exposure.
 Written: `docs/runbooks/provider-access-review.md`. The other three are not written yet.
+
+### Restore Evidence
+
+1.20.0. The production gate asks for restore evidence for the Organization Database, including the
+outbox and the projection cursor state (`ROADMAP.md` §Gates, SAD-004 §6.6, STD-GLB-002 §Restore
+Evidence). It belongs here because a restore lives or dies on the roles of §Roles: every table is
+owned by `organization_migrator` and granted to the `_rt` roles, the five login roles inherit them,
+and `organization_self_rt` is reached by `SET LOCAL ROLE`. A database dump carries none of those
+roles, so a restore that skips them fails on its first owner. One that recreates them by hand risks
+the posture §Verifying the Posture at Runtime refuses to start on.
+
+`deploy-dev` produces the evidence on every change and daily, as its last step,
+`scripts/dev-restore-drill.sh`, after the wiring proof has filled the three stacks:
+
+1. `scripts/dev-restore-read.ps1 -Seed` begins an offboarding on a new Tenant, because the wiring
+   makes none. It reads `GET /v1/provider-grants`, `GET /v1/organizations?limit=100` and
+   `GET /v1/offboardings?limit=100` as the bootstrap operator. The service is then stopped, and its
+   dispatcher with it.
+2. `scripts/restore-fingerprint.sql` records the newest Atlas revision, every table's row count and
+   the md5 of its rows' sorted md5s, every sequence, and every role with its attributes and
+   memberships. `pg_dump --schema-only --create`, with a fixed `--restrict-key`, records the schema
+   with owners, grants, default privileges and RLS policies.
+3. `deploy/dev/backup.sh`, the operator's cron line, writes `pg_dumpall --globals-only` and
+   `pg_dump --format=custom`.
+4. `docker compose down --volumes` deletes the volume, and the drill checks that it is gone.
+5. `deploy/dev/restore.sh` restores into the new, empty volume: the roles, then
+   `pg_restore --create --exit-on-error`. The drill fingerprints again before the migrate job runs,
+   and a second `restore.sh` must refuse the now-occupied cluster.
+6. `docker compose up -d --build` runs the migrate job, whose `control database ready` asserts the
+   privilege shape on the restored database. Then `/readyz`, and the three reads again.
+7. `restore-evidence.json` and the fingerprints are kept as the job's `restore-evidence` artifact
+   for 90 days. The backup files are never uploaded: they hold role password hashes.
+
+It fails unless schema, migration version, every table, every sequence and the roles are equal, and
+the three reads are identical. These tables must hold rows in the source: `platform.outbox`,
+`platform.outbox_delivery`, `platform.delivery_receipt`, `platform.subscription`,
+`projection.consumer` (with its snapshot, reported and reconciled marks),
+`membership.membership`, `membership.membership_event`, `tenant.tenant`,
+`organization.provider_grant` and `operation.offboarding`. It fails above the 15-minute RTO of
+`PAD-PLT-002 §6.2`, timed from `restore.sh` on the empty volume to the verified read.
+
+**Why the roles come from the backup.** Until 1.20.0 the README ran the migrate job first, for the
+roles, and `pg_restore --clean` over the schema it had built. That suits only a dump of the same
+release: a dump of an older one would restore older migration history over tables the newer migrate
+job had made, and the next migration would fail. Restored whole with `--create` after the roles,
+the database is as it was, and the migrate job upgrades it as it upgrades any database. It still
+runs after the restore, so `roles.sql`, `rls.sql`, `grants.sql` and the login roles' passwords from
+`.env` are asserted again.
+
+**What it does not prove.**
+
+- **RPO.** A daily dump loses up to 24 hours, against the 1 minute of `PAD-PLT-002 §6.2`, which needs
+  continuous WAL archiving with point-in-time recovery on the production platform. A recorded gap,
+  not a claim.
+- **A restore to an older point.** The drill restores to the instant of its own backup. A real
+  restore loses the events after it, while consumers keep them: a consumer holds a higher version
+  than authority, and authority's next version of that Membership can equal one the consumer
+  already holds, which the consumer discards. SAD-004 §6.6 requires a reconciliation and
+  containment plan for this, and none is built.
+  `docs/runbooks/organization-database-restore.md` says what an operator does meanwhile.
+- **Production size.** The duration is measured on CI data.
+- **Erasure.** This service has no right-to-erasure path, so it keeps no tombstones for a restore
+  to re-apply (`STD-GLB-007` §GDPR Right-to-Erasure). When one is built, the drill proves it.
 
 ## Traceability
 

@@ -1,8 +1,8 @@
 # Organization Control runbooks
 
-Version 1.0.0. Owner: Core Platform Team. Last reviewed 2026-10-07.
+Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-08.
 
-These are the five runbooks the production gate requires (ROADMAP §Gates). Each one answers an
+These are the runbooks the production gate requires (ROADMAP §Gates). Each one answers an
 alert or a signal this service already emits, with the reads and the commands this service already
 serves.
 
@@ -13,6 +13,7 @@ serves.
 | [Provider-access review](provider-access-review.md) | the scheduled review of provider authority, and each use of an emergency grant |
 | [Stuck offboarding](stuck-offboarding.md) | an offboarding that does not reach `retired` or `cancelled` |
 | [Dead-letter resolution](dead-letter-resolution.md) | `SecurityDebt`, `UnresolvedDeadLetterStale`, `organization-migrate -stage=maintenance` exiting 3 |
+| [Organization Database restore](organization-database-restore.md) | a lost or damaged Organization Database, and a restore to an older point |
 
 ## Why these exist
 
