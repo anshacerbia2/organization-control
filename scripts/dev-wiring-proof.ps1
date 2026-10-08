@@ -347,7 +347,7 @@ try {
     Write-Host "5. the Membership survives a relink of its Principal"
     Expect "the console administrator deletes the member's Keycloak user" (Kc "DELETE" "/users/$memberUser").code 204
     Expect "identity-control's Principal sweep runs" (Call "POST" "$identityApi/v1/principals:reconcile" $null (Provider-Token) $null).code 200
-    $relinked = Call "POST" "$identityApi/v1/principals/$($memberPrincipal):relink" $null (Provider-Token) $null
+    $relinked = Call "POST" "$identityApi/v1/principals/$($memberPrincipal):relink" $null (Provider-Token) "proof-relink"
     Expect "an operator relinks the Principal" $relinked.code 200
     Expect "active again" (Get-Prop $relinked.json "state") "active"
     $carriers = @(Users-Carrying $memberPrincipal)
