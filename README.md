@@ -284,9 +284,13 @@ Rerun for the same Principal, it reports the grant and writes nothing.
 
 ```text
 GET   /v1/provider-grants                       every grant, active and revoked
-POST  /v1/provider-grants                       {"principal_id": "..."}
+POST  /v1/provider-grants                       {"principal_id": "...", "scope": "provider:organization-control",
+                                                 "kind": "eligible"}
 POST  /v1/provider-grants/{grant_id}/revoke
 ```
+
+`scope` is required: `provider:organization-control` or `provider:identity-control`. `kind` is
+`eligible`, the default, or `emergency` (TDD-organization-control-001 §Provider Activation).
 
 A revoked grant confers nothing from the next request on, and stays listed with who revoked it and
 why. The last active grant cannot be revoked: grant another provider first.
