@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.13.0
+  version: 1.14.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -1162,6 +1162,16 @@ the sum, because that is the number incident response works from.
 - The enforcement state follows the receipts and dead letters: `accepted` before publication,
   `propagating` on transport acceptance, `enforced` on every subscribed consumer's
   `consumer_applied`, `over_budget` past the budget or on a dead letter.
+- A malformed grant, a transition without a version and a revocation without a reason are refused
+  before a transaction opens (1.14.0, `TestAMalformedCommandOpensNoTransaction`).
+- §Enforcement Budget is measured across real processes (1.14.0). `deploy-dev` stands the kernel,
+  identity-control and this service up, and `scripts/dev-wiring-proof.ps1` step 6 has a Tenant
+  administrator revoke 20 Memberships, each a priority event. It times each from `accepted_at` to the
+  response (an upper bound on accept to outbox commit, held to 100 ms at p95: the response adds its
+  own encoding and a loopback round trip), to `published_at`, and to identity-control's
+  `consumer_applied` receipt (the propagation subtotal, held to 10 s at the maximum). The figures are
+  printed on one line and written to the job summary. No column records a commit's own instant, so
+  accept to commit is bounded rather than measured exactly.
 
 ### Projection
 
@@ -1262,6 +1272,9 @@ interval is declared per consumer.
 Runbooks required before production: revocation not enforced within budget, projection
 drift repair, consumer read model rebuild, reconciliation reporting an `extra`
 finding, and consumer misuse of the fresh-check path.
+Written (1.14.0): `docs/runbooks/revocation-not-enforced.md`, and
+`docs/runbooks/projection-drift-repair.md`, which also covers a consumer read model rebuild and an
+`extra` finding. Consumer misuse of the fresh check is not written yet.
 
 ## Traceability
 

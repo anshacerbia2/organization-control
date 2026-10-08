@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.9.0
+  version: 1.10.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -847,6 +847,9 @@ and the uniform response is what makes it expensive rather than impossible.
 
 Runbooks required before production: stuck offboarding obligation, ambiguous
 deprovisioning outcome, invitation token enumeration, and legal hold release.
+Written (1.10.0): `docs/runbooks/stuck-offboarding.md`, which covers a stuck obligation, the
+ambiguous deprovisioning outcome and a legal-hold release. Invitation token enumeration is not
+written yet.
 
 ## Traceability
 

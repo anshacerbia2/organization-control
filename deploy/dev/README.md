@@ -122,7 +122,10 @@ export IDENTITY_CALLER_KEY_FILE=...            # identity-control-caller.pem, fr
 export IDENTITY_OPERATOR_TOTP_FILE=...         # the operator's TOTP file, if dev-token.ps1 keeps one
 pwsh ./scripts/dev-wire.ps1 -IdentityRepo /srv/identity-control -KernelDeployDir /srv/identity-kernel/deploy/dev \
     -Operator "<you>" -State ~/scnehaux-wiring/state.json
-pwsh ./scripts/dev-wiring-proof.ps1 -IdentityRepo /srv/identity-control -State ~/scnehaux-wiring/state.json
+export KC_BOOTSTRAP_ADMIN_PASSWORD=...         # the kernel's console administrator, for step 7's relink
+export KC_ADMIN_URL=...                        # where the kernel's /admin is reachable
+pwsh ./scripts/dev-wiring-proof.ps1 -IdentityRepo /srv/identity-control -KernelDeployDir /srv/identity-kernel/deploy/dev \
+    -State ~/scnehaux-wiring/state.json
 ```
 
 Export those three alone. Sourcing identity-control's `.env` would also export its `POSTGRES_PASSWORD`,
@@ -244,6 +247,16 @@ IDENTITY_ORGANIZATION_BASE_URL=http://organization-control:8080
 - `provider-bootstrap` prints a `memberships` count, not `tenant context not bootstrapped`.
 - Granting a Membership here makes identity-control log `tenant converged` for its Tenant. The
   kernel then holds an Organization named by the `tenant_id`, with the Principal as a member.
+- A Membership a Tenant administrator grants here, with a token signed in for the Tenant through a
+  `tenant-scoped` privileged client, appears in identity-control's
+  `GET /v1/projections/tenant-context/report` and in the kernel's Organization for the Tenant.
+- After the member's Keycloak user is deleted and `:relink`ed, the Membership is unchanged here and in
+  that report, and the new user joins the Organization at the Tenant's next convergence.
+- 20 revocations are timed from acceptance to the response, to publication and to identity-control's
+  applied receipt, against 100 ms (p95) and 10 s (maximum).
+
+The proof deletes a Keycloak user and registers a client and a Tenant per run, so run it only
+against a kernel and a database this server or a CI job owns.
 
 ## Keys
 

@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 2.3.0
+  version: 2.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -734,6 +734,8 @@ handler-level tests cover only refusals that must land before the database is re
 | Review record of these decisions | `RESPONSE-7` through `RESPONSE-26` in the architecture-description workspace |
 
 ## Operational Notes
+
+The step-by-step procedure is `docs/runbooks/dead-letter-resolution.md` (2.4.0).
 
 While an authority-bearing dead letter is unresolved, every projection-backed check refuses.
 That is the designed behaviour and not an incident in itself: the alternative is serving

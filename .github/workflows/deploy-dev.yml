@@ -8,8 +8,10 @@ name: deploy-dev
 #
 # STD-GLB-009 1.3.0: a procedure step is a script CI runs. Each repository's own deploy-dev proves
 # its stack alone; only this job proves that the three meet: Organization's grant reaches
-# identity-control's projection, the ceremony's grant is retired by it, and an Organization outage
-# leaves the emergency grant honored (TDD-identity-control-006, ADR-ORG-002).
+# identity-control's projection, the ceremony's grant is retired by it, a Membership a Tenant
+# administrator grants here reaches identity-control and the kernel and survives a relink of its
+# Principal, priority events are timed against the enforcement budget, and an Organization outage
+# leaves the emergency grant honored (TDD-identity-control-006, ADR-ORG-002, ADR-ORG-003).
 #
 # The kernel and identity-control steps call their own repositories' scripts; the glue around them is
 # identity-control's deploy-dev's, kept the same. The daily run catches a change on either main that
@@ -159,7 +161,13 @@ jobs:
           export IDENTITY_CALLER_KEY_FILE="$(grep '^IDENTITY_CALLER_KEY_FILE=' .identity/deploy/dev/.env | cut -d= -f2-)"
           export KC_BASE_URL=https://localhost
           export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
-          pwsh -NoProfile -File scripts/dev-wiring-proof.ps1 -IdentityRepo .identity -State "$RUNNER_TEMP/wiring/state.json"
+          # Steps 4 and 5 read the kernel's Organizations and delete a user as its console
+          # administrator, on the loopback port compose.ci.yaml publishes, as identity-control's
+          # Proof B does.
+          export KC_BOOTSTRAP_ADMIN_PASSWORD="$(grep '^KC_BOOTSTRAP_ADMIN_PASSWORD=' .kernel/deploy/dev/.env | cut -d= -f2-)"
+          export KC_ADMIN_URL=http://localhost:8080
+          pwsh -NoProfile -File scripts/dev-wiring-proof.ps1 -IdentityRepo .identity -KernelDeployDir .kernel/deploy/dev \
+            -State "$RUNNER_TEMP/wiring/state.json"
 
       - name: stack logs
         if: failure()

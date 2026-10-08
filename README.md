@@ -94,6 +94,7 @@ every other consumer uses; sharing a foundation grants no privileged interface.
 | `internal/httpapi/` | Routing, request decoding, and the domain-error-to-problem mapping |
 | `internal/access/` | The privileged-access recorder: evidence for cross-Tenant work |
 | `internal/db/` | The single scope-binding path and the two pool types |
+| `internal/posture/` | The isolation posture read from the catalog: the deploy's post-condition, the start check and readiness |
 | `internal/organization/` | Organization registry |
 | `internal/tenant/` | Tenant lifecycle and security version |
 | `internal/workspace/` | Workspace lifecycle |
@@ -154,7 +155,7 @@ go run ./cmd/organization-migrate -stage=post   # platform schema, RLS, privileg
 
 The post stage ends with two checks and fails a deploy if either does:
 
-- the isolation posture (`controldb.AssertIsolation`, below);
+- the isolation posture (`posture.AssertIsolation`, below);
 - that no unresolved authority-bearing dead letter lacks every way to close it
   (`controldb.UnclosableDeadLetters`, TDD-005 §The superseded case).
 
@@ -549,6 +550,13 @@ Threading it through the scope binding rather than through the services was the 
 `Within` variant on some thirty service methods across eight packages. The services never see a
 claim, which is what stops one of them being written without honouring it.
 
+**The response is recorded with the effect.** A command handler supplies a renderer
+(`httpapi.answer`), and the service hands the value it returns to `db.Respond` as the last step of its
+transaction. `db.Respond` completes the claim in the transaction that made it, so the claim, the effect
+and the response commit together, and the handler writes the bytes it recorded. A process dying after
+the commit and before the reply leaves a key that a retry replays (TDD-organization-control-003 §The
+Response Is Recorded with the Effect).
+
 | Situation | Answer |
 | :-- | :-- |
 | No header, or a blank one, on a command | 400 `validation-failed`, naming the header, before anything is read |
@@ -566,13 +574,14 @@ in `internal/httpapi/commands.go` and TDD-organization-control-003 §The `Idempo
 on Commands. The key is checked after the caller's authority, so a caller the route does not admit is
 answered 403.
 
-There is a window, and it is the one thing the mechanism does not do. `Complete` needs the status and
-body, which do not exist until the handler has rendered them, so the response is recorded after the
-domain transaction commits. A process dying in between leaves a key claimed and uncompleted, and later
-retries are refused rather than replayed. The mutation still happened exactly once; what is lost is
-being told what it returned. Closing it entirely is the thirty-method refactor above. A batch
-execution is the exception: a retry with its key adopts the uncompleted claim and is answered from the
-batch (TDD-organization-control-002 §Resuming an execution).
+A window remains for the few commands whose effects commit in more than one transaction: a batch
+execution, the offboarding freeze batch and the offboarding cancellation. Their response is recorded
+after the handler writes, as every response was before. A process dying in between leaves a key
+claimed and uncompleted, and later retries are refused rather than replayed; the mutation still
+happened exactly once. A batch execution answers it itself: a retry with its key adopts the
+uncompleted claim and is answered from the batch (TDD-organization-control-002 §Resuming an
+execution). `TestEveryCommandRecordsItsResponseWithItsEffect` keeps a new command from joining that
+list without a reason.
 
 **A replay returns the same response, not the same bytes.**
 `platform.idempotency_key.response_body` is `jsonb`, so PostgreSQL sorts object keys and drops
@@ -608,6 +617,13 @@ promtool check rules observability/alerts/organization-control.rules.yml
 promtool test rules observability/alerts/organization-control.test.yml
 ```
 
+## Runbooks
+
+`docs/runbooks/` answers the production gate's five procedures and the alerts in
+`observability/alerts`: revocation not enforced within budget, projection drift repair,
+provider-access review, stuck offboarding, and dead-letter resolution. Each lists the gaps it found.
+A change to a route, metric or alert updates the runbook that names it in the same change.
+
 ## Row-Level Security is not in `schema.hcl`, and that is a vendor limitation rather than a design choice
 
 Atlas OSS models neither `ENABLE`/`FORCE ROW LEVEL SECURITY` nor `CREATE POLICY`. Verified
@@ -641,12 +657,14 @@ The dangerous half was never reconciliation. It was that **between deploys, in p
 nothing checked** — CI asserts the posture of a throwaway database, which says nothing about the
 one serving traffic.
 
-`controldb.AssertIsolation` reads `pg_class`, `pg_policy`, and `pg_roles` and reports every way
-the posture is not intact. `-stage=post` calls it as a post-condition, so a deploy that applied
-SQL without achieving the posture fails instead of reporting green. Once the HTTP surface exists
-it is called at startup and behind the readiness probe: a replica whose database lost a policy
-leaves the load balancer, because serving tenant-scoped traffic with isolation disabled is worse
-than not serving, and `EAD-006 §8` requires a security-control failure to fail closed.
+`posture.AssertIsolation` (`internal/posture`) reads `pg_class`, `pg_policy`, and `pg_roles` and
+reports every way the posture is not intact. `-stage=post` calls it as a post-condition, so a deploy
+that applied SQL without achieving the posture fails instead of reporting green. The service calls it
+at startup, as the tenant login role, and refuses to start on a problem; `GET /readyz` calls it on
+every probe, so a replica whose database lost a policy leaves the load balancer. Serving
+tenant-scoped traffic with isolation disabled is worse than not serving, and `EAD-006 §8` requires a
+security-control failure to fail closed (TDD-organization-control-001 §Verifying the Posture at
+Runtime).
 
 Six weakenings are tested and each is detected: `FORCE` removed, RLS disabled, a policy dropped,
 a table added to a tenant-scoped schema without `tenant_id`, and a runtime role granted
@@ -674,8 +692,8 @@ go test ./... -count=1 -p 1
 
 **`-p 1` is required, not preferred.** Every integration suite runs against one database, and
 `internal/controldb` deliberately weakens the isolation posture to prove its assertions catch
-weakening: it drops `membership_tenant_scope`, removes `FORCE`, and grants `organization_rt`
-`BYPASSRLS`, restoring each afterwards. Those changes are table-wide and cluster-wide, so any
+weakening: it and `internal/posture` drop `membership_tenant_scope`, remove `FORCE`, and grant
+`organization_rt` `BYPASSRLS`, restoring each afterwards. Those changes are table-wide and cluster-wide, so any
 other package's RLS assertion that runs in that window observes a weakened database and fails
 for a reason unrelated to the code it tests. Without the flag `go test ./...` passes roughly
 three runs in four, which is the worst possible failure rate — often enough to be dismissed as
