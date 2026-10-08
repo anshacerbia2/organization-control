@@ -1334,6 +1334,9 @@ administrative connection is explicitly not accepted as evidence.
   restores it, and compares every table, sequence, role and the schema with owners, grants and RLS
   policies against the source. The restarted service must answer three provider reads identically.
 - A second `restore.sh` over the restored database is refused.
+- The drill's checks are load-bearing. One row of `platform.delivery_receipt` removed inside a
+  transaction that rolls back must change the fingerprint, and the same dump restored into a
+  cluster without its roles must stop on a role that does not exist.
 
 ### Negative
 

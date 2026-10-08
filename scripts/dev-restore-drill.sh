@@ -11,7 +11,9 @@
 #   3. backs it up with deploy/dev/backup.sh, the script README.md §Backups gives the operator's cron;
 #   4. deletes the database volume with docker compose down --volumes, the loss a backup is for;
 #   5. restores into the new, empty volume with deploy/dev/restore.sh, and fingerprints it again
-#      before any migration job runs; a second restore.sh over it must refuse;
+#      before any migration job runs; a second restore.sh over it must refuse, and two probes show
+#      the checks are load-bearing: one row removed in a rolled-back transaction changes the
+#      fingerprint, and the same dump restored into a cluster without its roles stops;
 #   6. starts the stack with docker compose up -d --build, waits for /readyz, and reads again;
 #   7. writes restore-evidence.json and fails on any difference, on an empty outbox, delivery,
 #      receipt, consumer registry, Membership, Tenant or offboarding table, or on a recovery slower
@@ -114,6 +116,40 @@ bash "$deploy/restore.sh" "$globals" "$dump"
 restore_seconds="$(elapsed "$t0" "$(now)")"
 volume_after="$(docker volume inspect -f '{{.CreatedAt}}' "$volume")"
 fingerprint restored
+
+# The comparison is load-bearing: one row removed from the probe table, inside a transaction that rolls
+# back, must change that table's count and checksum.
+probe_table=platform.delivery_receipt
+compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -qtA -U postgres -d "$database" \
+	-c "BEGIN" -c "SET LOCAL session_replication_role = replica" \
+	-c "DELETE FROM $probe_table WHERE ctid = (SELECT ctid FROM $probe_table LIMIT 1)" \
+	-f - -c "ROLLBACK" < "$root/scripts/restore-fingerprint.sql" | jq -S . > "$out/fingerprint-probe.json"
+probe_entry() { jq -c --arg t "$probe_table" '.tables[] | select(.table == $t) | [.rows, .checksum]' "$1"; }
+one_row_detected=false
+if [ "$(probe_entry "$out/fingerprint-probe.json")" != "$(probe_entry "$out/fingerprint-restored.json")" ] &&
+	[ "$(jq '.tables' "$out/fingerprint-probe.json")" != "$(jq '.tables' "$out/fingerprint-source.json")" ]; then
+	one_row_detected=true
+fi
+rm -f "$out/fingerprint-probe.json"
+
+# Roles first is load-bearing: the same dump restored into a cluster without them must stop on its
+# first owner or grantee.
+probe_container="restore-drill-probe-$$"
+image="$(docker inspect -f '{{.Config.Image}}' "$(compose ps -q postgres)")"
+docker run -d --rm --name "$probe_container" -e POSTGRES_PASSWORD="$(openssl rand -hex 16)" "$image" >/dev/null
+for _ in $(seq 1 60); do
+	docker exec "$probe_container" pg_isready -q -h 127.0.0.1 -U postgres && break
+	sleep 1
+done
+without_roles_refused=false
+if docker exec -i "$probe_container" pg_restore -U postgres -d postgres --create --exit-on-error \
+	< "$dump" > "$out/restore-without-roles.txt" 2>&1; then
+	echo "::error::the dump restored into a cluster without its roles; the roles-first order tests nothing"
+else
+	grep -qE 'role "[^"]+" does not exist' "$out/restore-without-roles.txt" && without_roles_refused=true
+fi
+docker rm -f "$probe_container" >/dev/null
+
 refuses_occupied=false
 if bash "$deploy/restore.sh" "$globals" "$dump" > "$out/second-restore.txt" 2>&1; then
 	echo "::error::a second restore.sh ran over the restored database; it must refuse"
@@ -177,7 +213,8 @@ jq -n \
 	--argjson tables_equal "$tables_equal" --argjson sequences_equal "$sequences_equal" \
 	--argjson roles_equal "$roles_equal" --argjson ready "$ready" --argjson migrate_ready "$migrate_ready" \
 	--argjson read_equal "$read_equal" --argjson critical "$critical" --argjson critical_filled "$critical_filled" \
-	--argjson refuses_occupied "$refuses_occupied" \
+	--argjson refuses_occupied "$refuses_occupied" --argjson one_row_detected "$one_row_detected" \
+	--argjson without_roles_refused "$without_roles_refused" --arg probe_table "$probe_table" \
 	--slurpfile source "$out/fingerprint-source.json" \
 	'{
 	  standard: "STD-GLB-002 §Restore Evidence",
@@ -196,6 +233,8 @@ jq -n \
 	    sequences_equal: $sequences_equal, roles_equal: $roles_equal,
 	    critical_tables: $critical, critical_tables_filled: $critical_filled
 	  },
+	  load_bearing: {one_row_removed_from: $probe_table, detected: $one_row_detected,
+	                 restore_without_roles_refused: $without_roles_refused},
 	  service_check: {migrate_job_privileges_asserted: $migrate_ready, ready: $ready,
 	                  ready_seconds: $ready_seconds, read: "GET /v1/provider-grants, /v1/organizations?limit=100, /v1/offboardings?limit=100",
 	                  read_equal: $read_equal},
@@ -210,7 +249,7 @@ jq -n \
 cat "$out/restore-evidence.json"
 
 checks=(schema_equal migration_equal tables_equal sequences_equal roles_equal critical_filled
-	volume_new refuses_occupied ready migrate_ready read_equal within_rto)
+	volume_new refuses_occupied one_row_detected without_roles_refused ready migrate_ready read_equal within_rto)
 failures=0
 for check in "${checks[@]}"; do
 	if [ "${!check}" = true ]; then
