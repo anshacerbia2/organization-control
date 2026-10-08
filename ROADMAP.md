@@ -536,8 +536,10 @@ with owners, grants and RLS policies, the migration version, every table's rows 
 sequence and the roles to equal the source's. The outbox, its per-consumer delivery, the delivery
 receipts, the subscriptions and the consumer registry with its marks must be non-empty. The restarted
 service must answer the provider grants, Organizations and offboardings identically, and the recovery
-must finish inside the 15-minute RTO. The record is the job's `restore-evidence` artifact. Two gaps
-stay recorded, not claimed:
+must finish inside the 15-minute RTO. The record is the job's `restore-evidence` artifact. First
+run, deploy-dev run 37826477189: 32 tables and 428 rows equal, among them 52 outbox events, 46
+deliveries and 44 receipts; the restore took 3.4 s, and the recovery to the verified read 37.5 s,
+against 900 s. Two gaps stay recorded, not claimed:
 
 - **RPO.** A daily `pg_dump` loses up to 24 hours, against PAD-PLT-002's 1 minute, which needs WAL
   archiving with point-in-time recovery on the production platform.
