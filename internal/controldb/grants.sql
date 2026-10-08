@@ -43,6 +43,8 @@ BEGIN
               ('operation.offboarding'),
               ('operation.offboarding_obligation'),
               ('audit.privileged_access'),
+              ('audit.privileged_access_review'),
+              ('audit.tenant_provider_access'),
               ('projection.consumer'),
               ('platform.outbox'),
               ('platform.outbox_delivery'),
@@ -271,15 +273,29 @@ GRANT UPDATE (last_used_at, uses) ON organization.emergency_grant_use TO organiz
 GRANT USAGE ON SCHEMA projection TO organization_provider_rt;
 GRANT SELECT, INSERT, UPDATE ON projection.consumer TO organization_provider_rt;
 
--- audit.privileged_access -- INSERT, provider only. The recorder writes on the provider
+-- audit.privileged_access -- INSERT and SELECT, provider only. The recorder writes on the provider
 -- connections; the outcome record of a resolution is written by the resolution role, below.
 --
--- Nothing reads it and nothing may change it. Evidence whose writer can amend it is not evidence,
--- and a tenant-scoped caller able to INSERT could attribute an access to somebody else. The
--- evidence carries no tenant_id and sits outside the RLS set by construction, so this grant is
--- its only boundary.
+-- Nothing may change it. Evidence whose writer can amend it is not evidence, and a tenant-scoped
+-- caller able to INSERT could attribute an access to somebody else. The evidence sits outside the
+-- RLS set by construction, so these grants are its boundary: no UPDATE, DELETE or TRUNCATE for any
+-- role (AU-9).
+--
+-- SELECT from 1.21.0 of TDD-organization-control-001: a provider in force reads the record to review
+-- it, and the unreviewed report counts it (ADR-ORG-002 §5.6). Until then nothing read it, and the
+-- review needed SQL on the migration credential.
 GRANT USAGE ON SCHEMA audit TO organization_provider_rt;
-GRANT INSERT ON audit.privileged_access TO organization_provider_rt;
+GRANT SELECT, INSERT ON audit.privileged_access TO organization_provider_rt;
+
+-- audit.privileged_access_review -- provider only, SELECT and INSERT. A review is recorded once and
+-- never changed; the insert's RETURNING and the review list and the unreviewed report read it.
+GRANT SELECT, INSERT ON audit.privileged_access_review TO organization_provider_rt;
+
+-- audit.tenant_provider_access -- SELECT, tenant role only: a Tenant administrator's read of the
+-- provider access that named its Tenant, bound by app.tenant_id inside the view (rls.sql). The tenant
+-- role holds nothing on either table, so the view is its only way in.
+GRANT USAGE ON SCHEMA audit TO organization_rt;
+GRANT SELECT ON audit.tenant_provider_access TO organization_rt;
 
 -- ---------------------------------------------------------------------------------------------
 -- platform, by capability

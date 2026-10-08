@@ -110,6 +110,8 @@ func testSurface(t *testing.T) Surface {
 	must(err, "provider activations")
 	tenantAdministrators, err := authority.NewTenantAdministration(providerPool, tenantPool, memberships)
 	must(err, "tenant administration")
+	accessReview, err := authority.NewAccessReview(providerPool, tenantPool)
+	must(err, "privileged-access review")
 	// The raw transactor, as production wires it: the frontier reads outbox aggregates carrying no
 	// tenant column, so it takes no scope and writes no privileged-access record per poll.
 	frontier, err := projection.NewFrontierReader(transactor)
@@ -123,7 +125,7 @@ func testSurface(t *testing.T) Surface {
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 			ContextList: contextList, Replayer: replayer, Resolver: resolver,
 			Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
-			TenantAdministrators: tenantAdministrators,
+			TenantAdministrators: tenantAdministrators, AccessReview: accessReview,
 		},
 		Database: okProber{},
 	})
@@ -201,7 +203,7 @@ func providerCaller(t *testing.T) Caller {
 	if err != nil {
 		t.Fatalf("subject: %v", err)
 	}
-	return Caller{Subject: subject, Provider: true}
+	return Caller{Subject: subject, Provider: true, Emergency: true}
 }
 
 // TestProbesNeedNoCaller is the regression identity-control paid for in an outage.
@@ -546,6 +548,7 @@ func testSurfaceServices(t *testing.T) Services {
 	providerGrants, _ := authority.NewAdministration(providerPool)
 	providerActivations, _ := authority.NewActivations(providerPool, authority.ActivationPolicy{Max: 8 * time.Hour, ApprovalRequired: true})
 	tenantAdministrators, _ := authority.NewTenantAdministration(providerPool, tenantPool, memberships)
+	accessReview, _ := authority.NewAccessReview(providerPool, tenantPool)
 	// The raw transactor, as production wires it: the frontier reads outbox aggregates that carry no
 	// tenant column, so it takes no scope and writes no privileged-access record per poll.
 	frontier, _ := projection.NewFrontierReader(transactor)
@@ -557,7 +560,7 @@ func testSurfaceServices(t *testing.T) Services {
 		Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 		ContextList: contextList, Replayer: replayer, Resolver: resolver,
 		Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
-		TenantAdministrators: tenantAdministrators,
+		TenantAdministrators: tenantAdministrators, AccessReview: accessReview,
 	}
 }
 

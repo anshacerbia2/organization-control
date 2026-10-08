@@ -224,6 +224,10 @@ var mapping = []struct {
 	{authority.ErrActivationDecided, platform.StateTransitionRefused},
 	{authority.ErrSelfApproval, platform.Forbidden},
 	{authority.ErrActivationNotInForce, platform.StateTransitionRefused},
+	// The privileged-access record and its review (ADR-ORG-002 §5.6).
+	{authority.ErrAccessQueryInvalid, platform.ValidationFailed},
+	{authority.ErrReviewInvalid, platform.ValidationFailed},
+	{authority.ErrSelfReview, platform.Forbidden},
 	// Tenant administration grants.
 	{authority.ErrTenantAdminInvalid, platform.ValidationFailed},
 	{authority.ErrAdminTenantNotFound, platform.NotFound},

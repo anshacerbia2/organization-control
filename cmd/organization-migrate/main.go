@@ -257,6 +257,7 @@ func runMaintenance(ctx context.Context, pool *db.Pool, cfg controldb.Maintenanc
 		slog.Int64("batch_previews_purged", report.BatchPreviewsPurged),
 		slog.Int64("stale_unresolved", report.StaleUnresolved))
 	reportEmergencyValidation(ctx, pool, logger)
+	reportUnreviewedAccess(ctx, pool, logger)
 	if report.StaleUnresolved > 0 {
 		return fmt.Errorf("%w: %d older than %s", errStale, report.StaleUnresolved, cfg.StaleAlert)
 	}
@@ -292,4 +293,33 @@ func reportEmergencyValidation(ctx context.Context, pool *db.Pool, logger *slog.
 		}
 	}
 	logger.Error("the emergency grant validation report could not be read", slog.String("error", err.Error()))
+}
+
+// reportUnreviewedAccess logs every Principal whose provider access has gone unreviewed for longer
+// than authority.ReviewDue, at WARN (ADR-ORG-002 §5.6). Another provider reviews it with
+// POST /v1/privileged-access/reviews. The report does not fail the stage: an unreviewed access is a
+// review owed, not a fault in the database.
+func reportUnreviewedAccess(ctx context.Context, pool *db.Pool, logger *slog.Logger) {
+	records, err := authority.NewReader(pool)
+	if err == nil {
+		var report []authority.Unreviewed
+		if report, err = records.UnreviewedAccess(ctx, time.Now()); err == nil {
+			overdue := 0
+			for _, actor := range report {
+				if !actor.Overdue {
+					continue
+				}
+				overdue++
+				logger.Warn("a provider's access has gone unreviewed for more than 7 days; another provider "+
+					"reviews it with POST /v1/privileged-access/reviews",
+					slog.String("principal_id", actor.Actor.String()), slog.Int64("unreviewed", actor.Unreviewed),
+					slog.Int64("emergency", actor.Emergency), slog.Time("oldest_at", actor.OldestAt),
+					slog.Time("due_at", actor.DueAt))
+			}
+			logger.Info("provider access review", slog.Int("principals_unreviewed", len(report)),
+				slog.Int("overdue", overdue))
+			return
+		}
+	}
+	logger.Error("the unreviewed provider access report could not be read", slog.String("error", err.Error()))
 }

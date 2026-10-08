@@ -57,6 +57,10 @@ type Caller struct {
 	// (ADR-ORG-002 §5.2).
 	Emergency bool
 
+	// Activation is the activation in force that makes a non-emergency Provider one. The
+	// privileged-access record names it (ADR-ORG-002 §5.6).
+	Activation id.UUID
+
 	// Self is a person reading their own contexts: a human token on
 	// GET /v1/principals/{principal_id}/contexts whose principal_id is the path's (ADR-ORG-005 §5.1).
 	// Authentication sets it on that route alone, so no other route ever sees a self caller.
@@ -171,7 +175,19 @@ func resolve(caller Caller, correlation id.UUID) (db.Scope, error) {
 		if !caller.Tenant.IsNil() {
 			return db.Scope{}, errors.New("httpapi: a provider caller must not also carry a Tenant")
 		}
-		return db.ProviderScope(caller.Subject, correlation)
+		// The authority the record names: what authentication found in force, or an eligible
+		// holder's nothing. A provider with neither an emergency grant nor an activation is refused
+		// rather than recorded as acting on nothing (ADR-ORG-002 §5.6).
+		var authority db.Authority
+		switch {
+		case caller.Eligible && !caller.Provider:
+			authority = db.EligibleAuthority()
+		case caller.Emergency:
+			authority = db.EmergencyAuthority()
+		default:
+			authority = db.ActivationAuthority(caller.Activation)
+		}
+		return db.ProviderScope(caller.Subject, correlation, authority)
 	}
 	return db.TenantScope(caller.Tenant, caller.Subject, correlation)
 }

@@ -422,7 +422,7 @@ func authorize(ctx context.Context, p presented, cfg AuthenticationConfig) (Call
 	// A holder with no authority in force is eligible: it reaches the activation routes alone
 	// (ADR-ORG-002 §5.1, TDD-organization-control-001 §Provider Activation).
 	return Caller{Subject: p.principal, Provider: standing.InForce, Eligible: !standing.InForce,
-		Emergency: standing.Emergency}, nil
+		Emergency: standing.Emergency, Activation: standing.Activation}, nil
 }
 
 // ReportTokenType wraps a verifier for ORGANIZATION_TOKEN_TYPE=report. A token whose header typ is

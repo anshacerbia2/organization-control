@@ -325,6 +325,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("provider activations: %w", err)
 	}
+	// The privileged-access record, read by a provider on the provider pool and by a Tenant
+	// administrator through its Tenant's view on the tenant pool (ADR-ORG-002 §5.6).
+	accessReview, err := authority.NewAccessReview(providerPool, tenantPool)
+	if err != nil {
+		return fmt.Errorf("privileged-access review: %w", err)
+	}
 
 	// A registered consumer's own routes, on its own connections and its own role. Built only when
 	// the consumer credential is configured, which is what enables consumer authority: without the
@@ -377,6 +383,7 @@ func run() error {
 			ProviderGrants:       providerGrants,
 			ProviderActivations:  providerActivations,
 			TenantAdministrators: tenantAdministrators,
+			AccessReview:         accessReview,
 			Frontier:             frontier,
 			Consumer:             consumerServices,
 		},

@@ -55,19 +55,24 @@ type Standing struct {
 	InForce bool
 	// Emergency is authority from an emergency grant, which every request reports.
 	Emergency bool
+	// Activation is the activation in force, when that is the authority, and nil otherwise. The
+	// privileged-access record names it (ADR-ORG-002 §5.6).
+	Activation id.UUID
 }
 
-// standingStatement is one row always: three booleans over the Principal's unrevoked grants and
-// their activations.
+// standingStatement is one row always: two booleans over the Principal's unrevoked grants, and the
+// activation in force, or NULL. A Principal holds one grant per scope, so at most one activation of
+// it is in force; the order makes the answer the same if that ever changed.
 const standingStatement = `SELECT
     EXISTS (SELECT 1 FROM organization.provider_grant g
             WHERE g.principal_id = $1 AND g.revoked_at IS NULL),
     EXISTS (SELECT 1 FROM organization.provider_grant g
             WHERE g.principal_id = $1 AND g.scope = $2 AND g.revoked_at IS NULL AND g.kind = 'emergency'),
-    EXISTS (SELECT 1 FROM organization.provider_activation a
+    (SELECT a.activation_id::text FROM organization.provider_activation a
             JOIN organization.provider_grant g ON g.grant_id = a.grant_id
             WHERE a.principal_id = $1 AND a.scope = $2 AND g.revoked_at IS NULL
-              AND a.decision = 'approved' AND a.ended_at IS NULL AND now() < a.ends_at)`
+              AND a.decision = 'approved' AND a.ended_at IS NULL AND now() < a.ends_at
+            ORDER BY a.activation_id LIMIT 1)`
 
 // ProviderStanding reads the Principal's provider authority over this service. A revoked grant, an
 // activation past its end, and one ended early confer nothing from the next request on.
@@ -76,16 +81,23 @@ func (r *Reader) ProviderStanding(ctx context.Context, principal id.UUID) (Stand
 		return Standing{}, errors.New("authority: a principal is required")
 	}
 	var (
-		standing  Standing
-		activated bool
+		standing   Standing
+		activation *string
 	)
 	if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		return tx.QueryRow(ctx, standingStatement, principal.String(), Scope).
-			Scan(&standing.Holder, &standing.Emergency, &activated)
+			Scan(&standing.Holder, &standing.Emergency, &activation)
 	}); err != nil {
 		return Standing{}, fmt.Errorf("authority: read provider standing: %w", err)
 	}
-	standing.InForce = standing.Emergency || activated
+	if activation != nil {
+		parsed, err := id.Parse(*activation)
+		if err != nil {
+			return Standing{}, fmt.Errorf("authority: read provider standing: %w", err)
+		}
+		standing.Activation = parsed
+	}
+	standing.InForce = standing.Emergency || !standing.Activation.IsNil()
 	return standing, nil
 }
 

@@ -89,7 +89,7 @@ func TestAConsumerNeedsNoAdministrativeReason(t *testing.T) {
 // TestAProviderStillOwesAReason keeps the other half: a provider performing the same action is doing
 // something out of the ordinary, and the evidence should say why.
 func TestAProviderStillOwesAReason(t *testing.T) {
-	provider := Caller{Subject: mustParse(t, testSubject), Provider: true}
+	provider := Caller{Subject: mustParse(t, testSubject), Provider: true, Emergency: true}
 
 	withoutReason := httptest.NewRecorder()
 	if _, _, ok := requireConsumerSelfOrProvider(withoutReason, selfRequest(t, provider), "foundation-reference"); ok {

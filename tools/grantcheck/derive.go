@@ -101,6 +101,9 @@ var boundaries = map[string][]string{
 	// the reader the provider connections.
 	"(*" + module + "/internal/authority.Reader).RecordEmergencyUse":  {providerRole},
 	"(*" + module + "/internal/authority.Reader).EmergencyValidation": {providerRole},
+	// The maintenance stage reads the unreviewed provider-access report the same way, as the owner,
+	// from the statement the provider route reads (ADR-ORG-002 §5.6).
+	"(*" + module + "/internal/authority.Reader).UnreviewedAccess": {providerRole},
 	// posture.Startup(ctx, tenantConns, ...) and posture.NewProbe(tenantConns): the isolation posture,
 	// read from the catalog at startup and behind readiness. Catalog reads only; planned as the
 	// tenant role so a catalog the role could not read would fail here.

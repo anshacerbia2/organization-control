@@ -57,7 +57,7 @@ func (f *fakeRecords) ProviderStanding(_ context.Context, principal id.UUID) (au
 	case f.emergency[principal]:
 		return authority.Standing{Holder: true, InForce: true, Emergency: true}, f.err
 	case f.providers[principal]:
-		return authority.Standing{Holder: true, InForce: true}, f.err
+		return authority.Standing{Holder: true, InForce: true, Activation: testActivation}, f.err
 	case f.eligible[principal]:
 		return authority.Standing{Holder: true}, f.err
 	}
@@ -76,7 +76,9 @@ func (f *fakeRecords) TenantStanding(_ context.Context, principal, tenant, _ id.
 
 // The Principals the fake records know.
 var (
-	testProvider         = id.MustParse("01a0f64a-c533-7000-a956-c3f095484a01")
+	testProvider = id.MustParse("01a0f64a-c533-7000-a956-c3f095484a01")
+	// testActivation is the activation in force for a provider in providers.
+	testActivation       = id.MustParse("01a0f64a-c533-7000-a956-c3f095484a05")
 	testConsumerWorkload = id.MustParse("01a0f64a-c533-7000-a956-c3f095484a02")
 	testConsumerName     = "foundation-reference"
 

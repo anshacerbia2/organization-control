@@ -1657,7 +1657,10 @@ table "offboarding_obligation" {
 // `operation`. A row here records an action taken *across* Tenants, so there is no
 // single tenant_id to key a predicate on, and inventing one would either attribute the access to an
 // arbitrary Tenant or exclude the row from every Tenant's view. The boundary is the grant instead:
-// `organization_rt` holds nothing in this schema, which grants.sql revokes explicitly.
+// `organization_rt` holds nothing on this table, which grants.sql revokes explicitly. From
+// TDD-organization-control-001 1.21.0 a row names the one Tenant an access named, when it named one,
+// and a Tenant administrator reads those rows through the view audit.tenant_provider_access, which
+// rls.sql creates and which reads app.tenant_id. Still no policy on the table: see rls.sql.
 //
 // It is also written outside the transaction it describes. db.withProviderScope calls the recorder
 // before opening the domain transaction, so evidence survives a domain rollback — the case an
@@ -1691,9 +1694,44 @@ table "privileged_access" {
     type    = timestamptz
     default = sql("now()")
   }
+  // What admitted the access, so a review can tell an emergency use from an activation and name the
+  // activation (ADR-ORG-002 §5.6, TDD-organization-control-001 §Privileged Access Review). Required:
+  // db.ProviderScope refuses a scope without one, and this refuses a row without one.
+  column "authority" {
+    null    = false
+    type    = text
+    comment = "emergency, activation, eligible or consumer: what admitted the access."
+  }
+  column "activation_id" {
+    null    = true
+    type    = uuid
+    comment = "The activation in force, when the authority is one."
+  }
+  // The one Tenant the access named, and null for an access across Tenants. A Tenant administrator
+  // reads the provider rows that name its Tenant through audit.tenant_provider_access.
+  column "tenant_id" {
+    null    = true
+    type    = uuid
+    comment = "The one Tenant the access named: the Tenant a provider act binds, or the route path's."
+  }
+  column "operation" {
+    null    = true
+    type    = text
+    comment = "The route pattern, method included, that opened the transaction."
+  }
 
   primary_key {
     columns = [column.access_id]
+  }
+
+  check "privileged_access_authority_check" {
+    expr = "authority IN ('emergency', 'activation', 'eligible', 'consumer')"
+  }
+  check "privileged_access_activation_check" {
+    expr = "(authority = 'activation') = (activation_id IS NOT NULL)"
+  }
+  check "privileged_access_operation_check" {
+    expr = "operation IS NULL OR btrim(operation) <> ''"
   }
 
   // A blank reason is evidence naming nobody's intent. db.ErrReasonRequired refuses one before any
@@ -1710,6 +1748,94 @@ table "privileged_access" {
   }
   index "privileged_access_correlation_idx" {
     columns = [column.correlation_id]
+  }
+  // A Tenant's read, in the list's key order.
+  index "privileged_access_tenant_idx" {
+    columns = [column.tenant_id, column.access_id]
+    where   = "tenant_id IS NOT NULL"
+  }
+}
+
+// privileged_access_review is a provider's review of another provider's access over a period
+// (ADR-ORG-002 §5.6). Insert-only: no runtime role updates or deletes one, and nothing purges one.
+//
+// The separation check is AC-5 in the database, as provider_activation_separation_check is for an
+// approval: the reviewer is never the provider whose access is reviewed. The counts are taken in the
+// transaction that records the review, so the row says how many accesses its period held then.
+table "privileged_access_review" {
+  schema  = schema.audit
+  comment = "A provider's review of another provider's access over a period. Insert-only. ADR-ORG-002 §5.6."
+
+  column "review_id" {
+    null = false
+    type = uuid
+  }
+  column "actor_id" {
+    null    = false
+    type    = uuid
+    comment = "The provider whose access is reviewed."
+  }
+  column "period_from" {
+    null = false
+    type = timestamptz
+  }
+  column "period_to" {
+    null = false
+    type = timestamptz
+  }
+  column "outcome" {
+    null = false
+    type = text
+  }
+  column "statement" {
+    null = false
+    type = text
+  }
+  column "accesses" {
+    null = false
+    type = bigint
+  }
+  column "emergency_accesses" {
+    null = false
+    type = bigint
+  }
+  column "reviewed_by" {
+    null = false
+    type = uuid
+  }
+  column "correlation_id" {
+    null = false
+    type = uuid
+  }
+  column "reviewed_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.review_id]
+  }
+
+  check "privileged_access_review_outcome_check" {
+    expr = "outcome IN ('appropriate', 'escalated')"
+  }
+  check "privileged_access_review_statement_check" {
+    expr = "btrim(statement) <> ''"
+  }
+  check "privileged_access_review_count_check" {
+    expr = "accesses >= 0 AND emergency_accesses >= 0 AND emergency_accesses <= accesses"
+  }
+  check "privileged_access_review_separation_check" {
+    expr = "reviewed_by <> actor_id"
+  }
+  check "privileged_access_review_period_check" {
+    expr = "period_from < period_to AND period_to <= reviewed_at"
+  }
+
+  // Coverage is asked per actor and instant: is there a review of this actor whose period holds it.
+  index "privileged_access_review_actor_idx" {
+    columns = [column.actor_id, column.period_from, column.period_to]
   }
 }
 

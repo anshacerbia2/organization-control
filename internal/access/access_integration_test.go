@@ -63,9 +63,9 @@ func providerPool(t *testing.T) (*fdb.Pool, context.Context) {
 
 // countFor reads the evidence back through the administrative connection.
 //
-// Through the admin DSN rather than the provider pool, because the provider role deliberately holds
-// no SELECT on this table. A test that read it back through the writer's own connection would only
-// pass if that revocation were missing.
+// Through the admin DSN rather than the provider pool. The provider role reads the record for the
+// review (ADR-ORG-002 §5.6), and a count through the writer's own connection would still be one the
+// writer could shape; the owner's is not.
 func countFor(t *testing.T, ctx context.Context, correlation id.UUID) int {
 	t.Helper()
 
@@ -109,7 +109,7 @@ func TestEvidenceIsWrittenForAProviderTransaction(t *testing.T) {
 		t.Fatalf("correlation: %v", err)
 	}
 
-	scope, err := db.ProviderScope(actor, correlation)
+	scope, err := db.ProviderScope(actor, correlation, db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("scope: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestEvidenceSurvivesADomainRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("correlation: %v", err)
 	}
-	scope, err := db.ProviderScope(actor, correlation)
+	scope, err := db.ProviderScope(actor, correlation, db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("scope: %v", err)
 	}
@@ -194,19 +194,27 @@ func TestEvidenceIsAppendOnlyForTheWriter(t *testing.T) {
 
 	if err := newRecorder(t, pool).RecordProviderAccess(ctx, db.ProviderAccess{
 		Actor: actor, Correlation: correlation, Reason: "establish a row to attack",
+		Authority: db.AuthorityEmergency,
 	}); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
+	// SELECT is not among them from 1.21.0: a provider in force reads the record to review it
+	// (TDD-organization-control-001 §Privileged Access Review). Reading changes nothing; the refusals
+	// below are what keep the evidence evidence.
 	statements := map[string]string{
-		"update": `UPDATE audit.privileged_access SET reason = 'rewritten' WHERE correlation_id = $1`,
-		"delete": `DELETE FROM audit.privileged_access WHERE correlation_id = $1`,
-		"select": `SELECT count(*) FROM audit.privileged_access WHERE correlation_id = $1`,
+		"update":   `UPDATE audit.privileged_access SET reason = 'rewritten' WHERE correlation_id = $1`,
+		"delete":   `DELETE FROM audit.privileged_access WHERE correlation_id = $1`,
+		"truncate": `TRUNCATE audit.privileged_access`,
 	}
 	for name, statement := range statements {
 		t.Run(name, func(t *testing.T) {
 			err := pool.InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
-				_, execErr := tx.Exec(ctx, statement, correlation.String())
+				var args []any
+				if strings.Contains(statement, "$1") {
+					args = append(args, correlation.String())
+				}
+				_, execErr := tx.Exec(ctx, statement, args...)
 				return execErr
 			})
 			if err == nil {
@@ -238,7 +246,7 @@ func TestBlankReasonIsRefusedTwice(t *testing.T) {
 	}
 
 	if err := newRecorder(t, pool).RecordProviderAccess(ctx, db.ProviderAccess{
-		Actor: actor, Correlation: correlation, Reason: "",
+		Actor: actor, Correlation: correlation, Reason: "", Authority: db.AuthorityEmergency,
 	}); !errors.Is(err, db.ErrReasonRequired) {
 		t.Errorf("a blank reason returned %v, want db.ErrReasonRequired", err)
 	}
@@ -251,8 +259,8 @@ func TestBlankReasonIsRefusedTwice(t *testing.T) {
 	}
 	err = pool.InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
 		_, execErr := tx.Exec(ctx,
-			`INSERT INTO audit.privileged_access (access_id, actor_id, correlation_id, reason)
-			 VALUES ($1, $2, $3, '   ')`,
+			`INSERT INTO audit.privileged_access (access_id, actor_id, correlation_id, reason, authority)
+			 VALUES ($1, $2, $3, '   ', 'emergency')`,
 			accessID.String(), actor.String(), correlation.String())
 		return execErr
 	})
@@ -262,5 +270,103 @@ func TestBlankReasonIsRefusedTwice(t *testing.T) {
 
 	if count := countFor(t, ctx, correlation); count != 0 {
 		t.Errorf("a refused reason left %d evidence rows, want 0", count)
+	}
+}
+
+// adminRow reads the columns a review filters on for the one row of a correlation.
+func adminRow(t *testing.T, ctx context.Context, correlation id.UUID) (authority, activation, tenant, operation string) {
+	t.Helper()
+	admin, err := fdb.Open(ctx, fdb.Config{
+		Name: "access-test-admin", DSN: os.Getenv("TEST_DATABASE_URL"), MaxConns: 1,
+	})
+	if err != nil {
+		t.Fatalf("open the administrative pool: %v", err)
+	}
+	defer admin.Close()
+	if err := admin.InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
+		return tx.QueryRow(ctx, `SELECT authority, coalesce(activation_id::text, ''),
+		        coalesce(tenant_id::text, ''), coalesce(operation, '')
+		   FROM audit.privileged_access WHERE correlation_id = $1`, correlation.String()).
+			Scan(&authority, &activation, &tenant, &operation)
+	}); err != nil {
+		t.Fatalf("read evidence: %v", err)
+	}
+	return authority, activation, tenant, operation
+}
+
+// TestEvidenceNamesItsAuthorityRouteAndTenant is ADR-ORG-002 §5.6: a row says what authority the
+// access acted on, which activation, which route served it and which Tenant the path named, so a
+// review can filter on each without joining the request logs.
+func TestEvidenceNamesItsAuthorityRouteAndTenant(t *testing.T) {
+	pool, ctx := providerPool(t)
+	providerScoped, err := db.NewProviderPool(pool, newRecorder(t, pool))
+	if err != nil {
+		t.Fatalf("provider pool: %v", err)
+	}
+	mint := func() id.UUID {
+		t.Helper()
+		value, err := id.NewV7()
+		if err != nil {
+			t.Fatalf("id: %v", err)
+		}
+		return value
+	}
+
+	activation, tenant := mint(), mint()
+	cases := []struct {
+		name      string
+		authority db.Authority
+		tenant    id.UUID
+		want      [4]string
+	}{
+		{"an activation, on a route naming a Tenant", db.ActivationAuthority(activation), tenant,
+			[4]string{db.AuthorityActivation, activation.String(), tenant.String(), "GET /v1/tenants/{tenant_id}"}},
+		{"an emergency grant, on a route naming none", db.EmergencyAuthority(), id.UUID{},
+			[4]string{db.AuthorityEmergency, "", "", "GET /v1/tenants/{tenant_id}"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			correlation := mint()
+			scope, err := db.ProviderScope(mint(), correlation, c.authority)
+			if err != nil {
+				t.Fatalf("scope: %v", err)
+			}
+			routed := db.WithAccessRoute(db.WithScope(ctx, scope), "GET /v1/tenants/{tenant_id}", c.tenant)
+			if err := db.WithProviderScope(routed, providerScoped, "read one Tenant",
+				func(context.Context, db.Tx) error { return nil }); err != nil {
+				t.Fatalf("provider transaction: %v", err)
+			}
+			a, act, ten, op := adminRow(t, ctx, correlation)
+			if got := [4]string{a, act, ten, op}; got != c.want {
+				t.Errorf("recorded %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestTheTableRefusesAnAuthorityWithoutItsActivation: the activation check holds for any writer, not
+// only for this repository's Go guard.
+func TestTheTableRefusesAnAuthorityWithoutItsActivation(t *testing.T) {
+	pool, ctx := providerPool(t)
+	statements := map[string]string{
+		"an activation naming none": `INSERT INTO audit.privileged_access
+		    (access_id, actor_id, correlation_id, reason, authority)
+		    VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'r', 'activation')`,
+		"an emergency naming one": `INSERT INTO audit.privileged_access
+		    (access_id, actor_id, correlation_id, reason, authority, activation_id)
+		    VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'r', 'emergency', gen_random_uuid())`,
+		"an unknown authority": `INSERT INTO audit.privileged_access
+		    (access_id, actor_id, correlation_id, reason, authority)
+		    VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'r', 'root')`,
+	}
+	for name, statement := range statements {
+		t.Run(name, func(t *testing.T) {
+			if err := pool.InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
+				_, err := tx.Exec(ctx, statement)
+				return err
+			}); err == nil {
+				t.Error("the table accepted it")
+			}
+		})
 	}
 }

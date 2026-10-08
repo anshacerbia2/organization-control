@@ -120,7 +120,7 @@ func newFixture(t *testing.T) *fixture {
 	service.now = func() time.Time { return fixed }
 
 	actor, correlation := mustID(t), mustID(t)
-	providerScope, err := db.ProviderScope(actor, correlation)
+	providerScope, err := db.ProviderScope(actor, correlation, db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("ProviderScope: %v", err)
 	}

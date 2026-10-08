@@ -40,7 +40,8 @@ BEGIN
               ('membership.membership_event'),
               ('invitation.invitation'),
               ('operation.offboarding'),
-              ('operation.offboarding_obligation')
+              ('operation.offboarding_obligation'),
+              ('audit.privileged_access')
            ) AS expected(name)
      WHERE to_regclass(expected.name) IS NULL;
 
@@ -292,3 +293,34 @@ CREATE POLICY membership_batch_item_purge ON membership.membership_batch_item
                            AND b.state = 'previewed'
                            AND b.expires_at < now()))
     WITH CHECK (false);
+
+-- audit.tenant_provider_access, a Tenant administrator's read of the provider access to its Tenant.
+--
+-- ADR-ORG-002 §5.6 has a Tenant administrator read the provider rows that name its Tenant, as Google's
+-- Access Transparency customer reads the access Google's personnel made to its data. The record
+-- carries no policy (above), so the boundary is this view: organization_rt holds SELECT on it and
+-- nothing on the table (grants.sql). A view's relations are "checked against the privileges of the
+-- rule owner, not the user invoking the rule" (PostgreSQL 17 §39.5), so the owner reads the table and
+-- the predicate decides what the caller sees.
+--
+--   security_barrier, because without it a view cannot "reliably conceal the data in unseen rows"
+--   (§39.5): a function in the caller's query could see a row before the predicate drops it.
+--
+--   current_setting(..., false), as in every tenant policy: an unbound connection raises rather than
+--   reading no Tenant's rows.
+--
+--   Consumer rows are left out. A consumer is a workload acting on its own records, not provider
+--   personnel, and its rows name no Tenant in any case.
+--
+-- Here rather than in schema.hcl because Atlas OSS models no views. Dropped and created on every run,
+-- like each policy, so an edited predicate takes effect; grants.sql runs after and grants it again.
+DROP VIEW IF EXISTS audit.tenant_provider_access;
+CREATE VIEW audit.tenant_provider_access WITH (security_barrier) AS
+SELECT access_id, actor_id, authority, activation_id, tenant_id, operation, correlation_id,
+       reason, occurred_at
+  FROM audit.privileged_access
+ WHERE tenant_id = current_setting('app.tenant_id', false)::uuid
+   AND authority <> 'consumer';
+ALTER VIEW audit.tenant_provider_access OWNER TO organization_migrator;
+COMMENT ON VIEW audit.tenant_provider_access IS
+    'The provider access that named the bound Tenant, for its Tenant administrator. ADR-ORG-002 §5.6.';
