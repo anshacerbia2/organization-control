@@ -203,7 +203,8 @@ func TestAFailedMutationReleasesItsKey(t *testing.T) {
 	}
 }
 
-// TestASecondUseOfAnUncompletedKeyIsRefused covers the window the chosen design leaves open.
+// TestASecondUseOfAnUncompletedKeyIsRefused covers the window left for a command that does not
+// record its response with the effect: one whose effects span several transactions.
 //
 // The response is recorded after the domain transaction, so between the two a key is claimed and
 // uncompleted. A retry arriving there is refused rather than replayed and rather than re-executed.
@@ -409,5 +410,150 @@ func TestAnIncompleteClaimIsIgnoredRatherThanHalfApplied(t *testing.T) {
 	}
 	if _, ok := db.ClaimFrom(db.WithClaim(f.ctx, partial)); ok {
 		t.Error("an incomplete claim was carried in the context")
+	}
+}
+
+// responder renders any result as the given body, as the HTTP surface's answer helper renders a
+// typed one.
+func responder(status int, body json.RawMessage) db.Responder {
+	return func(any) (int, json.RawMessage, bool) { return status, body, true }
+}
+
+// TestAResponseRecordedWithTheEffectSurvivesACrashBeforeTheReply is the property the in-transaction
+// completion exists for (TDD-organization-control-003 §The Response Is Recorded with the Effect).
+//
+// The first attempt commits its effect and its response together and then the process "dies": the
+// surface's after-the-fact completion never runs and no reply is sent. The retry is answered with the
+// recorded response and runs nothing. Before the change, the same sequence left the key claimed and
+// uncompleted, and the retry was refused as in progress -- TestASecondUseOfAnUncompletedKeyIsRefused
+// is that sequence without Respond.
+func TestAResponseRecordedWithTheEffectSurvivesACrashBeforeTheReply(t *testing.T) {
+	f := newClaimFixture(t)
+
+	membershipID := mustUUIDValue(t)
+	t.Cleanup(func() { f.forgetMembership(membershipID) })
+	body := json.RawMessage(`{"membership_id":"` + membershipID.String() + `","status":"active"}`)
+
+	ctx := db.WithResponder(db.WithClaim(f.ctx, f.claim), responder(201, body))
+	if err := db.WithTenantScope(ctx, f.pool, func(ctx context.Context, tx db.Tx) error {
+		if err := f.grantMembership(ctx, tx, membershipID); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, membershipID)
+	}); err != nil {
+		t.Fatalf("the first attempt failed: %v", err)
+	}
+	if !db.ClaimCompleted(ctx) {
+		t.Error("ClaimCompleted is false after Respond, so the surface would complete the key twice")
+	}
+	// The crash: nothing after the commit runs. No ClaimStore.Complete, no reply.
+	if exists, completed := f.keyState(f.claim); !exists || !completed {
+		t.Fatalf("after the commit the key exists=%v completed=%v; want both", exists, completed)
+	}
+
+	ran := false
+	err := db.WithTenantScope(db.WithClaim(f.ctx, f.claim), f.pool,
+		func(context.Context, db.Tx) error {
+			ran = true
+			return nil
+		})
+	var replayed *db.Replayed
+	if !errors.As(err, &replayed) {
+		t.Fatalf("the retry returned %v, want a replay of the recorded response", err)
+	}
+	if ran {
+		t.Error("the retry ran the body again")
+	}
+	var got, want map[string]any
+	_ = json.Unmarshal(replayed.Body, &got)
+	_ = json.Unmarshal(body, &want)
+	if replayed.Status != 201 || got["membership_id"] != want["membership_id"] {
+		t.Errorf("the replay is %d %s, want 201 %s", replayed.Status, replayed.Body, body)
+	}
+}
+
+// TestAResponseRolledBackWithItsEffectReleasesTheKey: a failure after Respond takes the response
+// with it, so a corrected retry runs rather than replaying an answer for work that did not commit.
+func TestAResponseRolledBackWithItsEffectReleasesTheKey(t *testing.T) {
+	f := newClaimFixture(t)
+	membershipID := mustUUIDValue(t)
+	sentinel := errors.New("the commit did not happen")
+
+	ctx := db.WithResponder(db.WithClaim(f.ctx, f.claim), responder(201, json.RawMessage(`{"a":1}`)))
+	err := db.WithTenantScope(ctx, f.pool, func(ctx context.Context, tx db.Tx) error {
+		if err := f.grantMembership(ctx, tx, membershipID); err != nil {
+			return err
+		}
+		if err := db.Respond(ctx, tx, membershipID); err != nil {
+			return err
+		}
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("the scope returned %v, want the injected failure", err)
+	}
+	if exists, _ := f.keyState(f.claim); exists {
+		t.Error("the key and its response survived a rolled-back effect")
+	}
+	if f.membershipExists(membershipID) {
+		t.Error("the failed mutation committed")
+	}
+}
+
+// TestRespondActsOnlyInTheTransactionThatMadeTheClaim. A command whose effects span transactions
+// claims in the first; a response recorded in a later one would commit apart from the claim, so
+// Respond does nothing there and the surface completes the key afterwards, as before.
+func TestRespondActsOnlyInTheTransactionThatMadeTheClaim(t *testing.T) {
+	f := newClaimFixture(t)
+	first, second := mustUUIDValue(t), mustUUIDValue(t)
+	t.Cleanup(func() { f.forgetMembership(first); f.forgetMembership(second) })
+
+	ctx := db.WithResponder(db.WithClaim(f.ctx, f.claim), responder(200, json.RawMessage(`{"a":1}`)))
+	if err := db.WithTenantScope(ctx, f.pool, func(ctx context.Context, tx db.Tx) error {
+		return f.grantMembership(ctx, tx, first)
+	}); err != nil {
+		t.Fatalf("the claiming transaction failed: %v", err)
+	}
+	if err := db.WithTenantScope(ctx, f.pool, func(ctx context.Context, tx db.Tx) error {
+		if err := f.grantMembership(ctx, tx, second); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, second)
+	}); err != nil {
+		t.Fatalf("the second transaction failed: %v", err)
+	}
+	if db.ClaimCompleted(ctx) {
+		t.Error("Respond completed the claim in a transaction that did not make it")
+	}
+	if _, completed := f.keyState(f.claim); completed {
+		t.Error("the key was completed outside the transaction that claimed it")
+	}
+}
+
+// TestRespondIsANoOpWithoutAClaimOrAResponder: an unkeyed command, and a keyed one whose surface
+// supplied no renderer, record nothing and fail nothing.
+func TestRespondIsANoOpWithoutAClaimOrAResponder(t *testing.T) {
+	f := newClaimFixture(t)
+
+	for name, ctx := range map[string]context.Context{
+		"no claim":     db.WithResponder(f.ctx, responder(200, json.RawMessage(`{"a":1}`))),
+		"no responder": db.WithClaim(f.ctx, f.claim),
+	} {
+		id := mustUUIDValue(t)
+		t.Cleanup(func() { f.forgetMembership(id) })
+		if err := db.WithTenantScope(ctx, f.pool, func(ctx context.Context, tx db.Tx) error {
+			if err := f.grantMembership(ctx, tx, id); err != nil {
+				return err
+			}
+			return db.Respond(ctx, tx, id)
+		}); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		if db.ClaimCompleted(ctx) {
+			t.Errorf("%s: ClaimCompleted is true", name)
+		}
+	}
+	if _, completed := f.keyState(f.claim); completed {
+		t.Error("a claim with no responder was completed")
 	}
 }

@@ -271,7 +271,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Workspace, err
 			record.DisplayName, record.Type).Scan(&record.Version, &record.CreatedAt); err != nil {
 			return fmt.Errorf("workspace: insert: %w", err)
 		}
-		return s.publish(ctx, tx, createdEventType, record, at)
+		if err := s.publish(ctx, tx, createdEventType, record, at); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, record)
 	}); err != nil {
 		return Workspace{}, err
 	}
@@ -387,7 +390,10 @@ func (s *Service) transition(ctx context.Context, action Action, cmd Command) (W
 		if err != nil {
 			return err
 		}
-		return s.publish(ctx, tx, string(eventType), record, at)
+		if err := s.publish(ctx, tx, string(eventType), record, at); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, record)
 	}); err != nil {
 		return Workspace{}, err
 	}

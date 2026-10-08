@@ -87,11 +87,14 @@ func (s *Service) Raise(ctx context.Context, req RaiseRequest) (Obligation, erro
 				return fmt.Errorf("offboarding: insert obligation: %w", err)
 			}
 
-			return s.publish(ctx, tx, "obligation-raised", req.OffboardingID, ObligationPayload{
+			if err := s.publish(ctx, tx, "obligation-raised", req.OffboardingID, ObligationPayload{
 				OffboardingID: obligation.OffboardingID, TenantID: obligation.TenantID,
 				ObligationID: obligation.ObligationID, Domain: obligation.Domain,
 				Type: obligation.Type, DueAt: obligation.DueAt,
-			}, at)
+			}, at); err != nil {
+				return err
+			}
+			return db.Respond(ctx, tx, obligation)
 		}); err != nil {
 		return Obligation{}, err
 	}
@@ -203,7 +206,7 @@ func (s *Service) Resolve(ctx context.Context, res Resolution) (Obligation, erro
 				loaded.CompletedAt = &stamped
 			}
 			obligation = loaded
-			return nil
+			return db.Respond(ctx, tx, obligation)
 		}); err != nil {
 		return Obligation{}, err
 	}
@@ -335,7 +338,7 @@ func (s *Service) SetLegalHold(ctx context.Context, offboardingID id.UUID, hold 
 				return err
 			}
 			record = loaded
-			return nil
+			return db.Respond(ctx, tx, record)
 		}); err != nil {
 		return Offboarding{}, err
 	}

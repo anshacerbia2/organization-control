@@ -151,8 +151,10 @@ func (s *Service) transition(ctx context.Context, action Action, cmd Command, ch
 	var result Result
 	if err := db.WithProviderScope(ctx, s.pool, cmd.Reason, func(ctx context.Context, tx db.Tx) error {
 		var err error
-		result, err = s.transitionWithin(ctx, tx, action, cmd, check)
-		return err
+		if result, err = s.transitionWithin(ctx, tx, action, cmd, check); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, result)
 	}); err != nil {
 		return Result{}, err
 	}

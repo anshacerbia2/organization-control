@@ -11,6 +11,7 @@ package membership
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -719,5 +720,55 @@ func TestReadsAreKeysetPagesConfinedToTheTenant(t *testing.T) {
 	}
 	if len(elsewhere.Memberships) != 0 {
 		t.Errorf("another Tenant listed %d of this Tenant's Memberships", len(elsewhere.Memberships))
+	}
+}
+
+// TestARevocationsResponseIsRecordedWithIt is the in-transaction completion through a real command
+// (TDD-organization-control-003 §The Response Is Recorded with the Effect). The revocation commits,
+// the process "dies" before replying, and a retry with the same key is answered with the response
+// the first attempt rendered rather than refused as in progress.
+func TestARevocationsResponseIsRecordedWithIt(t *testing.T) {
+	service, ctx, _ := newFixture(t)
+	granted := grantOne(t, service, ctx)
+
+	key, err := id.NewV7()
+	if err != nil {
+		t.Fatalf("NewV7: %v", err)
+	}
+	claim := db.Claim{Scope: "tenant:" + tenantA + ":" + key.String(), Key: key.String(),
+		Digest: db.Digest([]byte("POST"), []byte("/v1/memberships/x/revoke"))}
+	render := func(result any) (int, json.RawMessage, bool) {
+		revoked, ok := result.(Result)
+		if !ok {
+			return 0, nil, false
+		}
+		body, _ := json.Marshal(map[string]any{"membership_id": revoked.Membership.MembershipID.String(),
+			"status": string(revoked.Membership.Status), "version": revoked.Membership.Version})
+		return 200, body, true
+	}
+
+	first := db.WithResponder(db.WithClaim(ctx, claim), render)
+	revoked, err := service.Revoke(first, at(t, service, ctx, granted.Membership.MembershipID))
+	if err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if !db.ClaimCompleted(first) {
+		t.Fatal("the revocation did not record its response in its own transaction")
+	}
+
+	// The retry, after a crash that lost the reply: nothing else ran in between.
+	_, err = service.Revoke(db.WithClaim(ctx, claim), at(t, service, ctx, granted.Membership.MembershipID))
+	var replayed *db.Replayed
+	if !errors.As(err, &replayed) {
+		t.Fatalf("the retry returned %v, want the recorded response", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(replayed.Body, &body); err != nil {
+		t.Fatalf("the recorded body is not JSON: %v", err)
+	}
+	if replayed.Status != 200 || body["status"] != "revoked" ||
+		body["version"] != float64(revoked.Membership.Version) {
+		t.Errorf("the replay is %d %v, want 200 revoked at version %d", replayed.Status, body,
+			revoked.Membership.Version)
 	}
 }

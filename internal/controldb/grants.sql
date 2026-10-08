@@ -403,15 +403,21 @@ GRANT SELECT ON platform.dead_letter TO organization_provider_rt;
 -- platform.idempotency_key
 --
 -- organization_rt          -> claimWithin inside WithTenantScope -> SELECT, INSERT
---                          -> db.ClaimStore.Complete, on the tenant connections -> UPDATE
+--                          -> db.Respond inside WithTenantScope, and db.ClaimStore.Complete
+--                             on the tenant connections -> UPDATE
 -- organization_provider_rt -> claimWithin inside withProviderScope -> SELECT, INSERT
+--                          -> db.Respond inside withProviderScope -> UPDATE of the three
+--                             completion columns
 --
 -- Deny-by-default is not deny-everything. This is the table that proves it: the claim store
 -- runs on the tenant connections by design, so a rule of "no platform access for the request
 -- path" would refuse every idempotent request and every Membership mutation in one deploy. The
--- provider role claims and never completes, so it holds no UPDATE.
+-- provider role completes a claim only inside the transaction that made it (TDD-organization-
+-- control-003 §The Response Is Recorded with the Effect), so it may set the response and nothing
+-- else: not the scope, the key or the digest a claim is matched on.
 GRANT SELECT, INSERT, UPDATE ON platform.idempotency_key TO organization_rt;
 GRANT SELECT, INSERT         ON platform.idempotency_key TO organization_provider_rt;
+GRANT UPDATE (response_status, response_body, completed_at) ON platform.idempotency_key TO organization_provider_rt;
 
 -- platform.processed_event -- nothing, for either runtime role.
 --

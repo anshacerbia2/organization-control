@@ -149,10 +149,13 @@ func (s *Service) Begin(ctx context.Context, req BeginRequest) (Offboarding, err
 				return err
 			}
 
-			return s.publish(ctx, tx, "started", record.OffboardingID, StagePayload{
+			if err := s.publish(ctx, tx, "started", record.OffboardingID, StagePayload{
 				OffboardingID: record.OffboardingID, TenantID: record.TenantID,
 				Stage: StageFreeze, LegalHold: record.LegalHold,
-			}, record.StartedAt)
+			}, record.StartedAt); err != nil {
+				return err
+			}
+			return db.Respond(ctx, tx, record)
 		}); err != nil {
 		return Offboarding{}, err
 	}
@@ -572,13 +575,15 @@ func (s *Service) advance(ctx context.Context, offboardingID id.UUID, from Stage
 			record = loaded
 
 			name, publishes := stageEventName(next)
-			if !publishes {
-				return nil
+			if publishes {
+				if err := s.publish(ctx, tx, name, offboardingID, StagePayload{
+					OffboardingID: offboardingID, TenantID: loaded.TenantID,
+					Stage: next, LegalHold: loaded.LegalHold,
+				}, at); err != nil {
+					return err
+				}
 			}
-			return s.publish(ctx, tx, name, offboardingID, StagePayload{
-				OffboardingID: offboardingID, TenantID: loaded.TenantID,
-				Stage: next, LegalHold: loaded.LegalHold,
-			}, at)
+			return db.Respond(ctx, tx, record)
 		}); err != nil {
 		return Offboarding{}, err
 	}

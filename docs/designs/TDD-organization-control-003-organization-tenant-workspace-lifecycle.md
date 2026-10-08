@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.10.0
+  version: 1.11.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -504,6 +504,76 @@ a person's command:
 command in `command`; a test fails on a `POST` that is in neither. A key is refused on a `GET` or
 `HEAD`, as before, because a key spent on a read would answer the caller's later command.
 
+### The Response Is Recorded with the Effect
+
+(1.11.0.) The claim on a key has always committed with the effect it guards: `internal/db` makes it
+inside the scoped transaction the service opens, so a rolled-back command releases its key. The
+*response* was recorded afterwards, by the HTTP surface, in a transaction of its own, because the
+status and body did not exist until the handler rendered them. A process dying between the commit
+and that completion left a key claimed and uncompleted, and every later retry was refused as in
+progress. The command still ran exactly once; the caller could not learn what it returned.
+
+That broke the retry rule the IETF draft states: "The request was retried after the original request
+completed. The resource SHOULD respond with the result of the previously completed operation, success
+or an error" (draft-ietf-httpapi-idempotency-key-header-07 §2.6). Stripe's account of the same
+mechanism says what the key is for: "On a response failure (i.e. the operation executed successfully,
+but the client couldn't get the result), the server simply replies with a cached result of the
+successful operation" [STRIPE-IDEMPOTENCY]. Brandur Leach's write-up of Stripe-style keys in Postgres
+records the response in the transaction that completes the work, so the two cannot diverge: "When in
+an atomic phase, the transition to a new recovery point should be committed as part of that phase's
+transaction", and "we can use an ACID-compliant database like Postgres to guarantee that either all of
+them will occur, or none will" [BRANDUR-KEYS]. foundation-platform's `idempotency.Complete` is written
+for that use: it "stores a response for future replay in the transaction that completed the mutation".
+
+**The mechanism.** No service gained a second signature:
+
+1. The handler supplies a renderer (`httpapi.answer`): the status and the view function it would have
+   passed to `respond`.
+2. The service, as the last step of its transaction, hands the value it is about to return to
+   `db.Respond(ctx, tx, result)`.
+3. `db.Respond` acts only in the transaction that made the request's claim. It renders the result and
+   calls `idempotency.Complete` there, so the claim, the effect and the response commit together or
+   roll back together. A failure to record fails the transaction: the caller is told of a failure and
+   retries a command that did not happen, which is the safe direction.
+4. The handler writes the same rendered bytes, so what a retry replays is what the first caller was
+   sent. The surface completes nothing afterwards for such a request.
+
+`db.Respond` does nothing for a request without a key, a renderer for another type, or a transaction
+other than the claiming one. In those cases the surface completes the key after the handler writes,
+as before.
+
+**The commands that keep the earlier window**, because their effects commit in more than one
+transaction and no single transaction can hold the response to all of them:
+
+| Command | Why |
+| :-- | :-- |
+| `POST /v1/membership-batches/{batch_id}/execute` | Each item commits in its own transaction (ADR-ORG-004 §5.1). A batch left `executing` is resumed under the same key (`-002` §Resuming an execution), which is that route's own answer to the window |
+| `POST /v1/offboardings/{offboarding_id}/freeze` | The stage is read in one transaction and the batch frozen in another, on the tenant pool |
+| `POST /v1/offboardings/{offboarding_id}/cancel` | The Tenant's return commits first and each Membership restore after it (ADR-ORG-006 §5.2). Sending the cancellation again finishes it |
+| `POST /v1/projections/consumers/{consumer_id}/retire` | `204` with no body: there is nothing to record, before or after |
+
+The key-optional routes of the previous section also complete afterwards.
+`TestEveryCommandRecordsItsResponseWithItsEffect` reads `routes.go` and fails on a command route that
+neither uses `answer` nor is named in that table with its reason.
+
+**Privilege.** The provider role, which claimed and never completed, gains `UPDATE` on the three
+completion columns of `platform.idempotency_key` (`response_status`, `response_body`, `completed_at`)
+and nothing else: it cannot rewrite the scope, key or digest a claim is matched on. grantcheck derives
+the grant from the code.
+
+**Tests.** `TestAResponseRecordedWithTheEffectSurvivesACrashBeforeTheReply` commits a claimed effect
+with its response, runs nothing after the commit, and shows the retry replayed without running the
+body; the same sequence without `db.Respond` is `TestASecondUseOfAnUncompletedKeyIsRefused`. A failure
+after `db.Respond` rolls the response back with the effect, and `db.Respond` in a transaction that did
+not make the claim records nothing. A Membership revocation (tenant role) and a Tenant suspension
+(provider role) are replayed the same way through their services.
+
+[STRIPE-IDEMPOTENCY]: Brandur Leach, "Designing robust and predictable APIs with idempotency", Stripe
+blog, https://stripe.com/blog/idempotency
+
+[BRANDUR-KEYS]: Brandur Leach, "Implementing Stripe-like Idempotency Keys in Postgres",
+https://brandur.org/idempotency-keys
+
 ### Every Tenant transition is provider-scoped
 
 `TenantService` binds to the provider pool, not the tenant-scoped one, and this is forced
@@ -836,3 +906,4 @@ resolution, and Tenant activation refused.
 | Consumed by | `TDD-organization-experience-002` §Tenant States Are Rendered Individually — `provisioning` on the Tenant read (1.8.0) |
 | Governed by | ADR-ORG-006 §5.2 — a cancelled offboarding returns the Tenant to its prior status (1.9.0) |
 | Conforms to | draft-ietf-httpapi-idempotency-key-header-07 §2.7 — a missing key on an operation requiring it is `400` (1.10.0) |
+| Conforms to | draft-ietf-httpapi-idempotency-key-header-07 §2.6 — a retry after completion answers the first result; recorded with the effect (1.11.0) |

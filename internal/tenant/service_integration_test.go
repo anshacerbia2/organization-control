@@ -9,6 +9,7 @@ package tenant
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -835,5 +836,49 @@ func TestTheSingleReadCarriesTheLatestProvisioningRequest(t *testing.T) {
 	if got := detail.Provisioning; got == nil || got.RequestID != pending || got.State != RequestRequested ||
 		got.Detail != nil || got.ResolvedAt != nil {
 		t.Errorf("a pending request reads %+v; want %s, requested, no detail, not resolved", got, pending)
+	}
+}
+
+// TestASuspensionsResponseIsRecordedWithItAsTheProviderRole runs the in-transaction completion on
+// the provider connections, as organization_provider_app. It is the evidence that the provider role's
+// column-level UPDATE on platform.idempotency_key is enough and that nothing else is needed: a
+// suspension commits with its response, and the retry replays it.
+func TestASuspensionsResponseIsRecordedWithItAsTheProviderRole(t *testing.T) {
+	f := newFixture(t)
+	seeded := f.seed(t, StateActive, "active")
+
+	key, err := id.NewV7()
+	if err != nil {
+		t.Fatalf("NewV7: %v", err)
+	}
+	claim := db.Claim{Scope: "provider:" + f.actor.String(), Key: key.String(),
+		Digest: db.Digest([]byte("POST"), []byte("/v1/tenants/x/suspend"))}
+	t.Cleanup(func() {
+		f.exec(t, `DELETE FROM platform.idempotency_key WHERE scope = $1 AND key = $2`, claim.Scope, claim.Key)
+	})
+	render := func(result any) (int, json.RawMessage, bool) {
+		suspended, ok := result.(Result)
+		if !ok {
+			return 0, nil, false
+		}
+		body, _ := json.Marshal(map[string]any{"status": string(suspended.Tenant.Status)})
+		return 200, body, true
+	}
+
+	first := db.WithResponder(db.WithClaim(f.ctx, claim), render)
+	if _, err := f.service.Suspend(first, command(seeded.TenantID, 1)); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if !db.ClaimCompleted(first) {
+		t.Fatal("the suspension did not record its response in its own transaction")
+	}
+
+	_, err = f.service.Suspend(db.WithClaim(f.ctx, claim), command(seeded.TenantID, 1))
+	var replayed *db.Replayed
+	if !errors.As(err, &replayed) {
+		t.Fatalf("the retry returned %v, want the recorded response", err)
+	}
+	if replayed.Status != 200 || !strings.Contains(string(replayed.Body), `"suspended"`) {
+		t.Errorf("the replay is %d %s, want 200 suspended", replayed.Status, replayed.Body)
 	}
 }

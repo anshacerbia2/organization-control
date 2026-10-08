@@ -298,7 +298,8 @@ func WithTenantScope(ctx context.Context, pool *TenantPool, fn Body) error {
 		// The idempotency claim, if the request carries one. Inside this transaction so it commits
 		// with whatever fn does and is released if fn fails; before fn so a replay costs one SELECT
 		// and repeats none of the work. A request carrying no claim returns from here immediately.
-		if err := claimWithin(ctx, tx); err != nil {
+		ctx, err := claimWithin(ctx, tx)
+		if err != nil {
 			return err
 		}
 		return fn(ctx, tx)
@@ -459,7 +460,8 @@ func WithProviderInTenant(ctx context.Context, provider *ProviderPool, tenants *
 		if err := bindTenant(ctx, tx, acting); err != nil {
 			return err
 		}
-		if err := claimWithin(ctx, tx); err != nil {
+		ctx, err := claimWithin(ctx, tx)
+		if err != nil {
 			return err
 		}
 		return fn(ctx, tx)
@@ -651,9 +653,11 @@ func withRecordedScope(ctx context.Context, tx Transactor, recorder PrivilegedRe
 		// would fail — and it should not be attempted anyway: a snapshot mutates nothing, so there
 		// is no effect for a key to guard and nothing a retry could duplicate.
 		if !snapshot {
-			if err := claimWithin(ctx, tx); err != nil {
+			claimed, err := claimWithin(ctx, tx)
+			if err != nil {
 				return err
 			}
+			ctx = claimed
 		}
 		return fn(ctx, tx)
 	})

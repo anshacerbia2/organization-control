@@ -155,7 +155,10 @@ func (s *Service) Issue(ctx context.Context, req IssueRequest) (Issued, error) {
 			record.ExpiresAt).Scan(&record.CreatedAt); err != nil {
 			return fmt.Errorf("invitation: insert: %w", err)
 		}
-		return s.publish(ctx, tx, requestedEventType, record, at)
+		if err := s.publish(ctx, tx, requestedEventType, record, at); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, Issued{Invitation: record, Token: token})
 	}); err != nil {
 		return Issued{}, err
 	}
@@ -298,7 +301,7 @@ func (s *Service) RecordVerifiedIdentity(ctx context.Context, fact VerifiedIdent
 			principal := fact.PrincipalID
 			loaded.PrincipalID = &principal
 			record = loaded
-			return nil
+			return db.Respond(ctx, tx, record)
 		}); err != nil {
 		return Invitation{}, err
 	}
@@ -318,6 +321,13 @@ WHERE principal_id = $1
   AND coalesce(workspace_id, tenant_id) = coalesce($3::uuid, tenant_id)
   AND subject_type = $4
   AND status = 'active'`
+
+// Acceptance is what Accept returns, as one value: the HTTP surface renders it, and Accept hands it
+// to db.Respond so the response is recorded with the effect.
+type Acceptance struct {
+	Invitation Invitation
+	Membership membership.Result
+}
 
 // Accept completes the join and creates the Membership.
 //
@@ -415,7 +425,10 @@ func (s *Service) Accept(ctx context.Context, token Token) (Invitation, membersh
 		result = granted
 		record = loaded
 
-		return s.publishAction(ctx, tx, ActionAccept, loaded, at)
+		if err := s.publishAction(ctx, tx, ActionAccept, loaded, at); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, Acceptance{Invitation: record, Membership: result})
 	}); err != nil {
 		return Invitation{}, membership.Result{}, err
 	}
@@ -454,7 +467,10 @@ func (s *Service) Revoke(ctx context.Context, invitationID id.UUID) (Invitation,
 		revoked := at
 		loaded.RevokedAt = &revoked
 		record = loaded
-		return s.publishAction(ctx, tx, ActionRevoke, loaded, at)
+		if err := s.publishAction(ctx, tx, ActionRevoke, loaded, at); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, record)
 	}); err != nil {
 		return Invitation{}, err
 	}

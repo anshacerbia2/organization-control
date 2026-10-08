@@ -312,8 +312,10 @@ func (a *Activations) Request(ctx context.Context, grantID id.UUID, duration tim
 				return err
 			}
 		}
-		activation, err = readActivation(ctx, tx, activationID)
-		return err
+		if activation, err = readActivation(ctx, tx, activationID); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, activation)
 	})
 	if err != nil {
 		return Activation{}, activationError("request a provider activation", err)
@@ -370,8 +372,10 @@ func (a *Activations) Decide(ctx context.Context, activationID id.UUID, decision
 				return err
 			}
 		}
-		activation, err = readActivation(ctx, tx, activationID)
-		return err
+		if activation, err = readActivation(ctx, tx, activationID); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, activation)
 	})
 	if err != nil {
 		return Activation{}, activationError("decide a provider activation", err)
@@ -413,8 +417,10 @@ func (a *Activations) End(ctx context.Context, activationID id.UUID, providerInF
 		if err := publish(ctx, tx, current.Grant, EventEnded); err != nil {
 			return err
 		}
-		activation, err = readActivation(ctx, tx, activationID)
-		return err
+		if activation, err = readActivation(ctx, tx, activationID); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, activation)
 	})
 	if err != nil {
 		return Activation{}, activationError("end a provider activation", err)

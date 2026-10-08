@@ -100,15 +100,25 @@ VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8)`
 // grant a Membership in a Tenant it is not administering — and the RLS `WITH CHECK` refuses the
 // row as a second line of defence if this check is ever removed.
 func (s *Service) Grant(ctx context.Context, req GrantRequest) (Result, error) {
-	if _, ok := db.ScopeFrom(ctx); !ok {
+	scope, ok := db.ScopeFrom(ctx)
+	if !ok {
 		return Result{}, db.ErrNoScope
+	}
+	// Refused before a transaction opens: a malformed request needs no connection, no binding and
+	// no claim to be told so. GrantWithin checks again, for the caller composing it into its own
+	// transaction.
+	if err := validateGrant(req, scope.TenantID()); err != nil {
+		return Result{}, err
 	}
 
 	var result Result
 	if err := db.WithTenantScope(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
 		var err error
-		result, err = s.GrantWithin(ctx, tx, req)
-		return err
+		if result, err = s.GrantWithin(ctx, tx, req); err != nil {
+			return err
+		}
+		// The response, recorded with the effect when the request carries an Idempotency-Key.
+		return db.Respond(ctx, tx, result)
 	}); err != nil {
 		return Result{}, err
 	}
@@ -273,8 +283,10 @@ func (s *Service) transition(ctx context.Context, action Action, cmd Command) (R
 	var result Result
 	if err := db.WithTenantScope(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
 		var err error
-		result, err = s.TransitionWithin(ctx, tx, action, cmd)
-		return err
+		if result, err = s.TransitionWithin(ctx, tx, action, cmd); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, result)
 	}); err != nil {
 		return Result{}, err
 	}

@@ -6,6 +6,7 @@ package httpapi
 
 import (
 	"bytes"
+	stdcontext "context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -48,12 +49,9 @@ func (h *handlers) previewMembershipBatch(w http.ResponseWriter, r *http.Request
 	if body.Continues != nil {
 		req.Continues = *body.Continues
 	}
-	batch, err := h.services.Memberships.PreviewBatch(r.Context(), req, classifierFor(r))
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusCreated, viewBatch(batch))
+	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (membership.Batch, error) {
+		return h.services.Memberships.PreviewBatch(ctx, req, classifierFor(r))
+	}, viewBatch)
 }
 
 type executeBatchRequest struct {

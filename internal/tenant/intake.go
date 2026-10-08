@@ -270,7 +270,15 @@ func (s *Service) Request(ctx context.Context, req RequestTenant) (Requested, er
 				return fmt.Errorf("tenant: record desired provisioning state: %w", err)
 			}
 
-			return s.publishRequested(ctx, tx, record, requestID, scope.Correlation(), acceptedAt)
+			if err := s.publishRequested(ctx, tx, record, requestID, scope.Correlation(), acceptedAt); err != nil {
+				return err
+			}
+			return db.Respond(ctx, tx, Requested{
+				Tenant:        record,
+				RequestID:     requestID,
+				CorrelationID: scope.Correlation(),
+				AcceptedAt:    acceptedAt,
+			})
 		}); err != nil {
 		return Requested{}, err
 	}
