@@ -277,30 +277,51 @@ The Control Database lives only in the Docker volume `scnehaux-organization-cont
 projection is built from (§Never do).
 
 Back it up daily to storage outside the volume; on the development server that is
-`/mnt/imam-storage`. In the same crontab, after `mkdir -p /mnt/imam-storage/backups/organization-control`
-once:
+`/mnt/imam-storage`. `./backup.sh <directory>` writes two files: `globals-<date>.sql`, the cluster's
+roles from `pg_dumpall --globals-only`, and `organization_control-<date>.dump`, the database from
+`pg_dump --format=custom`. A database dump holds no roles, and the roles must exist before the
+objects they own or are granted are restored. Both files hold role password hashes, so the script
+makes them readable by their owner alone. It runs `pg_dump` inside the `postgres` container over its
+local socket, which the image trusts, so no password is typed or stored. In the operator's crontab:
 
 ```text
-30 2 * * * cd /home/development/apps/organization-control/deploy/dev && docker compose exec -T postgres pg_dump -U postgres -Fc organization_control > /mnt/imam-storage/backups/organization-control/organization_control-$(date +\%F).dump
+30 2 * * * /home/development/apps/organization-control/deploy/dev/backup.sh /mnt/imam-storage/backups/organization-control >/dev/null
 ```
 
-`pg_dump` runs inside the `postgres` container over its local socket, which the image trusts, so no
-password is typed or stored: the database's own passwords stay in `.env`, read by Compose at run time.
 Copy `.env` and `keys/` alongside when they change; without them a restored database has no
 credentials to match and the service no workload key.
 
-To restore into an empty volume:
+To restore into an empty volume, put `.env` and `keys/` back first, then:
 
 ```sh
-docker compose up -d postgres
-docker compose run --rm migrate          # roles, schemas, privileges, login roles from .env
-docker compose exec -T postgres pg_restore -U postgres -d organization_control --clean --if-exists < <dump>
-docker compose up -d
+./restore.sh /mnt/imam-storage/backups/organization-control/globals-<date>.sql \
+             /mnt/imam-storage/backups/organization-control/organization_control-<date>.dump
+docker compose up -d --build
 curl -fsS http://127.0.0.1:8083/readyz
 ```
 
-The cluster roles are not in a database dump; `migrate` makes them from `roles.sql` and `.env`, which is
-why it runs first.
+`restore.sh` starts `postgres` alone and refuses a cluster that already holds
+`organization_control`: replacing a live database is a decision, made by deleting the volume, never a
+side effect. It applies the roles, allowing only the bootstrap superuser's harmless "role already
+exists", then restores the database whole with `pg_restore --create --exit-on-error`, which stops at
+the first error. The migrate job that `up` runs then applies anything newer and asserts RLS, the
+privileges and the five login roles' passwords from `.env` again.
+
+Until 2026-10-08 this section ran `migrate` first, for the roles, and then `pg_restore --clean` over
+the schema it had built. That suits only a dump of the same release: a dump of an older one would
+restore older migration history over tables the newer migrate job had made, and the next migration
+would fail.
+
+**What is proven, and what is not.** `deploy-dev` runs both scripts on every change and daily, as
+the restore drill `scripts/dev-restore-drill.sh` (STD-GLB-002 §Restore Evidence): it begins an
+offboarding, backs the wired stack up, deletes its volume, restores, and compares schema, migration
+version, every table, sequence and role with the source. The outbox, its deliveries, the receipts
+and the consumer registry must be among the non-empty tables. It then starts the service, reads the
+provider grants, Organizations and offboardings through the API, and times the recovery against the
+15-minute RTO. The evidence is the job's `restore-evidence` artifact. A daily dump loses up to 24
+hours, against the 1-minute RPO of `PAD-PLT-002 §6.2`, and a restore to an older point is not
+reconciled yet (SAD-004 §6.6). The runbook is
+[`docs/runbooks/organization-database-restore.md`](../../docs/runbooks/organization-database-restore.md).
 
 ## Never do
 

@@ -525,8 +525,25 @@ events (measured on every `deploy-dev` run from 2026-10-07; the first run read a
 from acceptance to identity-control's applied receipt, against 10 s; backlog item 18), `SUPERSEDED`
 resolution built (backlog item 1, done), and runbooks written for revocation not enforced within
 budget, projection drift repair, provider-access review, stuck offboarding, and dead-letter
-resolution (written 2026-10-07, `docs/runbooks/`, backlog item 39). No restore evidence for the
-Organization Database is recorded here yet.
+resolution (written 2026-10-07, `docs/runbooks/`, backlog item 39).
+
+Restore evidence for the Organization Database (2026-10-08, TDD-organization-control-001 1.20.0
+§Restore Evidence, STD-GLB-002 §Restore Evidence): `deploy-dev`'s last step,
+`scripts/dev-restore-drill.sh`, runs on every change and daily. It begins an offboarding, backs the
+wired stack up with `deploy/dev/backup.sh`, deletes its volume, and restores with
+`deploy/dev/restore.sh` (roles, then `pg_restore --create --exit-on-error`). It requires the schema
+with owners, grants and RLS policies, the migration version, every table's rows and checksum, every
+sequence and the roles to equal the source's. The outbox, its per-consumer delivery, the delivery
+receipts, the subscriptions and the consumer registry with its marks must be non-empty. The restarted
+service must answer the provider grants, Organizations and offboardings identically, and the recovery
+must finish inside the 15-minute RTO. The record is the job's `restore-evidence` artifact. Two gaps
+stay recorded, not claimed:
+
+- **RPO.** A daily `pg_dump` loses up to 24 hours, against PAD-PLT-002's 1 minute, which needs WAL
+  archiving with point-in-time recovery on the production platform.
+- **A restore to an older point** is not reconciled: the security-version reconciliation SAD-004
+  §6.6 requires is not built. `docs/runbooks/organization-database-restore.md` says what an operator
+  does meanwhile.
 
 ## Debt, named rather than implied
 
