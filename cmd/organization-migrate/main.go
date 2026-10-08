@@ -54,6 +54,7 @@ import (
 
 	"github.com/anshacerbia2/organization-control/internal/authority"
 	"github.com/anshacerbia2/organization-control/internal/controldb"
+	"github.com/anshacerbia2/organization-control/internal/posture"
 	"github.com/anshacerbia2/organization-control/internal/projection"
 )
 
@@ -173,7 +174,7 @@ func verifyClosable(ctx context.Context, pool *db.Pool, logger *slog.Logger) err
 // Asserted here rather than only in CI because CI asserts a throwaway database. This runs against
 // the database the deploy just changed.
 func verifyIsolation(ctx context.Context, pool *db.Pool, logger *slog.Logger) error {
-	report, err := controldb.AssertIsolation(ctx, pool)
+	report, err := posture.AssertIsolation(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("verify tenant isolation: %w", err)
 	}
@@ -185,7 +186,7 @@ func verifyIsolation(ctx context.Context, pool *db.Pool, logger *slog.Logger) er
 	}
 	logger.Info("tenant isolation verified",
 		slog.Int("protected_tables", len(report.Tables)),
-		slog.Any("schemas", controldb.RLSSchemas))
+		slog.Any("schemas", posture.RLSSchemas))
 	return nil
 }
 

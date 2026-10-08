@@ -101,6 +101,10 @@ var boundaries = map[string][]string{
 	// the reader the provider connections.
 	"(*" + module + "/internal/authority.Reader).RecordEmergencyUse":  {providerRole},
 	"(*" + module + "/internal/authority.Reader).EmergencyValidation": {providerRole},
+	// posture.Startup(ctx, tenantConns, ...) and posture.NewProbe(tenantConns): the isolation posture,
+	// read from the catalog at startup and behind readiness. Catalog reads only; planned as the
+	// tenant role so a catalog the role could not read would fail here.
+	module + "/internal/posture.AssertIsolation": {tenantRole},
 	// authority.NewGrants(conns) in cmd/organization-control/bootstrap.go, on
 	// ORGANIZATION_PROVIDER_DATABASE_URL: the bootstrap that makes the first provider grant.
 	"(*" + module + "/internal/authority.Grants).Bootstrap": {providerRole},

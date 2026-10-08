@@ -26,8 +26,21 @@
       "maintenance stage logs (ADR-ORG-002 §5.2): the same statement the provider route reads, so",
       "the schedule and the route cannot disagree about which grant is overdue."
     ],
-    "cmd/organization-migrate": ["internal/authority", "internal/controldb", "internal/projection"],
-    "internal/controldb": [],
+    "cmd/organization-migrate": ["internal/authority", "internal/controldb", "internal/posture", "internal/projection"],
+
+    "_comment_controldb": [
+      "internal/controldb reaches internal/posture from its tests only: the stage SQL and the posture",
+      "check must name the same tenant-scoped schemas, and the test asserting that lives with the SQL."
+    ],
+    "internal/controldb": ["internal/posture"],
+
+    "_comment_posture": [
+      "internal/posture reads the isolation posture from the catalog and changes nothing. It is its own",
+      "package so the serving process can verify its isolation at startup and behind readiness without",
+      "importing internal/controldb, whose stage SQL and maintenance steps belong to the migrate",
+      "deployable."
+    ],
+    "internal/posture": [],
 
     "_comment_db": [
       "internal/db is the only package permitted to bind a transaction's isolation scope, per",
@@ -172,7 +185,8 @@
       "cmd/organization-control is the composition root: the only place the pools, the recorder,",
       "and the ten services are constructed, and the only place net/http is used to serve. It",
       "reaches internal/db because it builds both pools, and it reaches every service because it",
-      "hands them to internal/httpapi.Routes."
+      "hands them to internal/httpapi.Routes. It reaches internal/posture to verify the isolation",
+      "posture at startup and behind readiness."
     ],
     "cmd/organization-control": [
       "internal/access",
@@ -186,6 +200,7 @@
       "internal/membership",
       "internal/offboarding",
       "internal/organization",
+      "internal/posture",
       "internal/projection",
       "internal/telemetry",
       "internal/tenant",

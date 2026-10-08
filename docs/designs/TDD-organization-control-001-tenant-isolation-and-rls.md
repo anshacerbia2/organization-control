@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.18.0
+  version: 1.19.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -79,15 +79,16 @@ the authoritative control. Both layers are required; neither substitutes.
 | Package | Responsibility |
 | :-- | :-- |
 | `internal/db` | The only package permitted to bind a transaction's isolation scope. Holds `TenantPool`, `ProviderPool`, and the three entry points below |
-| `internal/controldb` | The SQL this design applies — roles, policies, grants — and `AssertIsolation`, which reads the catalog back and refuses a database whose posture has drifted |
+| `internal/controldb` | The SQL this design applies — roles, policies, grants — and the maintenance steps; the migrate deployable's alone |
+| `internal/posture` | `AssertIsolation`, which reads the catalog back and refuses a database whose posture has drifted, and the readiness `Probe` built on it (1.19.0). A package of its own so the serving process can import it without importing the stage SQL |
 | `internal/system` | One constant: the CloudEvents source naming this system in every envelope it publishes |
 
-These three carry no domain authority and appear in no other design's component table, which is
+These four carry no domain authority and appear in no other design's component table, which is
 why they are listed here rather than left implicit. A reader who found `TenantPool` in a service
 signature and no design that mentions it would have to infer the isolation model from the code
 that depends on it.
 
-`internal/system` sits here for a different reason than the other two: it is the published
+`internal/system` sits here for a different reason than the other three: it is the published
 identity of this service, shared by every package that appends to the outbox, and a constant
 declared in each of them would be the same string written six times — whose failure mode is not a
 compile error but two sources appearing in a consumer's stream for one system.
@@ -1015,12 +1016,46 @@ WHERE  rolname IN ('organization_rt','organization_provider_rt','organization_co
 The assertion fails when any table in those schemas has `relrowsecurity = false` or
 `relforcerowsecurity = false`, when a runtime role owns a table, when one holds
 `SUPERUSER` or `BYPASSRLS`, or when one holds a DDL privilege. A policy beyond the tenant
-and provider pair must be declared by name in `controldb.AdditionalPolicies`: the
+and provider pair must be declared by name in `posture.AdditionalPolicies`: the
 resolver's reads of the two history tables, and the consumer's reads of
 `membership.membership` and `tenant.tenant`.
 
 Grants and policies drift through migrations. Asserting them on every build is what
 keeps the boundary real after the engineer who wrote it has moved on.
+
+### Verifying the Posture at Runtime
+
+(1.19.0.) The build asserts a throwaway database, and `organization-migrate -stage=post`
+asserts the database a deploy just changed. Neither sees the time between deploys, when a
+superuser action during an incident could drop `FORCE` from one table and leave the catalog
+reporting row-level security as enabled. The serving process therefore checks the posture
+itself, with the same `posture.AssertIsolation`:
+
+- **At startup**, on the tenant connections, as `organization_rt`, before the port is bound.
+  A problem is logged one line per problem and the process exits. EAD-006 §8 requires a
+  security-control failure to fail closed, and an unprotected table is that failure.
+- **Behind `GET /readyz`**, on every probe: the database is reachable and the posture is
+  intact. A failure answers `503` and takes the replica out of the load balancer without
+  restarting it. Kubernetes states the mechanism: "If the readiness probe returns a failed
+  state, the EndpointSlice controller removes the Pod's IP address from the EndpointSlices of
+  all Services that match the Pod" [K8S-PROBES]. A restart cannot repair a dropped policy, so
+  `GET /healthz` still touches no dependency; the same page recommends that "the readiness
+  probe additionally checks that each required back-end service is available" while
+  liveness checks the application itself [K8S-PROBES].
+
+The probe reads the catalog on every call rather than caching a pass: the read is two catalog
+queries, and a cached pass would keep a replica serving for the cache's lifetime after the
+posture broke. The runtime role can run the check because `pg_class`, `pg_policy`,
+`pg_attribute`, `pg_namespace`, `pg_roles` and `pg_tables` are readable by `PUBLIC`;
+`TestTheRuntimeRoleSeesTheWholePosture` asserts it sees every protected table the owner sees,
+so the check is not vacuous. `tools/grantcheck` declares `posture.AssertIsolation` a boundary
+on `organization_rt` and plans its statements as that role.
+
+The check reads and never repairs. Repair belongs to the migration job, which holds DDL; a
+process that could fix its own isolation could also change it.
+
+[K8S-PROBES]: Kubernetes documentation, "Liveness, Readiness, and Startup Probes",
+https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/
 
 ### Grant Derivation
 
@@ -1315,6 +1350,9 @@ administrative connection is explicitly not accepted as evidence.
   so a new route is covered without being listed. With the authority check removed, the test
   reports provider routes answering `400` or `500` instead: the consumer got past authority.
 - Disabling RLS on any protected table fails the build.
+- With `FORCE` removed from one table, the readiness probe and the startup check fail and name
+  the table, as `organization_app`; restored, the probe passes again
+  (`TestReadinessAndStartupRefuseAWeakenedDatabase`, 1.19.0).
 
 ## Security Notes
 
@@ -1356,6 +1394,7 @@ pool is held small, so the combined ceiling stays close to the single-pool figur
 | Provider-scoped transactions per hour | above the operational baseline | — |
 | Provider transaction without a recorded reason | — | any occurrence |
 | RLS assertion failure in CI | — | any occurrence |
+| Readiness failing on the isolation posture, or a start refused on it (1.19.0) | — | any occurrence |
 
 A `WITH CHECK` rejection means application code attempted to write a row into a Tenant
 it was not bound to. That is a defect or an attack, and it is treated as a security
@@ -1363,6 +1402,7 @@ finding rather than a validation error.
 
 Runbooks required before production: unset-binding investigation, `WITH CHECK`
 rejection triage, provider-access review, and suspected cross-tenant exposure.
+Written: `docs/runbooks/provider-access-review.md`. The other three are not written yet.
 
 ## Traceability
 

@@ -1,4 +1,4 @@
-package controldb_test
+package posture_test
 
 // AssertIsolation is production code, so it is tested for what it detects rather than only for
 // agreeing that a healthy database is healthy.
@@ -13,24 +13,60 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
 
-	"github.com/anshacerbia2/organization-control/internal/controldb"
+	"github.com/anshacerbia2/organization-control/internal/posture"
 )
 
 // adminPool authenticates as the administrative role, because these cases change the schema.
-// The isolation assertions in rls_integration_test.go connect as the runtime roles instead —
-// that distinction is the point of that file and is not what this one tests.
 func adminPool(t *testing.T) (*db.Pool, context.Context) {
 	t.Helper()
-	return openAdmin(t)
+	return open(t, os.Getenv("TEST_DATABASE_URL"), "posture-test-admin")
+}
+
+// runtimePool authenticates as organization_app, the tenant login role the serving process uses,
+// which is the role the startup check and the readiness probe run as.
+func runtimePool(t *testing.T) (*db.Pool, context.Context) {
+	t.Helper()
+	base := os.Getenv("TEST_DATABASE_URL")
+	if base == "" {
+		return open(t, "", "")
+	}
+	rest := base
+	if index := strings.Index(base, "://"); index >= 0 {
+		rest = base[index+3:]
+	}
+	if at := strings.Index(rest, "@"); at >= 0 {
+		rest = rest[at+1:]
+	}
+	return open(t, fmt.Sprintf("postgres://organization_app:%s@%s", os.Getenv("TEST_RUNTIME_PASSWORD"), rest),
+		"posture-test-runtime")
+}
+
+func open(t *testing.T, dsn, name string) (*db.Pool, context.Context) {
+	t.Helper()
+	if dsn == "" {
+		if os.Getenv("REQUIRE_INTEGRATION") != "" {
+			t.Fatal("REQUIRE_INTEGRATION is set and TEST_DATABASE_URL is empty: the database this suite asserts against never came up")
+		}
+		t.Skip("TEST_DATABASE_URL is unset; set it to run isolation assertions against a real server")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	pool, err := db.Open(ctx, db.Config{Name: name, DSN: dsn, MaxConns: 2})
+	if err != nil {
+		t.Fatalf("open %s: %v", name, err)
+	}
+	t.Cleanup(pool.Close)
+	return pool, ctx
 }
 
 func TestAssertIsolationAcceptsAnIntactDatabase(t *testing.T) {
 	pool, ctx := adminPool(t)
 
-	report, err := controldb.AssertIsolation(ctx, pool)
+	report, err := posture.AssertIsolation(ctx, pool)
 	if err != nil {
 		t.Fatalf("AssertIsolation: %v", err)
 	}
@@ -45,7 +81,7 @@ func TestAssertIsolationAcceptsAnIntactDatabase(t *testing.T) {
 		t.Errorf("report covers %d tables, want 13", len(report.Tables))
 	}
 	for _, table := range report.Tables {
-		want := 2 + len(controldb.AdditionalPolicies[table.Qualified()])
+		want := 2 + len(posture.AdditionalPolicies[table.Qualified()])
 		if !table.Enabled || !table.Forced || table.Policies != want {
 			t.Errorf("%s: enabled=%v forced=%v policies=%d", table.Qualified(), table.Enabled, table.Forced, table.Policies)
 		}
@@ -130,7 +166,7 @@ func TestAssertIsolationDetectsEachWeakening(t *testing.T) {
 			// reason.
 			t.Cleanup(func() { exec(t, ctx, pool, tc.restore) })
 
-			report, err := controldb.AssertIsolation(ctx, pool)
+			report, err := posture.AssertIsolation(ctx, pool)
 			if err != nil {
 				t.Fatalf("AssertIsolation: %v", err)
 			}
@@ -151,7 +187,7 @@ func TestAssertIsolationDetectsEachWeakening(t *testing.T) {
 	// Everything restored. Asserted explicitly, because a leaked weakening would make the next
 	// package's tests fail somewhere unrelated.
 	pool, ctx := adminPool(t)
-	report, err := controldb.AssertIsolation(ctx, pool)
+	report, err := posture.AssertIsolation(ctx, pool)
 	if err != nil {
 		t.Fatalf("AssertIsolation: %v", err)
 	}
@@ -201,61 +237,78 @@ func containsSubstring(values []string, want string) bool {
 	return false
 }
 
-// TestRLSSchemasMatchesTheGrantedSet keeps the Go constant and the SQL from drifting apart.
-//
-// AssertIsolation reads RLSSchemas and rls.sql hardcodes the same list. Two copies of a set is
-// two chances to add a schema to one of them: a schema added to rls.sql and not here would be
-// protected and unverified, and the reverse would fail every deploy for a schema with no tables.
-func TestRLSSchemasMatchesTheGrantedSet(t *testing.T) {
-	statements, err := controldb.SQL(controldb.StageRLS)
+// TestTheRuntimeRoleSeesTheWholePosture is what makes the startup check and the readiness probe
+// evidence. They run as organization_app, and a role that could not read the catalog rows of tables
+// it holds no privilege on would see a smaller posture than exists -- possibly an intact one.
+func TestTheRuntimeRoleSeesTheWholePosture(t *testing.T) {
+	pool, ctx := runtimePool(t)
+
+	report, err := posture.AssertIsolation(ctx, pool)
 	if err != nil {
-		t.Fatalf("SQL: %v", err)
+		t.Fatalf("AssertIsolation as the runtime role: %v", err)
 	}
-	for _, schema := range controldb.RLSSchemas {
-		if !strings.Contains(statements, "'"+schema+"'") {
-			t.Errorf("rls.sql does not mention schema %q, which AssertIsolation verifies", schema)
-		}
+	if !report.OK() {
+		t.Fatalf("the runtime role reports problems on an intact database: %v", report.Problems)
 	}
-	// The two schemas deliberately outside the set. Their absence is a decision
-	// TDD-organization-control-001 states, so it is asserted rather than left to a reader
-	// noticing they are missing.
-	for _, outside := range []string{"organization", "projection"} {
-		for _, inside := range controldb.RLSSchemas {
-			if inside == outside {
-				t.Errorf("%q is in RLSSchemas; it is deliberately not tenant-scoped", outside)
-			}
-		}
+	admin, adminCtx := adminPool(t)
+	owner, err := posture.AssertIsolation(adminCtx, admin)
+	if err != nil {
+		t.Fatalf("AssertIsolation as the owner: %v", err)
 	}
-}
-
-func TestSQLRejectsAnUnknownStage(t *testing.T) {
-	if _, err := controldb.SQL(controldb.Stage("nonexistent.sql")); err == nil {
-		t.Fatal("SQL accepted a stage that is not embedded")
+	if len(report.Tables) != len(owner.Tables) {
+		t.Fatalf("the runtime role sees %d protected tables and the owner %d", len(report.Tables), len(owner.Tables))
 	}
-	for _, stage := range append([]controldb.Stage{controldb.StageRoles}, controldb.PostStages...) {
-		body, err := controldb.SQL(stage)
-		if err != nil {
-			t.Errorf("SQL(%s): %v", stage, err)
-		}
-		if strings.TrimSpace(body) == "" {
-			t.Errorf("SQL(%s) is empty", stage)
+	for i, table := range report.Tables {
+		if table.Policies != owner.Tables[i].Policies || table.Forced != owner.Tables[i].Forced {
+			t.Errorf("%s: the runtime role sees policies=%d forced=%v, the owner policies=%d forced=%v",
+				table.Qualified(), table.Policies, table.Forced, owner.Tables[i].Policies, owner.Tables[i].Forced)
 		}
 	}
 }
 
-func TestPostStagesRunRLSBeforeGrants(t *testing.T) {
-	// Both orders work, and this one means a window where privileges exist without policies
-	// never opens: if the run fails between them, the runtime roles cannot reach the tables yet.
-	if len(controldb.PostStages) != 2 {
-		t.Fatalf("PostStages has %d entries, want 2", len(controldb.PostStages))
+// TestReadinessAndStartupRefuseAWeakenedDatabase drops FORCE from one table while the service's
+// own role watches. The probe passes before, fails during and passes after; the startup check
+// refuses during. Without this, the two calls in cmd/organization-control could be removed or
+// pointed at a check that always passes, and every other test would stay green.
+func TestReadinessAndStartupRefuseAWeakenedDatabase(t *testing.T) {
+	pool, ctx := runtimePool(t)
+	probe, err := posture.NewProbe(pool)
+	if err != nil {
+		t.Fatalf("NewProbe: %v", err)
 	}
-	if controldb.PostStages[0] != controldb.StageRLS || controldb.PostStages[1] != controldb.StageGrants {
-		t.Errorf("PostStages = %v, want [rls.sql grants.sql]", controldb.PostStages)
+	if err := probe.Ping(ctx); err != nil {
+		t.Fatalf("the probe fails on an intact database: %v", err)
+	}
+	if _, err := posture.Startup(ctx, pool, 5*time.Second); err != nil {
+		t.Fatalf("the startup check fails on an intact database: %v", err)
+	}
+
+	admin, adminCtx := adminPool(t)
+	exec(t, adminCtx, admin, "ALTER TABLE membership.membership NO FORCE ROW LEVEL SECURITY")
+	restored := false
+	t.Cleanup(func() {
+		if !restored {
+			exec(t, adminCtx, admin, "ALTER TABLE membership.membership FORCE ROW LEVEL SECURITY")
+		}
+	})
+
+	if err := probe.Ping(ctx); err == nil || !strings.Contains(err.Error(), "membership.membership") ||
+		!strings.Contains(err.Error(), "not FORCED") {
+		t.Errorf("the probe passes, or does not name the table, with FORCE removed: %v", err)
+	}
+	if _, err := posture.Startup(ctx, pool, 5*time.Second); err == nil || !strings.Contains(err.Error(), "not FORCED") {
+		t.Errorf("the startup check passes with FORCE removed: %v", err)
+	}
+
+	exec(t, adminCtx, admin, "ALTER TABLE membership.membership FORCE ROW LEVEL SECURITY")
+	restored = true
+	if err := probe.Ping(ctx); err != nil {
+		t.Errorf("the probe still fails after the posture was repaired: %v", err)
 	}
 }
 
-func init() {
-	// Keeps the linter from flagging the unused import when TEST_DATABASE_URL is absent and
-	// every integration case skips.
-	_ = os.Getenv
+func TestNewProbeRequiresAPool(t *testing.T) {
+	if _, err := posture.NewProbe(nil); err == nil {
+		t.Fatal("NewProbe accepted a nil pool")
+	}
 }

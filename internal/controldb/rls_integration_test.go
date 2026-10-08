@@ -27,7 +27,7 @@ import (
 
 	"github.com/anshacerbia2/foundation-platform/db"
 
-	"github.com/anshacerbia2/organization-control/internal/controldb"
+	"github.com/anshacerbia2/organization-control/internal/posture"
 )
 
 const (
@@ -196,7 +196,7 @@ func TestEveryTenantScopedTableIsProtected(t *testing.T) {
 		// both — which is the conflation TDD-organization-control-001 separates at the role level.
 		// A declared extra policy -- the resolver's read on membership.membership_event -- is
 		// counted on top, and AssertIsolation checks the names.
-		if want := 2 + len(controldb.AdditionalPolicies[p.name]); p.policies != want {
+		if want := 2 + len(posture.AdditionalPolicies[p.name]); p.policies != want {
 			t.Errorf("%s: %d policies, want %d (tenant scope and provider scope, plus declared)", p.name, p.policies, want)
 		}
 	}

@@ -1,4 +1,4 @@
-package controldb
+package posture
 
 // Isolation posture, verified against the running database rather than assumed from the
 // migration that was supposed to create it.
@@ -28,16 +28,30 @@ package controldb
 //
 // # Fail closed, deliberately
 //
-// AssertIsolation is meant to be called at startup and to stop the process, and to back the
-// readiness probe so a replica whose database lost a policy leaves the load balancer. Serving
-// tenant-scoped traffic with isolation disabled is worse than not serving: EAD-006 §8 requires a
-// security-control failure to fail closed, and an unprotected table is that failure.
+// AssertIsolation is called in three places. organization-migrate -stage=post calls it as the
+// deploy's post-condition. cmd/organization-control calls it at startup, on the tenant connections,
+// and refuses to serve on a problem. Probe runs it behind GET /readyz, so a replica whose database
+// lost a policy between deploys leaves the load balancer. Serving tenant-scoped traffic with
+// isolation disabled is worse than not serving: EAD-006 §8 requires a security-control failure to
+// fail closed, and an unprotected table is that failure.
+//
+// # Why a package of its own
+//
+// It reads the catalog and holds no statement that changes anything. internal/controldb holds the
+// stage SQL and the maintenance steps, which belong to the migrate deployable; the serving process
+// imports this package and not that one, so the binary that serves requests carries no DDL.
+//
+// The runtime role can run it. pg_class, pg_policy, pg_attribute, pg_namespace, pg_roles and
+// pg_tables are readable by PUBLIC, and TestTheRuntimeRoleSeesTheWholePosture asserts that the
+// tenant login role sees every protected table, so the check at startup is not vacuous.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
 )
@@ -120,7 +134,7 @@ func (r IsolationReport) Err() error {
 	if r.OK() {
 		return nil
 	}
-	return fmt.Errorf("controldb: tenant isolation is not intact: %s", strings.Join(r.Problems, "; "))
+	return fmt.Errorf("posture: tenant isolation is not intact: %s", strings.Join(r.Problems, "; "))
 }
 
 const protectionQuery = `
@@ -297,4 +311,50 @@ func policyProblem(table TableProtection) string {
 	}
 	return fmt.Sprintf("%s carries %d policies %v; missing %v, undeclared %v (want tenant scope and provider scope, plus any declared in AdditionalPolicies)",
 		table.Qualified(), len(table.PolicyNames), table.PolicyNames, missing, extra)
+}
+
+// Probe answers readiness for the serving process: the database is reachable and its isolation
+// posture is intact.
+//
+// A failed probe takes the replica out of the load balancer and leaves it running, which is the
+// right response to both failures. A restart cannot repair a dropped policy, and liveness touches
+// no dependency for that reason (internal/httpapi). The migration job repairs the posture, and the
+// next probe after it passes.
+//
+// It reads the catalog on every probe rather than caching a pass. The read is two catalog queries,
+// and a cached pass would keep a replica serving for the cache's lifetime after the posture broke.
+type Probe struct {
+	pool *db.Pool
+}
+
+// NewProbe constructs the readiness probe on the connections ordinary traffic uses.
+func NewProbe(pool *db.Pool) (*Probe, error) {
+	if pool == nil {
+		return nil, errors.New("posture: a pool is required")
+	}
+	return &Probe{pool: pool}, nil
+}
+
+// Ping reports the first reason this replica must not serve, or nil.
+func (p *Probe) Ping(ctx context.Context) error {
+	if err := p.pool.Ping(ctx); err != nil {
+		return err
+	}
+	report, err := AssertIsolation(ctx, p.pool)
+	if err != nil {
+		return err
+	}
+	return report.Err()
+}
+
+// Startup is the check the serving process runs before it binds a port. It is bounded, so a
+// database that hangs on the catalog read stops the start rather than stalling it.
+func Startup(ctx context.Context, pool *db.Pool, timeout time.Duration) (IsolationReport, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	report, err := AssertIsolation(ctx, pool)
+	if err != nil {
+		return IsolationReport{}, fmt.Errorf("verify tenant isolation: %w", err)
+	}
+	return report, report.Err()
 }

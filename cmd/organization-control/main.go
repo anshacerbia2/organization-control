@@ -50,6 +50,7 @@ import (
 	"github.com/anshacerbia2/organization-control/internal/membership"
 	"github.com/anshacerbia2/organization-control/internal/offboarding"
 	"github.com/anshacerbia2/organization-control/internal/organization"
+	"github.com/anshacerbia2/organization-control/internal/posture"
 	"github.com/anshacerbia2/organization-control/internal/projection"
 	enforcement "github.com/anshacerbia2/organization-control/internal/telemetry"
 	"github.com/anshacerbia2/organization-control/internal/tenant"
@@ -158,6 +159,28 @@ func run() error {
 		slog.String("tenant_pool", tenantConns.Name()),
 		slog.String("provider_pool", providerConns.Name()),
 		slog.Int("max_conns_each", int(cfg.DBMaxConns)))
+
+	// The isolation posture, read from the catalog as the tenant login role before anything is
+	// served (TDD-organization-control-001 §Verifying the Posture at Runtime). The migration job
+	// asserts it after each deploy; this covers the time between deploys, when a superuser action
+	// during an incident could drop FORCE from one table and the next signal would be a cross-Tenant
+	// read. A problem stops the start: EAD-006 §8 has a security-control failure fail closed.
+	report, err := posture.Startup(ctx, tenantConns, startupPostureTimeout)
+	if err != nil {
+		for _, problem := range report.Problems {
+			logger.Error("isolation posture", slog.String("problem", problem))
+		}
+		return err
+	}
+	logger.Info("tenant isolation verified",
+		slog.Int("protected_tables", len(report.Tables)),
+		slog.Any("schemas", posture.RLSSchemas))
+	// The same check backs GET /readyz, so a replica whose database loses a policy after start
+	// leaves the load balancer rather than serving.
+	readiness, err := posture.NewProbe(tenantConns)
+	if err != nil {
+		return fmt.Errorf("readiness probe: %w", err)
+	}
 
 	// The recorder is built on the provider connections rather than the tenant ones because the
 	// evidence table is revoked from the tenant role. It writes in its own transaction, so an
@@ -340,10 +363,10 @@ func run() error {
 		consumerServices = &httpapi.ConsumerServices{Access: access, Checks: checks, Frontier: consumerFrontier}
 	}
 
-	// Readiness probes the tenant pool. One of the two is enough to answer whether this replica can
-	// serve, and it is the tenant one because that is the pool ordinary traffic uses: a replica
-	// whose tenant pool is unreachable can serve almost nothing, while one whose provider pool is
-	// unreachable can still serve every tenant-scoped route.
+	// Readiness probes the tenant pool and the isolation posture. One pool is enough to answer
+	// whether this replica can serve, and it is the tenant one because that is the pool ordinary
+	// traffic uses: a replica whose tenant pool is unreachable can serve almost nothing, while one
+	// whose provider pool is unreachable can still serve every tenant-scoped route.
 	surface, err := httpapi.Routes(httpapi.RoutesConfig{
 		Services: httpapi.Services{
 			Memberships: memberships, Tenants: tenants, Provisioning: provisioning,
@@ -357,7 +380,7 @@ func run() error {
 			Frontier:             frontier,
 			Consumer:             consumerServices,
 		},
-		Database:         tenantConns,
+		Database:         readiness,
 		Telemetry:        telemetry,
 		ReadinessTimeout: cfg.ReadinessTimeout,
 	})
@@ -582,6 +605,10 @@ func run() error {
 	logger.Info("stopped")
 	return nil
 }
+
+// startupPostureTimeout bounds the isolation check at startup. Two catalog queries take
+// milliseconds; a database that does not answer them in this time stops the start.
+const startupPostureTimeout = 10 * time.Second
 
 func newLogger(level string) *slog.Logger {
 	var parsed slog.Level
