@@ -312,6 +312,9 @@ CREATE POLICY membership_batch_item_purge ON membership.membership_batch_item
 --   Consumer rows are left out. A consumer is a workload acting on its own records, not provider
 --   personnel, and its rows name no Tenant in any case.
 --
+-- Owned by the role this stage runs as, the one that applied the migrations and so owns the table: the
+-- view reads the table with its owner's privileges, and a different owner would hold none on it.
+--
 -- Here rather than in schema.hcl because Atlas OSS models no views. Dropped and created on every run,
 -- like each policy, so an edited predicate takes effect; grants.sql runs after and grants it again.
 DROP VIEW IF EXISTS audit.tenant_provider_access;
@@ -321,6 +324,5 @@ SELECT access_id, actor_id, authority, activation_id, tenant_id, operation, corr
   FROM audit.privileged_access
  WHERE tenant_id = current_setting('app.tenant_id', false)::uuid
    AND authority <> 'consumer';
-ALTER VIEW audit.tenant_provider_access OWNER TO organization_migrator;
 COMMENT ON VIEW audit.tenant_provider_access IS
     'The provider access that named the bound Tenant, for its Tenant administrator. ADR-ORG-002 §5.6.';

@@ -1000,7 +1000,8 @@ or due: a consumer is a workload, reviewed through its owner (`ADR-IAM-003 §5.8
 | Any role | No `UPDATE`, `DELETE` or `TRUNCATE` on either table | AU-9 a.: "Protect audit information and audit logging tools from unauthorized access, modification, and deletion" [R7] |
 
 The Tenant's read is a view. `internal/controldb/rls.sql` creates it, because Atlas OSS models no
-views. It is owned by the migration role and declared `security_barrier`:
+views. It is owned by the migration credential that applied the schema, which owns the table, and
+declared `security_barrier`:
 
 ```sql
 CREATE VIEW audit.tenant_provider_access WITH (security_barrier) AS
