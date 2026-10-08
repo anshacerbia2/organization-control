@@ -86,7 +86,7 @@ func viewAccessPage(page authority.AccessPage) accessPageView {
 }
 
 // window reads the time window, `from` inclusive and `to` exclusive, each an RFC 3339 instant with
-// its offset (STD-GLB-001 1.5.0 §Pagination). A malformed instant is refused rather than ignored, as
+// its offset (STD-GLB-001 1.6.0 §Pagination). A malformed instant is refused rather than ignored, as
 // an unknown filter is: a list said to be narrowed that was not is the worse answer.
 func window(w http.ResponseWriter, r *http.Request, params listParams) (from, to *time.Time, ok bool) {
 	parse := func(name string) (*time.Time, bool) {

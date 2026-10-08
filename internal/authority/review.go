@@ -53,7 +53,7 @@ type Access struct {
 	OccurredAt  time.Time
 }
 
-// AccessQuery selects one page of the record (STD-GLB-001 1.5.0 §Pagination). Zero values are
+// AccessQuery selects one page of the record (STD-GLB-001 1.6.0 §Pagination). Zero values are
 // absent filters. From is inclusive and To exclusive.
 type AccessQuery struct {
 	After       id.UUID

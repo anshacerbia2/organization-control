@@ -1028,7 +1028,7 @@ SELECT access_id, actor_id, authority, activation_id, tenant_id, operation, corr
 
 **The routes.** Each list is in the estate's form (`STD-GLB-001` 1.3.0): `after`, `limit` 1 to 100,
 named filters, `access_id` or `review_id` order, and `{"<items>": [...], "next": …}`. A time window
-is `from` inclusive and `to` exclusive, RFC 3339 instants with their offset (`STD-GLB-001` 1.5.0).
+is `from` inclusive and `to` exclusive, RFC 3339 instants with their offset (`STD-GLB-001` 1.6.0).
 An unknown or repeated parameter, a malformed one, and a `to` not after `from` are refused `400`.
 
 ```text
@@ -1701,7 +1701,7 @@ runs after the restore, so `roles.sql`, `rls.sql`, `grants.sql` and the login ro
 | Governed by | ADR-ORG-003 — Tenant Administration Is a Recorded Grant, Checked with Current Membership |
 | Governed by | ADR-ORG-005 §5.1 — a self caller reads its own contexts, on one route, with no provider record (1.17.0) |
 | Governed by | ADR-ORG-002 §5.6 — the privileged-access record is read and reviewed (1.21.0) |
-| Conforms to | STD-GLB-001 1.5.0 §Pagination — the list form and its time window |
+| Conforms to | STD-GLB-001 1.6.0 §Pagination — the list form and its time window |
 | Conforms to | STD-IAM-002 §3.1.1, §3.2, §3.5 — the grant's holder checks its own record; `principal_id` is the persisted identifier |
 | Conforms to | STD-GLB-002 — `FORCE ROW LEVEL SECURITY`, non-owner runtime role, no `SUPERUSER`/`BYPASSRLS`, isolation proven as the runtime role |
 | Enterprise constraint | EAD-003 — private domain persistence; cross-domain database access is prohibited |
