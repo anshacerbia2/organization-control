@@ -19,12 +19,21 @@ package db
 // The claim commits with the effect: a mutation that fails releases its key, and a mutation that
 // succeeds consumes it. That is the property that stops a retry from executing twice.
 //
-// The stored *response* is written afterwards, by the HTTP surface, in its own transaction —
-// `Complete` needs the status and body, and neither exists until the handler has rendered them. So
-// there is a window: a process that dies between the domain commit and the completion leaves a key
-// claimed and uncompleted, and every later retry of it is refused as in progress rather than
-// replayed. The mutation still happened exactly once, which is the half that matters; what is lost
-// is the convenience of being told what it returned. Recorded here rather than discovered later.
+// The stored *response* is written inside the same transaction when it can be (1.19.0 of
+// TDD-organization-control-003 §The Response Is Recorded with the Effect). The HTTP surface puts a
+// Responder in the context; the service hands its result to Respond inside the transaction that
+// made the claim; Respond renders it and completes the claim there. The claim, the effect and the
+// response then commit together or not at all, which is how the IETF draft's retry rule — "The
+// resource SHOULD respond with the result of the previously completed operation, success or an
+// error" (draft-ietf-httpapi-idempotency-key-header-07 §2.6) — survives a process dying between
+// the commit and the reply.
+//
+// A command that spans several transactions cannot be recorded with all of its effects, and
+// Respond does nothing outside the transaction that made the claim. Those commands keep the
+// earlier behaviour: the HTTP surface completes the claim afterwards, in its own transaction, and a
+// process dying in between leaves a key claimed and uncompleted. Later retries of it are refused as
+// in progress rather than replayed; the mutation still happened exactly once. Which commands those
+// are is listed in the design, not here, so the list has one home.
 
 import (
 	"context"
@@ -125,6 +134,10 @@ type pending struct {
 	// adopted records that the claim adopted an uncompleted earlier use of its key
 	// (AdoptInProgressClaim).
 	adopted atomic.Bool
+
+	// completed records that Respond stored the response inside the transaction that made the
+	// claim, so the HTTP surface owes the store nothing afterwards.
+	completed atomic.Bool
 }
 
 type claimKey struct{}
@@ -193,21 +206,33 @@ func ClaimMade(ctx context.Context) bool {
 	return ok && held.made.Load()
 }
 
-// claimWithin makes the pending claim inside the caller's transaction.
+// ClaimCompleted reports whether the response was recorded inside the transaction that made the
+// claim. The HTTP surface completes nothing afterwards when it is true.
+func ClaimCompleted(ctx context.Context) bool {
+	held, ok := ctx.Value(claimKey{}).(*pending)
+	return ok && held.completed.Load()
+}
+
+// claimTxKey marks the context of the one transaction that made the request's claim. Respond acts
+// only there: a response recorded in any other transaction would commit apart from the claim.
+type claimTxKey struct{}
+
+// claimWithin makes the pending claim inside the caller's transaction, and returns the context the
+// body runs with: marked as the claiming transaction when this one made the claim.
 //
 // Called after the scope is bound and before the body runs, so a replay costs one SELECT and does
 // none of the work. A request carrying no claim reaches this and returns immediately, which is why
 // every read path and every unkeyed mutation is unaffected.
-func claimWithin(ctx context.Context, tx Tx) error {
+func claimWithin(ctx context.Context, tx Tx) (context.Context, error) {
 	held, ok := ctx.Value(claimKey{}).(*pending)
 	if !ok {
-		return nil
+		return ctx, nil
 	}
 	// CompareAndSwap rather than a load-then-store: two transactions racing here would otherwise
 	// both see false and both claim, and the second would refuse a request that is proceeding
 	// normally.
 	if !held.consumed.CompareAndSwap(false, true) {
-		return nil
+		return ctx, nil
 	}
 
 	result, err := idempotency.Claim(ctx, tx, held.claim.Scope, held.claim.Key, held.claim.Digest)
@@ -216,28 +241,75 @@ func claimWithin(ctx context.Context, tx Tx) error {
 		// completed. The operation decides whether that use is still live (AdoptInProgressClaim).
 		held.adopted.Store(true)
 		held.made.Store(true)
-		return nil
+		return context.WithValue(ctx, claimTxKey{}, held), nil
 	}
 	if err != nil {
 		// The flag is released so a caller that retries within the same request — there is no such
 		// caller today — does not silently skip the claim it failed to make.
 		held.consumed.Store(false)
-		return err
+		return ctx, err
 	}
 
 	switch result.State {
 	case idempotency.StateReplay:
-		return &Replayed{Status: result.Status, Body: result.Body}
+		return ctx, &Replayed{Status: result.Status, Body: result.Body}
 	case idempotency.StateClaimed:
 		held.made.Store(true)
-		return nil
+		return context.WithValue(ctx, claimTxKey{}, held), nil
 	default:
 		// StateInProgress arrives as ErrInProgress above, so reaching here means the foundation
 		// package grew a state this repository has not been taught. Failing closed rather than
 		// proceeding: an unrecognised idempotency decision is not one to guess at.
-		return fmt.Errorf("db: unrecognised idempotency state %d for key %q",
+		return ctx, fmt.Errorf("db: unrecognised idempotency state %d for key %q",
 			result.State, held.claim.Key)
 	}
+}
+
+// Responder renders a command's result as the response the caller will be sent. It reports false
+// for a result it does not render — one of another type, from a service the command reached on the
+// way — and Respond then records nothing.
+type Responder func(result any) (status int, body json.RawMessage, ok bool)
+
+type responderKey struct{}
+
+// WithResponder carries how the HTTP surface renders this request's result, so Respond can record
+// the response inside the transaction that commits the effect.
+func WithResponder(ctx context.Context, responder Responder) context.Context {
+	if responder == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, responderKey{}, responder)
+}
+
+// Respond records the response to the request's idempotency claim inside tx, the transaction that
+// made the claim, from the result the command is about to return.
+//
+// A service calls it last in the transaction of a command method, with the value it returns. It
+// does nothing when the request carries no claim, when tx is not the transaction that made the
+// claim, when the surface supplied no Responder, or when the Responder does not render this result;
+// the surface then completes the claim afterwards, as before. It fails when the store refuses the
+// completion, and the transaction rolls back with it: a response that cannot be recorded with the
+// effect is not one to commit the effect without, because the caller is then told of a failure and
+// retries a command that did not happen.
+func Respond(ctx context.Context, tx Tx, result any) error {
+	held, ok := ctx.Value(claimTxKey{}).(*pending)
+	if !ok || held.completed.Load() {
+		return nil
+	}
+	responder, ok := ctx.Value(responderKey{}).(Responder)
+	if !ok {
+		return nil
+	}
+	status, body, ok := responder(result)
+	if !ok || status < 200 || status > 299 {
+		return nil
+	}
+	if err := idempotency.Complete(ctx, tx, held.claim.Scope, held.claim.Key, held.claim.Digest,
+		status, body); err != nil {
+		return fmt.Errorf("db: record the response with the effect: %w", err)
+	}
+	held.completed.Store(true)
+	return nil
 }
 
 // ClaimStore records the response a completed mutation returned, so a retry can be answered without

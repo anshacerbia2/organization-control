@@ -15,6 +15,7 @@ package httpapi
 
 import (
 	"bytes"
+	stdcontext "context"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,7 +43,7 @@ type providerCommand struct {
 }
 
 func (h *handlers) tenantTransition(w http.ResponseWriter, r *http.Request,
-	apply func(*http.Request, tenant.Command) (tenant.Result, error)) {
+	apply func(stdcontext.Context, tenant.Command) (tenant.Result, error)) {
 	if _, ok := requireProvider(w, r); !ok {
 		return
 	}
@@ -54,33 +55,31 @@ func (h *handlers) tenantTransition(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	result, err := apply(r, tenant.Command{
+	cmd := tenant.Command{
 		TenantID:        tenantID,
 		Reason:          reason(r),
 		ExpectedVersion: body.ExpectedVersion,
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
 	}
-	respond(w, http.StatusOK, viewTenantResult(result))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (tenant.Result, error) {
+		return apply(ctx, cmd)
+	}, viewTenantResult)
 }
 
 func (h *handlers) activateTenant(w http.ResponseWriter, r *http.Request) {
-	h.tenantTransition(w, r, func(r *http.Request, cmd tenant.Command) (tenant.Result, error) {
-		return h.services.Tenants.Activate(r.Context(), cmd)
+	h.tenantTransition(w, r, func(ctx stdcontext.Context, cmd tenant.Command) (tenant.Result, error) {
+		return h.services.Tenants.Activate(ctx, cmd)
 	})
 }
 
 func (h *handlers) suspendTenant(w http.ResponseWriter, r *http.Request) {
-	h.tenantTransition(w, r, func(r *http.Request, cmd tenant.Command) (tenant.Result, error) {
-		return h.services.Tenants.Suspend(r.Context(), cmd)
+	h.tenantTransition(w, r, func(ctx stdcontext.Context, cmd tenant.Command) (tenant.Result, error) {
+		return h.services.Tenants.Suspend(ctx, cmd)
 	})
 }
 
 func (h *handlers) restoreTenant(w http.ResponseWriter, r *http.Request) {
-	h.tenantTransition(w, r, func(r *http.Request, cmd tenant.Command) (tenant.Result, error) {
-		return h.services.Tenants.Restore(r.Context(), cmd)
+	h.tenantTransition(w, r, func(ctx stdcontext.Context, cmd tenant.Command) (tenant.Result, error) {
+		return h.services.Tenants.Restore(ctx, cmd)
 	})
 }
 
@@ -103,18 +102,15 @@ func (h *handlers) requestTenant(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	requested, err := h.services.Tenants.Request(r.Context(), tenant.RequestTenant{
-		OrganizationID:   body.OrganizationID,
-		DisplayName:      body.DisplayName,
-		IsolationProfile: tenant.IsolationProfile(body.IsolationProfile),
-		ResidencyRegion:  body.ResidencyRegion,
-		Reason:           reason(r),
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusCreated, viewRequested(requested))
+	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (tenant.Requested, error) {
+		return h.services.Tenants.Request(ctx, tenant.RequestTenant{
+			OrganizationID:   body.OrganizationID,
+			DisplayName:      body.DisplayName,
+			IsolationProfile: tenant.IsolationProfile(body.IsolationProfile),
+			ResidencyRegion:  body.ResidencyRegion,
+			Reason:           reason(r),
+		})
+	}, viewRequested)
 }
 
 func (h *handlers) getTenant(w http.ResponseWriter, r *http.Request) {
@@ -139,8 +135,8 @@ func (h *handlers) getTenant(w http.ResponseWriter, r *http.Request) {
 // out and the Tenant is now waiting on it. Two routes would have made "retry" a different operation
 // from "dispatch" and left a caller to decide which state the Tenant was in before choosing.
 func (h *handlers) provisionTenant(w http.ResponseWriter, r *http.Request) {
-	h.tenantTransition(w, r, func(r *http.Request, cmd tenant.Command) (tenant.Result, error) {
-		return h.services.Provisioning.Provision(r.Context(), cmd)
+	h.tenantTransition(w, r, func(ctx stdcontext.Context, cmd tenant.Command) (tenant.Result, error) {
+		return h.services.Provisioning.Provision(ctx, cmd)
 	})
 }
 
@@ -220,17 +216,14 @@ func (h *handlers) registerOrganization(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	record, err := h.services.Organizations.Register(r.Context(), organization.RegisterRequest{
-		DisplayName:    body.DisplayName,
-		Classification: organization.Classification(body.Classification),
-		ParentID:       body.ParentID,
-		Reason:         reason(r),
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusCreated, viewOrganization(record))
+	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (organization.Organization, error) {
+		return h.services.Organizations.Register(ctx, organization.RegisterRequest{
+			DisplayName:    body.DisplayName,
+			Classification: organization.Classification(body.Classification),
+			ParentID:       body.ParentID,
+			Reason:         reason(r),
+		})
+	}, viewOrganization)
 }
 
 func (h *handlers) getOrganization(w http.ResponseWriter, r *http.Request) {
@@ -314,7 +307,7 @@ func (h *handlers) listTenants(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) organizationTransition(w http.ResponseWriter, r *http.Request,
-	apply func(*http.Request, organization.Command) (organization.Organization, error)) {
+	apply func(stdcontext.Context, organization.Command) (organization.Organization, error)) {
 	if _, ok := requireProvider(w, r); !ok {
 		return
 	}
@@ -326,33 +319,31 @@ func (h *handlers) organizationTransition(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	record, err := apply(r, organization.Command{
+	cmd := organization.Command{
 		OrganizationID:  organizationID,
 		Reason:          reason(r),
 		ExpectedVersion: body.ExpectedVersion,
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
 	}
-	respond(w, http.StatusOK, viewOrganization(record))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (organization.Organization, error) {
+		return apply(ctx, cmd)
+	}, viewOrganization)
 }
 
 func (h *handlers) suspendOrganization(w http.ResponseWriter, r *http.Request) {
-	h.organizationTransition(w, r, func(r *http.Request, cmd organization.Command) (organization.Organization, error) {
-		return h.services.Organizations.Suspend(r.Context(), cmd)
+	h.organizationTransition(w, r, func(ctx stdcontext.Context, cmd organization.Command) (organization.Organization, error) {
+		return h.services.Organizations.Suspend(ctx, cmd)
 	})
 }
 
 func (h *handlers) restoreOrganization(w http.ResponseWriter, r *http.Request) {
-	h.organizationTransition(w, r, func(r *http.Request, cmd organization.Command) (organization.Organization, error) {
-		return h.services.Organizations.Restore(r.Context(), cmd)
+	h.organizationTransition(w, r, func(ctx stdcontext.Context, cmd organization.Command) (organization.Organization, error) {
+		return h.services.Organizations.Restore(ctx, cmd)
 	})
 }
 
 func (h *handlers) retireOrganization(w http.ResponseWriter, r *http.Request) {
-	h.organizationTransition(w, r, func(r *http.Request, cmd organization.Command) (organization.Organization, error) {
-		return h.services.Organizations.Retire(r.Context(), cmd)
+	h.organizationTransition(w, r, func(ctx stdcontext.Context, cmd organization.Command) (organization.Organization, error) {
+		return h.services.Organizations.Retire(ctx, cmd)
 	})
 }
 
@@ -370,16 +361,13 @@ func (h *handlers) recordVerifiedIdentity(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	record, err := h.services.Invitations.RecordVerifiedIdentity(r.Context(), invitation.VerifiedIdentity{
-		CorrelationID: body.CorrelationID,
-		Identifier:    body.Identifier,
-		PrincipalID:   body.PrincipalID,
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusOK, viewInvitation(record))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (invitation.Invitation, error) {
+		return h.services.Invitations.RecordVerifiedIdentity(ctx, invitation.VerifiedIdentity{
+			CorrelationID: body.CorrelationID,
+			Identifier:    body.Identifier,
+			PrincipalID:   body.PrincipalID,
+		})
+	}, viewInvitation)
 }
 
 type batchRequest struct {
@@ -420,17 +408,14 @@ func (h *handlers) beginOffboarding(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	record, err := h.services.Offboardings.Begin(r.Context(), offboarding.BeginRequest{
-		TenantID:        body.TenantID,
-		ExpectedVersion: body.ExpectedVersion,
-		Reason:          reason(r),
-		LegalHold:       body.LegalHold,
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusCreated, viewOffboarding(record))
+	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (offboarding.Offboarding, error) {
+		return h.services.Offboardings.Begin(ctx, offboarding.BeginRequest{
+			TenantID:        body.TenantID,
+			ExpectedVersion: body.ExpectedVersion,
+			Reason:          reason(r),
+			LegalHold:       body.LegalHold,
+		})
+	}, viewOffboarding)
 }
 
 func (h *handlers) getOffboarding(w http.ResponseWriter, r *http.Request) {
@@ -520,19 +505,19 @@ func (h *handlers) freezeOffboarding(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) completeFreeze(w http.ResponseWriter, r *http.Request) {
-	h.offboardingStage(w, r, func(r *http.Request, offboardingID id.UUID) (offboarding.Offboarding, error) {
-		return h.services.Offboardings.CompleteFreeze(r.Context(), offboardingID)
+	h.offboardingStage(w, r, func(ctx stdcontext.Context, offboardingID id.UUID) (offboarding.Offboarding, error) {
+		return h.services.Offboardings.CompleteFreeze(ctx, offboardingID)
 	})
 }
 
 func (h *handlers) releaseOffboarding(w http.ResponseWriter, r *http.Request) {
-	h.offboardingStage(w, r, func(r *http.Request, offboardingID id.UUID) (offboarding.Offboarding, error) {
-		return h.services.Offboardings.Release(r.Context(), offboardingID)
+	h.offboardingStage(w, r, func(ctx stdcontext.Context, offboardingID id.UUID) (offboarding.Offboarding, error) {
+		return h.services.Offboardings.Release(ctx, offboardingID)
 	})
 }
 
 func (h *handlers) offboardingStage(w http.ResponseWriter, r *http.Request,
-	apply func(*http.Request, id.UUID) (offboarding.Offboarding, error)) {
+	apply func(stdcontext.Context, id.UUID) (offboarding.Offboarding, error)) {
 	if _, ok := requireProvider(w, r); !ok {
 		return
 	}
@@ -540,12 +525,9 @@ func (h *handlers) offboardingStage(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	record, err := apply(r, offboardingID)
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusOK, viewOffboarding(record))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (offboarding.Offboarding, error) {
+		return apply(ctx, offboardingID)
+	}, viewOffboarding)
 }
 
 // retireOffboarding takes the Tenant version the caller read.
@@ -564,12 +546,9 @@ func (h *handlers) retireOffboarding(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	record, err := h.services.Offboardings.Retire(r.Context(), offboardingID, body.ExpectedVersion)
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusOK, viewOffboarding(record))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (offboarding.Offboarding, error) {
+		return h.services.Offboardings.Retire(ctx, offboardingID, body.ExpectedVersion)
+	}, viewOffboarding)
 }
 
 // cancelOffboarding cancels an offboarding before release, taking the Tenant version the caller was
@@ -613,12 +592,9 @@ func (h *handlers) setLegalHold(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	record, err := h.services.Offboardings.SetLegalHold(r.Context(), offboardingID, body.Hold, reason(r))
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusOK, viewOffboarding(record))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (offboarding.Offboarding, error) {
+		return h.services.Offboardings.SetLegalHold(ctx, offboardingID, body.Hold, reason(r))
+	}, viewOffboarding)
 }
 
 type raiseObligationRequest struct {
@@ -639,17 +615,14 @@ func (h *handlers) raiseObligation(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	record, err := h.services.Offboardings.Raise(r.Context(), offboarding.RaiseRequest{
-		OffboardingID: offboardingID,
-		Domain:        body.Domain,
-		Type:          body.Type,
-		DueAt:         body.DueAt,
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusCreated, viewObligation(record))
+	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (offboarding.Obligation, error) {
+		return h.services.Offboardings.Raise(ctx, offboarding.RaiseRequest{
+			OffboardingID: offboardingID,
+			Domain:        body.Domain,
+			Type:          body.Type,
+			DueAt:         body.DueAt,
+		})
+	}, viewObligation)
 }
 
 // outstandingResponse is the obligation board. `outstanding` is the list of names it always was;
@@ -702,17 +675,14 @@ func (h *handlers) resolveObligation(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	record, err := h.services.Offboardings.Resolve(r.Context(), offboarding.Resolution{
-		ObligationID: obligationID,
-		Domain:       body.Domain,
-		State:        offboarding.ObligationState(body.State),
-		Detail:       body.Detail,
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusOK, viewObligation(record))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (offboarding.Obligation, error) {
+		return h.services.Offboardings.Resolve(ctx, offboarding.Resolution{
+			ObligationID: obligationID,
+			Domain:       body.Domain,
+			State:        offboarding.ObligationState(body.State),
+			Detail:       body.Detail,
+		})
+	}, viewObligation)
 }
 
 type deprovisioningRequest struct {
@@ -774,19 +744,16 @@ func (h *handlers) registerConsumer(w http.ResponseWriter, r *http.Request) {
 		}
 		principal = parsed
 	}
-	record, err := h.services.Registry.Register(r.Context(), projection.Registration{
-		ConsumerID:        body.ConsumerID,
-		PrincipalID:       principal,
-		ProjectionVersion: body.ProjectionVersion,
-		MaxAcceptedAge:    body.MaxAcceptedAgeSeconds.Duration(),
-		StaleBehavior:     projection.StaleBehavior(body.StaleBehavior),
-		EventTypes:        body.EventTypes,
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusCreated, viewConsumer(record, time.Now()))
+	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (projection.Consumer, error) {
+		return h.services.Registry.Register(ctx, projection.Registration{
+			ConsumerID:        body.ConsumerID,
+			PrincipalID:       principal,
+			ProjectionVersion: body.ProjectionVersion,
+			MaxAcceptedAge:    body.MaxAcceptedAgeSeconds.Duration(),
+			StaleBehavior:     projection.StaleBehavior(body.StaleBehavior),
+			EventTypes:        body.EventTypes,
+		})
+	}, func(record projection.Consumer) consumerView { return viewConsumer(record, time.Now()) })
 }
 
 // retireConsumer withdraws a consumer: its registration, its subscription, and what it was still

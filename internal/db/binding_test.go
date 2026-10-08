@@ -72,6 +72,11 @@ func TestScopeBindingLivesInExactlyOnePackage(t *testing.T) {
 		if dir == "internal/db" || dir == "internal/controldb" {
 			return nil
 		}
+		// The posture suite drops a policy and recreates it, to prove the startup check and the
+		// readiness probe notice. Its test file alone: posture.go itself binds nothing.
+		if filepath.ToSlash(relative) == "internal/posture/posture_integration_test.go" {
+			return nil
+		}
 		// tools/grantcheck is not a deployable and binds no request. It sets both values inside
 		// the rolled-back transactions it plans statements in, against a database it refuses to
 		// touch unless its name ends in _test, and its fixture mirrors this package's wrappers so

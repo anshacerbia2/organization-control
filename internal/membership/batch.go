@@ -341,7 +341,7 @@ func (s *Service) PreviewBatch(ctx context.Context, req BatchRequest, classify C
 				return fmt.Errorf("membership: insert batch item: %w", err)
 			}
 		}
-		return nil
+		return db.Respond(ctx, tx, batch)
 	}); err != nil {
 		return Batch{}, err
 	}

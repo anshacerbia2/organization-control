@@ -1,9 +1,13 @@
 package httpapi
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -133,4 +137,93 @@ func TestRequireKeyPassesARouteThatIsNotACommand(t *testing.T) {
 	if !marked {
 		t.Error("a command without a key passed requireKey")
 	}
+}
+
+// recordedAfter names the commands whose response is completed after the handler writes, in a
+// transaction of its own, rather than inside the transaction that commits the effect, with the
+// reason (TDD-organization-control-003 §The Response Is Recorded with the Effect).
+var recordedAfter = map[string]string{
+	"executeMembershipBatch": "each item commits in its own transaction (ADR-ORG-004 §5.1), so no one " +
+		"transaction holds every effect the response reports",
+	"freezeOffboarding": "the stage is read in one transaction and the batch frozen in another, on the " +
+		"tenant pool",
+	"cancelOffboarding": "the Tenant's return commits first and each Membership restore after it " +
+		"(ADR-ORG-006 §5.2)",
+	"retireConsumer": "204 with no body: there is no JSON response to record, before or after",
+}
+
+// TestEveryCommandRecordsItsResponseWithItsEffect holds each command route to answer -- which hands
+// the service a renderer so the response is recorded inside the transaction that commits the effect
+// -- or to a named reason in recordedAfter. A new command written with respond would otherwise
+// quietly reopen the window between the commit and the completion.
+func TestEveryCommandRecordsItsResponseWithItsEffect(t *testing.T) {
+	bodies := handlerBodies(t)
+	routes, err := os.ReadFile("routes.go")
+	if err != nil {
+		t.Fatalf("read routes.go: %v", err)
+	}
+	commands := regexp.MustCompile(`command\(h\.(\w+)\)`).FindAllStringSubmatch(string(routes), -1)
+	if len(commands) == 0 {
+		t.Fatal("no command routes found in routes.go; the pattern is stale")
+	}
+	calls := regexp.MustCompile(`h\.(\w+)\(w, r`)
+	answers := func(name string) bool {
+		body := bodies[name]
+		if strings.Contains(body, "answer(w, r,") {
+			return true
+		}
+		for _, call := range calls.FindAllStringSubmatch(body, -1) {
+			if strings.Contains(bodies[call[1]], "answer(w, r,") {
+				return true
+			}
+		}
+		return false
+	}
+	for _, match := range commands {
+		name := match[1]
+		_, excepted := recordedAfter[name]
+		switch {
+		case answers(name) && excepted:
+			t.Errorf("%s answers inside the transaction and is still listed in recordedAfter", name)
+		case !answers(name) && !excepted:
+			t.Errorf("%s writes its response with respond: use answer, or name it in recordedAfter with the reason", name)
+		}
+	}
+	for name := range recordedAfter {
+		if _, ok := bodies[name]; !ok {
+			t.Errorf("recordedAfter names %s, which is not a handler", name)
+		}
+	}
+}
+
+// handlerBodies reads every handler method's source by name.
+func handlerBodies(t *testing.T) map[string]string {
+	t.Helper()
+	files, err := filepath.Glob("handlers*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	fset := token.NewFileSet()
+	bodies := map[string]string{}
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		source, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		parsed, err := parser.ParseFile(fset, file, source, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		for _, decl := range parsed.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || fn.Body == nil {
+				continue
+			}
+			bodies[fn.Name.Name] = string(source[fset.Position(fn.Body.Pos()).Offset:fset.Position(fn.Body.End()).Offset])
+		}
+	}
+	return bodies
 }

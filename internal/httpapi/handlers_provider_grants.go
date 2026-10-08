@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	stdcontext "context"
 	"net/http"
 	"strings"
 	"time"
@@ -91,12 +92,9 @@ func (h *handlers) grantProvider(w http.ResponseWriter, r *http.Request) {
 	if kind == "" {
 		kind = authority.KindEligible
 	}
-	record, err := h.services.ProviderGrants.Grant(r.Context(), principal, strings.TrimSpace(body.Scope), kind, reason(r))
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusCreated, viewProviderGrant(record))
+	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (authority.Record, error) {
+		return h.services.ProviderGrants.Grant(ctx, principal, strings.TrimSpace(body.Scope), kind, reason(r))
+	}, viewProviderGrant)
 }
 
 func (h *handlers) revokeProvider(w http.ResponseWriter, r *http.Request) {
@@ -107,12 +105,9 @@ func (h *handlers) revokeProvider(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	record, err := h.services.ProviderGrants.Revoke(r.Context(), grantID, reason(r))
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusOK, viewProviderGrant(record))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (authority.Record, error) {
+		return h.services.ProviderGrants.Revoke(ctx, grantID, reason(r))
+	}, viewProviderGrant)
 }
 
 // emergencyValidationView is one emergency grant of this service's scope and when it was last used

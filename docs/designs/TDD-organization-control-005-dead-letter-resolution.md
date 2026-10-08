@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 2.3.0
+  version: 2.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -513,8 +513,12 @@ identity has no debt, no applied position, and nothing inherited.
 1. retire the consumer:           POST /v1/projections/consumers/{old}/retire
                                   (its subscription is retired and what it was owed abandoned)
 2. register the new identity:     POST /v1/projections/consumers        {consumer_id: new, event_types, ...}
-3. point all three names at it:   DISPATCH_CONSUMER_NAME, REFERENCE_CONSUMER_NAME, and the
-                                  registration, which must agree (§Configuration)
+3. point delivery at it:          for a consumer this service delivers to, its entry in
+                                  ORGANIZATION_DELIVERY_TARGETS (new=https://acceptance-url),
+                                  then restart; for one foundation-reference's dispatcher
+                                  delivers to, DISPATCH_CONSUMER_NAME and
+                                  REFERENCE_CONSUMER_NAME. Each name must match the
+                                  registration (§Configuration)
 4. bootstrap from a snapshot:     POST /v1/projections/consumers/{new}/bootstrap, then the
                                   snapshot pages; the consumer rebuilds its projection empty,
                                   from a snapshot that already reflects every committed event
@@ -734,6 +738,10 @@ handler-level tests cover only refusals that must land before the database is re
 | Review record of these decisions | `RESPONSE-7` through `RESPONSE-26` in the architecture-description workspace |
 
 ## Operational Notes
+
+The step-by-step procedure is `docs/runbooks/dead-letter-resolution.md` (2.4.0). §Rebuilding a
+consumer step 3 names `ORGANIZATION_DELIVERY_TARGETS` from 2.4.0: since item 25 of the ROADMAP
+backlog, this service delivers to its consumers itself.
 
 While an authority-bearing dead letter is unresolved, every projection-backed check refuses.
 That is the designed behaviour and not an incident in itself: the alternative is serving

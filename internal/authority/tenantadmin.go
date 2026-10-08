@@ -230,8 +230,10 @@ func (a *TenantAdministration) Grant(ctx context.Context, tenantID, principal id
 			return ErrMembershipSuspended
 		}
 
-		result.Grant, err = scanAdminGrant(tx.QueryRow(ctx, adminGrantOneStatement, grantID.String(), tenantID.String()))
-		return err
+		if result.Grant, err = scanAdminGrant(tx.QueryRow(ctx, adminGrantOneStatement, grantID.String(), tenantID.String())); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, result)
 	})
 	if err != nil {
 		for _, sentinel := range []error{ErrAdminTenantNotFound, ErrAdminTenantNotActive, ErrAlreadyAdministrator,
@@ -275,8 +277,10 @@ func (a *TenantAdministration) Revoke(ctx context.Context, tenantID, grantID id.
 		if tag.RowsAffected() == 0 {
 			return ErrAdminGrantRevoked
 		}
-		grant, err = scanAdminGrant(tx.QueryRow(ctx, adminGrantOneStatement, grantID.String(), tenantID.String()))
-		return err
+		if grant, err = scanAdminGrant(tx.QueryRow(ctx, adminGrantOneStatement, grantID.String(), tenantID.String())); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, grant)
 	})
 	if err != nil {
 		for _, sentinel := range []error{ErrAdminGrantNotFound, ErrAdminGrantRevoked} {

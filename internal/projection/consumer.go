@@ -355,7 +355,7 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Consumer, er
 			}
 
 			if exists && !retired && current != nil && sameTypes(current, types) {
-				return nil
+				return db.Respond(ctx, tx, consumer)
 			}
 			eventTypes := make([]fevent.Type, len(types))
 			for i, t := range types {
@@ -369,7 +369,7 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Consumer, er
 					return fmt.Errorf("projection: clearing the progress of %s: %w", reg.ConsumerID, err)
 				}
 			}
-			return nil
+			return db.Respond(ctx, tx, consumer)
 		}); err != nil {
 		if errors.Is(err, ErrInvalid) {
 			return Consumer{}, err

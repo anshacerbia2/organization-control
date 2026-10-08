@@ -319,7 +319,10 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (Organizati
 				return fmt.Errorf("organization: insert: %w", err)
 			}
 
-			return s.publish(ctx, tx, createdEventType, record, at)
+			if err := s.publish(ctx, tx, createdEventType, record, at); err != nil {
+				return err
+			}
+			return db.Respond(ctx, tx, record)
 		}); err != nil {
 		return Organization{}, err
 	}
@@ -439,7 +442,10 @@ func (s *Service) transition(ctx context.Context, action Action, cmd Command) (O
 			if err != nil {
 				return err
 			}
-			return s.publish(ctx, tx, string(eventType), record, at)
+			if err := s.publish(ctx, tx, string(eventType), record, at); err != nil {
+				return err
+			}
+			return db.Respond(ctx, tx, record)
 		}); err != nil {
 		return Organization{}, err
 	}

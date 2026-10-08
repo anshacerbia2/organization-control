@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	stdcontext "context"
 	"net/http"
 	"strings"
 	"time"
@@ -134,13 +135,10 @@ func (h *handlers) requestProviderActivation(w http.ResponseWriter, r *http.Requ
 		platform.Problem(w, r, platform.ValidationFailed, "grant_id is not a valid identifier")
 		return
 	}
-	activation, err := h.services.ProviderActivations.Request(r.Context(), grantID,
-		time.Duration(body.DurationSeconds)*time.Second, reason(r))
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusCreated, viewProviderActivation(activation))
+	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (authority.Activation, error) {
+		return h.services.ProviderActivations.Request(ctx, grantID,
+			time.Duration(body.DurationSeconds)*time.Second, reason(r))
+	}, viewProviderActivation)
 }
 
 func (h *handlers) approveProviderActivation(w http.ResponseWriter, r *http.Request) {
@@ -159,12 +157,9 @@ func (h *handlers) decideProviderActivation(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	activation, err := h.services.ProviderActivations.Decide(r.Context(), activationID, decision, reason(r))
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusOK, viewProviderActivation(activation))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (authority.Activation, error) {
+		return h.services.ProviderActivations.Decide(ctx, activationID, decision, reason(r))
+	}, viewProviderActivation)
 }
 
 func (h *handlers) endProviderActivation(w http.ResponseWriter, r *http.Request) {
@@ -176,10 +171,7 @@ func (h *handlers) endProviderActivation(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	activation, err := h.services.ProviderActivations.End(r.Context(), activationID, caller.Provider, reason(r))
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusOK, viewProviderActivation(activation))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (authority.Activation, error) {
+		return h.services.ProviderActivations.End(ctx, activationID, caller.Provider, reason(r))
+	}, viewProviderActivation)
 }

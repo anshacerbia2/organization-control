@@ -7,6 +7,7 @@ package httpapi
 // expressed. The services still refuse one, for callers that are not this surface.
 
 import (
+	stdcontext "context"
 	"net/http"
 	"time"
 
@@ -42,20 +43,17 @@ func (h *handlers) grantMembership(w http.ResponseWriter, r *http.Request) {
 		workspaceID = *body.WorkspaceID
 	}
 
-	result, err := h.services.Memberships.Grant(r.Context(), membership.GrantRequest{
-		PrincipalID: body.PrincipalID,
-		TenantID:    scope.TenantID(),
-		WorkspaceID: workspaceID,
-		SubjectType: body.SubjectType,
-		Provenance:  body.Provenance,
-		ValidFrom:   body.ValidFrom,
-		ValidUntil:  body.ValidUntil,
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusCreated, viewMembershipResult(result))
+	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (membership.Result, error) {
+		return h.services.Memberships.Grant(ctx, membership.GrantRequest{
+			PrincipalID: body.PrincipalID,
+			TenantID:    scope.TenantID(),
+			WorkspaceID: workspaceID,
+			SubjectType: body.SubjectType,
+			Provenance:  body.Provenance,
+			ValidFrom:   body.ValidFrom,
+			ValidUntil:  body.ValidUntil,
+		})
+	}, viewMembershipResult)
 }
 
 // membershipCommand is the body the three Membership transitions take.
@@ -76,7 +74,7 @@ type membershipCommand struct {
 // irreversible, so it requires one from a tenant caller too and is refused here, before anything is
 // read, when the header is absent; a suspension or restoration records one when it is sent.
 func (h *handlers) membershipTransition(w http.ResponseWriter, r *http.Request, action membership.Action,
-	apply func(*http.Request, membership.Command) (membership.Result, error)) {
+	apply func(stdcontext.Context, membership.Command) (membership.Result, error)) {
 	if _, ok := requireTenant(w, r); !ok {
 		return
 	}
@@ -93,36 +91,34 @@ func (h *handlers) membershipTransition(w http.ResponseWriter, r *http.Request, 
 	if !ok {
 		return
 	}
-	result, err := apply(r, membership.Command{
+	cmd := membership.Command{
 		MembershipID:    membershipID,
 		ExpectedVersion: body.ExpectedVersion,
 		Reason:          reason(r),
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
 	}
-	respond(w, http.StatusOK, viewMembershipResult(result))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (membership.Result, error) {
+		return apply(ctx, cmd)
+	}, viewMembershipResult)
 }
 
 func (h *handlers) suspendMembership(w http.ResponseWriter, r *http.Request) {
 	h.membershipTransition(w, r, membership.ActionSuspend,
-		func(r *http.Request, cmd membership.Command) (membership.Result, error) {
-			return h.services.Memberships.Suspend(r.Context(), cmd)
+		func(ctx stdcontext.Context, cmd membership.Command) (membership.Result, error) {
+			return h.services.Memberships.Suspend(ctx, cmd)
 		})
 }
 
 func (h *handlers) restoreMembership(w http.ResponseWriter, r *http.Request) {
 	h.membershipTransition(w, r, membership.ActionRestore,
-		func(r *http.Request, cmd membership.Command) (membership.Result, error) {
-			return h.services.Memberships.Restore(r.Context(), cmd)
+		func(ctx stdcontext.Context, cmd membership.Command) (membership.Result, error) {
+			return h.services.Memberships.Restore(ctx, cmd)
 		})
 }
 
 func (h *handlers) revokeMembership(w http.ResponseWriter, r *http.Request) {
 	h.membershipTransition(w, r, membership.ActionRevoke,
-		func(r *http.Request, cmd membership.Command) (membership.Result, error) {
-			return h.services.Memberships.Revoke(r.Context(), cmd)
+		func(ctx stdcontext.Context, cmd membership.Command) (membership.Result, error) {
+			return h.services.Memberships.Revoke(ctx, cmd)
 		})
 }
 
@@ -250,16 +246,13 @@ func (h *handlers) createWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	record, err := h.services.Workspaces.Create(r.Context(), workspace.CreateRequest{
-		DisplayName: body.DisplayName,
-		Type:        body.Type,
-		TenantID:    scope.TenantID(),
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusCreated, viewWorkspace(record))
+	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (workspace.Workspace, error) {
+		return h.services.Workspaces.Create(ctx, workspace.CreateRequest{
+			DisplayName: body.DisplayName,
+			Type:        body.Type,
+			TenantID:    scope.TenantID(),
+		})
+	}, viewWorkspace)
 }
 
 func (h *handlers) getWorkspace(w http.ResponseWriter, r *http.Request) {
@@ -288,7 +281,7 @@ type workspaceCommand struct {
 }
 
 func (h *handlers) workspaceTransition(w http.ResponseWriter, r *http.Request,
-	apply func(*http.Request, workspace.Command) (workspace.Workspace, error)) {
+	apply func(stdcontext.Context, workspace.Command) (workspace.Workspace, error)) {
 	if _, ok := requireTenant(w, r); !ok {
 		return
 	}
@@ -300,32 +293,30 @@ func (h *handlers) workspaceTransition(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	record, err := apply(r, workspace.Command{
+	cmd := workspace.Command{
 		WorkspaceID:     workspaceID,
 		ExpectedVersion: body.ExpectedVersion,
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
 	}
-	respond(w, http.StatusOK, viewWorkspace(record))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (workspace.Workspace, error) {
+		return apply(ctx, cmd)
+	}, viewWorkspace)
 }
 
 func (h *handlers) archiveWorkspace(w http.ResponseWriter, r *http.Request) {
-	h.workspaceTransition(w, r, func(r *http.Request, cmd workspace.Command) (workspace.Workspace, error) {
-		return h.services.Workspaces.Archive(r.Context(), cmd)
+	h.workspaceTransition(w, r, func(ctx stdcontext.Context, cmd workspace.Command) (workspace.Workspace, error) {
+		return h.services.Workspaces.Archive(ctx, cmd)
 	})
 }
 
 func (h *handlers) restoreWorkspace(w http.ResponseWriter, r *http.Request) {
-	h.workspaceTransition(w, r, func(r *http.Request, cmd workspace.Command) (workspace.Workspace, error) {
-		return h.services.Workspaces.Restore(r.Context(), cmd)
+	h.workspaceTransition(w, r, func(ctx stdcontext.Context, cmd workspace.Command) (workspace.Workspace, error) {
+		return h.services.Workspaces.Restore(ctx, cmd)
 	})
 }
 
 func (h *handlers) retireWorkspace(w http.ResponseWriter, r *http.Request) {
-	h.workspaceTransition(w, r, func(r *http.Request, cmd workspace.Command) (workspace.Workspace, error) {
-		return h.services.Workspaces.Retire(r.Context(), cmd)
+	h.workspaceTransition(w, r, func(ctx stdcontext.Context, cmd workspace.Command) (workspace.Workspace, error) {
+		return h.services.Workspaces.Retire(ctx, cmd)
 	})
 }
 
@@ -346,23 +337,18 @@ func (h *handlers) issueInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	issued, err := h.services.Invitations.Issue(r.Context(), invitation.IssueRequest{
-		TargetIdentifier: body.TargetIdentifier,
-		WorkspaceID:      body.WorkspaceID,
-		SubjectType:      body.SubjectType,
-		Reason:           body.Reason,
-		TTL:              body.TTLSeconds.Duration(),
-	})
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-
 	// The token leaves here and nowhere else. `issuedView` is the only view that carries one, and
 	// `TestTokenAppearsOnlyOnIssue` asserts no other response can.
-	respond(w, http.StatusCreated, issuedView{
-		Invitation: viewInvitation(issued.Invitation),
-		Token:      string(issued.Token),
+	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (invitation.Issued, error) {
+		return h.services.Invitations.Issue(ctx, invitation.IssueRequest{
+			TargetIdentifier: body.TargetIdentifier,
+			WorkspaceID:      body.WorkspaceID,
+			SubjectType:      body.SubjectType,
+			Reason:           body.Reason,
+			TTL:              body.TTLSeconds.Duration(),
+		})
+	}, func(issued invitation.Issued) issuedView {
+		return issuedView{Invitation: viewInvitation(issued.Invitation), Token: string(issued.Token)}
 	})
 }
 
@@ -390,12 +376,9 @@ func (h *handlers) revokeInvitation(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	record, err := h.services.Invitations.Revoke(r.Context(), invitationID)
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusOK, viewInvitation(record))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (invitation.Invitation, error) {
+		return h.services.Invitations.Revoke(ctx, invitationID)
+	}, viewInvitation)
 }
 
 type acceptInvitationRequest struct {
@@ -416,14 +399,14 @@ func (h *handlers) acceptInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	record, result, err := h.services.Invitations.Accept(r.Context(), invitation.Token(body.Token))
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusOK, acceptInvitationResponse{
-		Invitation: viewInvitation(record),
-		Membership: viewMembershipResult(result),
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (invitation.Acceptance, error) {
+		record, result, err := h.services.Invitations.Accept(ctx, invitation.Token(body.Token))
+		return invitation.Acceptance{Invitation: record, Membership: result}, err
+	}, func(accepted invitation.Acceptance) acceptInvitationResponse {
+		return acceptInvitationResponse{
+			Invitation: viewInvitation(accepted.Invitation),
+			Membership: viewMembershipResult(accepted.Membership),
+		}
 	})
 }
 

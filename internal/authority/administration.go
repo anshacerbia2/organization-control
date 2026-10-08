@@ -163,8 +163,10 @@ func (a *Administration) Grant(ctx context.Context, principal id.UUID, grantScop
 		if err := publish(ctx, tx, grantID, EventGranted); err != nil {
 			return err
 		}
-		record, err = scanRecord(tx.QueryRow(ctx, oneStatement, grantID.String()))
-		return err
+		if record, err = scanRecord(tx.QueryRow(ctx, oneStatement, grantID.String())); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, record)
 	})
 	if err != nil {
 		if errors.Is(err, ErrAlreadyGranted) {
@@ -230,8 +232,10 @@ func (a *Administration) Revoke(ctx context.Context, grantID id.UUID, reason str
 		if err := publish(ctx, tx, grantID, EventRevoked); err != nil {
 			return err
 		}
-		record, err = scanRecord(tx.QueryRow(ctx, oneStatement, grantID.String()))
-		return err
+		if record, err = scanRecord(tx.QueryRow(ctx, oneStatement, grantID.String())); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, record)
 	})
 	if err != nil {
 		for _, sentinel := range []error{ErrGrantNotFound, ErrAlreadyRevoked, ErrLastGrant} {

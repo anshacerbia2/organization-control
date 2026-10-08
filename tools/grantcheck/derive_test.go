@@ -46,6 +46,7 @@ func TestEachStatementIsAttributedToTheRoleThatRunsIt(t *testing.T) {
 		{"a declared boundary", "FROM platform.outbox", providerRole},
 		{"the recorder boundary", "INSERT INTO audit.privileged_access", providerRole},
 		{"the claim store boundary", "UPDATE platform.idempotency_key", tenantRole},
+		{"the posture boundary", "FROM pg_class", tenantRole},
 		{"a helper a consumer body calls", "FROM projection.consumer", consumerRole},
 		{"the same helper from a provider body", "FROM projection.consumer", providerRole},
 		{"a boundary declared for two roles, under the second", "FROM platform.outbox", consumerRole},

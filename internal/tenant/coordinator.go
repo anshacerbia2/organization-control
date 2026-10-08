@@ -420,7 +420,10 @@ func (c *Coordinator) Provision(ctx context.Context, cmd Command) (Result, error
 					}
 					return outstandingRequest(ctx, tx, current.TenantID)
 				})
-			return err
+			if err != nil {
+				return err
+			}
+			return db.Respond(ctx, tx, result)
 		}); err != nil {
 		return Result{}, err
 	}

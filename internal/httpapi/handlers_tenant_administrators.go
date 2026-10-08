@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	stdcontext "context"
 	"net/http"
 	"strings"
 	"time"
@@ -90,15 +91,14 @@ func (h *handlers) grantTenantAdministrator(w http.ResponseWriter, r *http.Reque
 		platform.Problem(w, r, platform.ValidationFailed, "principal_id is not a valid identifier")
 		return
 	}
-	administrator, err := h.services.TenantAdministrators.Grant(r.Context(), tenantID, principal, reason(r))
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusCreated, administratorView{
-		tenantAdminGrantView: viewTenantAdminGrant(administrator.Grant),
-		MembershipID:         administrator.MembershipID.String(),
-		MembershipCreated:    administrator.MembershipCreated,
+	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (authority.Administrator, error) {
+		return h.services.TenantAdministrators.Grant(ctx, tenantID, principal, reason(r))
+	}, func(administrator authority.Administrator) administratorView {
+		return administratorView{
+			tenantAdminGrantView: viewTenantAdminGrant(administrator.Grant),
+			MembershipID:         administrator.MembershipID.String(),
+			MembershipCreated:    administrator.MembershipCreated,
+		}
 	})
 }
 
@@ -114,10 +114,7 @@ func (h *handlers) revokeTenantAdministrator(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	grant, err := h.services.TenantAdministrators.Revoke(r.Context(), tenantID, grantID, reason(r))
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	respond(w, http.StatusOK, viewTenantAdminGrant(grant))
+	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (authority.TenantAdminGrant, error) {
+		return h.services.TenantAdministrators.Revoke(ctx, tenantID, grantID, reason(r))
+	}, viewTenantAdminGrant)
 }

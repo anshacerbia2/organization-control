@@ -12,14 +12,20 @@ package httpapi
 // request that does not exist. `TestAFailedMutationReleasesItsKey` in `internal/db` fails if the
 // claim is moved out of that transaction.
 //
-// # The window this design leaves
+// # Where the response is recorded
 //
-// `idempotency.Complete` needs the status and body, and neither exists until the handler has
-// rendered them — so the completion happens here, after the domain transaction has committed. A
-// process dying in between leaves a key claimed and uncompleted, and later retries of it are refused
-// rather than replayed. The mutation happened exactly once, which is the half that matters; what is
-// lost is being told what it returned. Closing the window entirely would mean the handler owning the
-// transaction, which is a `Within` variant on some thirty service methods across eight packages.
+// A command whose effect commits in one transaction records its response in that transaction
+// (answer, below, and db.Respond): the handler supplies a renderer, the service hands it the result
+// before commit, and the claim, the effect and the response commit together. A process dying between
+// the commit and the reply leaves a key a retry replays, as draft-ietf-httpapi-idempotency-key-
+// header-07 §2.6 asks: "The resource SHOULD respond with the result of the previously completed
+// operation, success or an error."
+//
+// The rest are completed here, after the handler has written, in a transaction of their own: a
+// command whose effects span several transactions, and a key-optional route. A process dying in
+// between leaves the key claimed and uncompleted, and later retries are refused as in progress
+// rather than replayed. The mutation happened exactly once; what is lost is being told what it
+// returned. TDD-organization-control-003 §The Response Is Recorded with the Effect lists them.
 
 import (
 	"bytes"
@@ -121,7 +127,8 @@ func Idempotent(store ClaimCompleter, telemetry *observability.Telemetry) (Middl
 			// caller should get again. A refusal is not recorded: the key was released with the
 			// rolled-back transaction, and storing a 4xx for replay would answer a corrected retry
 			// with the error the first attempt earned.
-			if !db.ClaimMade(ctx) || captured.status < 200 || captured.status > 299 {
+			// A response already recorded with the effect is not recorded again.
+			if !db.ClaimMade(ctx) || db.ClaimCompleted(ctx) || captured.status < 200 || captured.status > 299 {
 				return
 			}
 			if !json.Valid(captured.body) {
@@ -210,4 +217,40 @@ func (c *capturingWriter) Write(p []byte) (int, error) {
 		c.body = append(c.body, p...)
 	}
 	return c.ResponseWriter.Write(p)
+}
+
+// answer runs a command whose effect commits in one transaction and writes its response, recording
+// that response inside the transaction (db.Respond).
+//
+// The body is rendered once. When the service recorded it, the same bytes are written to the caller,
+// so what a retry replays is what the first caller was sent; otherwise, for a request without a key,
+// it is rendered here as respond does.
+func answer[T, V any](w http.ResponseWriter, r *http.Request, status int,
+	call func(stdcontext.Context) (T, error), view func(T) V) {
+	var recorded json.RawMessage
+	ctx := db.WithResponder(r.Context(), func(result any) (int, json.RawMessage, bool) {
+		value, ok := result.(T)
+		if !ok {
+			return 0, nil, false
+		}
+		body, err := json.Marshal(view(value))
+		if err != nil {
+			return 0, nil, false
+		}
+		recorded = body
+		return status, body, true
+	})
+	result, err := call(ctx)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	if recorded == nil || !db.ClaimCompleted(ctx) {
+		respond(w, status, view(result))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	// The trailing newline json.Encoder writes, so the two paths answer byte for byte alike.
+	_, _ = w.Write(append(recorded, '\n'))
 }
