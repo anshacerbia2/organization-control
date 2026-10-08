@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.11.0
+  version: 1.12.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-07
+  last_reviewed: 2026-10-08
   parent_sad: SAD-004
 ---
 
@@ -468,8 +468,8 @@ of `TDD-organization-control-001`, `-002`, `-004` and `-005` refer to it.
 
 **A command requires it.** A command is a `POST` a person or an operator sends to change
 authoritative state: a Tenant administrator acting on Memberships, Workspaces and invitations, or a
-provider acting on Organizations, Tenants, offboardings, grants, activations, Tenant administrators
-and the consumer registry. Sent without the header, or with a blank one, it is refused `400`
+provider acting on Organizations, Tenants, offboardings, grants, activations, Tenant administrators,
+the consumer registry and the review of provider access. Sent without the header, or with a blank one, it is refused `400`
 `validation-failed` with a detail naming the header and what it is for, before anything is decoded
 or read. The IETF draft that standardises the header gives that answer: "If the `Idempotency-Key`
 request header is missing for a documented idempotent operation requiring this header, the resource
@@ -484,7 +484,7 @@ a caller the route does not admit is told `403` rather than about a header.
 | Organizations and Tenants (this design) | `POST /v1/organizations`; `/{organization_id}/suspend`, `/restore`, `/retire`; `POST /v1/tenants`; `/{tenant_id}/activate`, `/suspend`, `/restore`, `/provisioning` |
 | Invitations (`-004`) | `POST /v1/invitations`; `/{invitation_id}/revoke`; `/accept`; `/verify-identity` |
 | Offboardings and obligations (`-004`) | `POST /v1/offboardings`; `/{offboarding_id}/freeze`, `/complete-freeze`, `/release`, `/retire`, `/cancel`, `/legal-hold`, `/obligations`; `POST /v1/obligations/{obligation_id}/resolve` |
-| Provider authority (`-001`) | `POST /v1/provider-grants`; `/{grant_id}/revoke`; `POST /v1/provider-activations`; `/{activation_id}/approve`, `/deny`, `/end`; `POST /v1/tenants/{tenant_id}/administrators`; `/{grant_id}/revoke` |
+| Provider authority (`-001`) | `POST /v1/provider-grants`; `/{grant_id}/revoke`; `POST /v1/provider-activations`; `/{activation_id}/approve`, `/deny`, `/end`; `POST /v1/tenants/{tenant_id}/administrators`; `/{grant_id}/revoke`; `POST /v1/privileged-access/reviews` (1.12.0) |
 | Consumer registry (`-002`) | `POST /v1/projections/consumers`; `/{consumer_id}/retire` |
 
 **Every other `POST` honours a key and does not require one**, each for a reason of its own. None is

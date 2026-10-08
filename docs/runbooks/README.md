@@ -38,8 +38,9 @@ serves.
 - `$OC` is the service base URL. `$TOKEN` is a provider access token. Examples use `curl`.
 - Direct SQL reads use the migration credential (`ORGANIZATION_MIGRATION_DATABASE_URL`). Use
   `SELECT` only, inside `BEGIN READ ONLY;`, and paste the statement and its output into the
-  incident record. No runtime role can read `audit.privileged_access` or list dead letters, which is
-  why these reads are not API calls (see each runbook's "Gaps").
+  incident record. No route lists dead letters, which is why those reads are not API calls (see
+  each runbook's "Gaps"). `audit.privileged_access` is read through `GET /v1/privileged-access`
+  (`provider-access-review.md`).
 - Severity follows the alert rule. A `critical` alert is a page. A `warning` alert is a ticket for
   the next working day.
 - After each use, update the runbook with what was missing. "Details in playbooks go out of date at
