@@ -891,6 +891,15 @@ one [R3]. So `invitation_expiry_read` admits `expired` as well as the two states
 policies are declared in `posture.AdditionalPolicies`, so startup and readiness refuse a database
 that has lost one or gained another.
 
+**The views are handed to `organization_migrator` by name.** A view belongs to whoever ran the
+stage that created it, and CI and `deploy/dev` run the stages as a superuser. A superuser-owned view
+applies no policy at all: "Superusers and roles with the BYPASSRLS attribute always bypass the row
+security system when accessing a table" [R6]. The first CI run of this design showed it: a
+`requested` request was declared `realized` through the view. So `-stage=post` sets each view's
+owner to `organization_migrator`, which is `NOSUPERUSER NOBYPASSRLS` and bound by `FORCE`, and
+grants that role the columns the views name, which it already holds where it owns the tables. The
+policies are then the whole of what the views can do, whoever runs the stage.
+
 The two routes remain for an operator. They run the same statements through the same views under a
 provider scope, which records the operator's access as before.
 
@@ -1079,3 +1088,4 @@ three.
 | R3 | PostgreSQL 17, *CREATE POLICY*, <https://www.postgresql.org/docs/17/sql-createpolicy.html>, accessed 2026-10-09: "Typically an UPDATE command also needs to read data from columns in the relation being updated (e.g., in a WHERE clause or a RETURNING clause, or in an expression on the right hand side of the SET clause). In this case, SELECT rights are also required on the relation being updated, and the appropriate SELECT or ALL policies will be applied in addition to the UPDATE policies." Table 297 applies the `SELECT` policy to an `UPDATE`'s existing and new row "If read access is required to either the existing or new row" |
 | R4 | Prometheus, *Instrumentation*, "Timestamps, not time since", <https://prometheus.io/docs/practices/instrumentation/>, accessed 2026-10-09: "If you want to track the amount of time since something happened, export the Unix timestamp at which it happened - not the time since it happened. With the timestamp exported, you can use the expression time() - my_timestamp_metric to calculate the time since the event, removing the need for update logic and protecting you against the update logic getting stuck." and, of batch jobs, "The key metric of a batch job is the last time it succeeded." |
 | R5 | Prometheus, *Alerting*, "Batch jobs", <https://prometheus.io/docs/practices/alerting/>, accessed 2026-10-09: "For batch jobs it makes sense to page if the batch job has not succeeded recently enough, and this will cause user-visible problems. This should generally be at least enough time for 2 full runs of the batch job." |
+| R6 | PostgreSQL 17, *Row Security Policies*, <https://www.postgresql.org/docs/17/ddl-rowsecurity.html>, accessed 2026-10-09: "Superusers and roles with the BYPASSRLS attribute always bypass the row security system when accessing a table." |

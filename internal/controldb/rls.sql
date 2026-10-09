@@ -439,6 +439,16 @@ COMMENT ON VIEW operation.lifecycle_signals IS
 --
 -- The routes POST /v1/provisioning/sweep-unresolved and POST /v1/invitations/expire-lapsed run the
 -- same statements through the same views under a provider scope.
+--
+-- Each view is handed to organization_migrator explicitly. A view belongs to whoever ran this stage,
+-- and where that is a superuser -- CI, and deploy/dev, which run the stages as `postgres` -- the view
+-- reads with a superuser's privileges and no policy applies to it at all: "Superusers and roles with
+-- the BYPASSRLS attribute always bypass the row security system when accessing a table" (PostgreSQL
+-- 17, Row Security Policies). The first CI run showed it, with
+-- a requested request declared realized through the view. Owned by organization_migrator, which is
+-- NOSUPERUSER NOBYPASSRLS and bound by FORCE, the policies below are the whole of what the views can
+-- do, whoever runs the stage. grants.sql gives the role the columns the views name, which it holds
+-- anyway where it owns the tables.
 DROP POLICY IF EXISTS provisioning_request_sweep ON tenant.provisioning_request;
 CREATE POLICY provisioning_request_sweep ON tenant.provisioning_request
     FOR UPDATE
@@ -451,6 +461,7 @@ CREATE VIEW operation.provisioning_sweep WITH (security_barrier) AS
 SELECT request_id, requested_at, state, resolved_at, detail
   FROM tenant.provisioning_request
  WHERE state = 'requested';
+ALTER VIEW operation.provisioning_sweep OWNER TO organization_migrator;
 COMMENT ON VIEW operation.provisioning_sweep IS
     'Provisioning requests still requested, which the scheduled sweep ages to unresolved. TDD-organization-control-003 §Scheduled Sweeps.';
 
@@ -475,5 +486,6 @@ SELECT invitation_id, tenant_id, workspace_id, subject_type, state, correlation_
   FROM invitation.invitation
  WHERE state IN ('pending', 'identity_verified')
    AND expires_at <= now();
+ALTER VIEW operation.invitation_expiry OWNER TO organization_migrator;
 COMMENT ON VIEW operation.invitation_expiry IS
     'Invitations past their expiry and not yet expired, which the scheduled sweep expires. TDD-organization-control-004 §Expiry Sweep.';
