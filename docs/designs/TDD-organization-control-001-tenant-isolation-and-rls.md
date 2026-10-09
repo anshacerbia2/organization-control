@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.21.0
+  version: 1.22.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-08
+  last_reviewed: 2026-10-09
   parent_sad: SAD-004
 ---
 
@@ -1099,6 +1099,50 @@ purge to the maintenance stage.
 | R8 | PostgreSQL 17 Documentation, §39.5 *Rules and Privileges*, <https://www.postgresql.org/docs/17/rules-privileges.html>, and *CREATE VIEW*, <https://www.postgresql.org/docs/17/sql-createview.html>, accessed 2026-10-08: "all relations that are used due to rules get checked against the privileges of the rule owner, not the user invoking the rule"; views "cannot be used to reliably conceal the data in unseen rows unless the security_barrier flag has been set"; `security_barrier` "should be used if the view is intended to provide row-level security." |
 | R9 | Center for Internet Security, *CIS Controls Assessment Specification v8.1*, Controls 8, <https://cas.docs.cisecurity.org/en/latest/source/Controls8/>, accessed 2026-10-08. 8.10: "Retain audit logs across enterprise assets for a minimum of 90 days." 8.11: "Conduct reviews of audit logs to detect anomalies or abnormal events that could indicate a potential threat. Conduct reviews on a weekly, or more frequent, basis." |
 
+### Pausing Tenant Administration
+
+1.22.0. SAD-004 §9.1.1 has a restore to an older point reconciled and contained "before normal
+operation", with the whole Tenancy control plane as the blast radius until it is. The reconciliation
+is `TDD-organization-control-002` §After a Restore to an Older Point. This is the containment: a
+provider pauses every Tenant administrator's command, so authority does not change under the operator
+while the security versions are reconciled, and lifts the pause when they are.
+
+```text
+GET  /v1/tenant-administration-pause              provider, X-Administrative-Reason
+POST /v1/tenant-administration-pause  {"paused": true | false}
+                                                  provider, X-Administrative-Reason, Idempotency-Key
+  200 {"paused", "pause_id", "reason", "actor_id", "correlation_id", "recorded_at"}
+```
+
+**What it pauses.** Every request a Tenant administrator makes with a method other than `GET`, `HEAD`
+or `OPTIONS` (safe methods, RFC 9110 §9.2.1; `TRACE`, the fourth, is served by no route), refused `503` before it reaches a handler, with a
+detail saying the same command can be sent again once the pause is lifted. RFC 9110 §15.6.4 gives
+`503` to a server "currently unable to handle the request due to a temporary overload or scheduled
+maintenance, which will likely be alleviated after some delay". The problem type is foundation-platform's
+`dependency-unavailable`, the one `503` it defines; a type of its own would be a foundation-platform
+change. Reads continue, so a Tenant administrator can still see its Tenant. Provider acts continue,
+because the operator's repairs are provider acts, and so do consumers' protocol calls.
+
+**Where it is enforced.** At authentication, beside the caller records, for the reason those are read
+there: a Tenant administrator's standing is read for each request, so a pause takes effect at the
+next command and so does its lifting. It is read on the provider connections, like the provider grants
+and consumer registrations, because the table is about every Tenant at once and lives in the
+`organization` schema, where the tenant role holds nothing (§Roles). A pause that cannot be read
+refuses the command, `503`: a command let through because the record was unreachable is the change
+the pause exists to stop.
+
+**The record.** `organization.tenant_administration_pause` is append-only. Each row is one decision,
+paused or lifted, with the provider who made it, the correlation identifier and the reason, which is
+the request's `X-Administrative-Reason`; the latest row is the state. The provider role holds
+`SELECT` and `INSERT` and no `UPDATE`, so a decision is never rewritten. No row means not paused.
+Each read and each decision is also a privileged access, recorded with the reason.
+
+**From before the service starts.** A pause made through the API after a restore leaves the time
+between the service starting and the call in which a Tenant administrator can still change authority.
+`deploy/dev/restore.sh` with `PAUSE_REASON` records the pause in the restored database before anything
+serves. That row names no actor: no person made it through the API. A check holds that only a pause
+may name none, so lifting one is always a provider's named decision.
+
 ### Provider Authority Projection
 
 `ADR-ORG-002 §5.3` has the Identity Control API read `provider:identity-control` grants and
@@ -1210,7 +1254,10 @@ The assertion fails when any table in those schemas has `relrowsecurity = false`
 `SUPERUSER` or `BYPASSRLS`, or when one holds a DDL privilege. A policy beyond the tenant
 and provider pair must be declared by name in `posture.AdditionalPolicies`: the
 resolver's reads of the two history tables, and the consumer's reads of
-`membership.membership` and `tenant.tenant`.
+`membership.membership` and `tenant.tenant`. From 1.22.0 also the migration role's three `SELECT`
+policies on `operation.offboarding`, `operation.offboarding_obligation` and
+`tenant.provisioning_request`, which serve `operation.lifecycle_signals`, a view of counts and ages
+naming no row (`TDD-organization-control-004` §Operational Notes).
 
 Grants and policies drift through migrations. Asserting them on every build is what
 keeps the boundary real after the engineer who wrote it has moved on.
@@ -1280,6 +1327,8 @@ of place:
   | `access.Recorder.RecordProviderAccess` | `organization_provider_rt` | `access.New(providerConns)` |
   | `db.ClaimStore.Complete` | `organization_rt` | `db.NewClaimStore(tenantConns)` |
   | `projection.FrontierReader.FrontierFor` | `organization_provider_rt`, `organization_consumer_rt` | `projection.NewFrontierReader(providerConns)`, and `(consumerConns)` |
+  | `projection.SignalsReader.Read`, `.ReadLifecycle` (1.22.0) | `organization_provider_rt` | `projection.NewSignalsReader(providerConns)` |
+  | `authority.Reader.ProviderStanding`, `.ConsumerFor`, `.TenantAdministrationPaused` (1.22.0), and the reader's other methods | `organization_provider_rt` | `authority.NewReader(providerConns)` |
 
   Changing that wiring means changing the tool's table in the same change.
 
@@ -1622,10 +1671,29 @@ A `WITH CHECK` rejection means application code attempted to write a row into a 
 it was not bound to. That is a defect or an attack, and it is treated as a security
 finding rather than a validation error.
 
+**The first two are exported from 1.22.0.** Both reach the HTTP surface as an internal error, which
+answers `500` and withholds the cause. Every such error is now logged at ERROR with the method, the
+route pattern and the cause. One an isolation control raised is classified by its SQLSTATE and logged
+as "an isolation control refused a statement" with its `control`, and counted in
+`organization_isolation_refusals_total{control}`:
+
+| `control` | PostgreSQL raises | Alert |
+| :-- | :-- | :-- |
+| `with_check` | `42501`, "new row violates row-level security policy", which only a `WITH CHECK` expression raises | `IsolationWithCheckRejection`, critical at any in 15 minutes |
+| `unset_binding` | `42704`, "unrecognized configuration parameter", on a connection that never set the scope; `22P02`, an empty value cast to `uuid` or `boolean`, on one where an earlier `SET LOCAL` left it empty | `IsolationUnsetBindingWarning` at any in an hour, `IsolationUnsetBindingCritical` at 5 |
+
+A counter in the process, not a gauge read from the database: the refusal leaves no row, since the
+statement it refused rolled back. The surface reads the driver's error through its `SQLState()`
+method alone, because `arch.json` denies this repository the driver. The other signals are as before:
+the provider transaction without a reason cannot happen (`db.ErrReasonRequired` refuses it before the
+transaction opens), the assertion and the posture are CI and readiness failures, and the unreviewed
+access is §Privileged Access Review's report.
+
 Runbooks required before production: unset-binding investigation, `WITH CHECK`
 rejection triage, provider-access review, and suspected cross-tenant exposure.
 Written: `docs/runbooks/provider-access-review.md`, which reads the record through the routes of
-§Privileged Access Review from 1.21.0. The other three are not written yet.
+§Privileged Access Review from 1.21.0. Written (1.22.0): `docs/runbooks/unset-binding.md`,
+`docs/runbooks/with-check-rejection.md` and `docs/runbooks/cross-tenant-exposure.md`.
 
 ### Restore Evidence
 
@@ -1684,8 +1752,10 @@ runs after the restore, so `roles.sql`, `rls.sql`, `grants.sql` and the login ro
   restore loses the events after it, while consumers keep them: a consumer holds a higher version
   than authority, and authority's next version of that Membership can equal one the consumer
   already holds, which the consumer discards. SAD-004 §6.6 requires a reconciliation and
-  containment plan for this, and none is built.
-  `docs/runbooks/organization-database-restore.md` says what an operator does meanwhile.
+  containment plan for this. From 1.22.0 the containment is §Pausing Tenant Administration and the
+  reconciliation of Memberships is `TDD-organization-control-002` §After a Restore to an Older Point;
+  `docs/runbooks/organization-database-restore.md` runs both. Tenant security versions and provider
+  grant versions are not reconciled, and the drill exercises neither part.
 - **Production size.** The duration is measured on CI data.
 - **Erasure.** This service has no right-to-erasure path, so it keeps no tombstones for a restore
   to re-apply (`STD-GLB-007` §GDPR Right-to-Erasure). When one is built, the drill proves it.

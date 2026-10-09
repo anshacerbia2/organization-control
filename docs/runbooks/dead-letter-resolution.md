@@ -1,6 +1,6 @@
 # Runbook: dead-letter resolution
 
-Version 1.0.0. Owner: Core Platform Team. Last reviewed 2026-10-07.
+Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
 
 A consumer refused an event and the dispatcher dead-lettered it. A dead letter is keyed
 `(event_id, consumer)`: an event refused by two consumers is two incidents, recovered once per
@@ -24,27 +24,48 @@ consumer (TDD-organization-control-005).
 
 ## Diagnosis
 
-1. Read the incidents (SQL, read-only; no route lists dead letters):
+1. List the consumer's incidents, as a provider:
 
-   ```sql
-   SELECT d.event_id, d.consumer, d.event_type, d.failure_class, d.failure_detail,
-          d.attempts, d.dead_lettered_at, d.waived_until,
-          e.membership_id, e.membership_version
-     FROM platform.dead_letter d
-     LEFT JOIN membership.membership_event e ON e.event_id = d.event_id
-    WHERE d.resolved_at IS NULL
-    ORDER BY d.consumer, e.membership_id, e.membership_version;
+   ```sh
+   curl -sS "$OC/v1/projections/consumers/$CONSUMER/dead-letters?state=open&limit=100" \
+     -H "Authorization: Bearer $TOKEN" -H "X-Administrative-Reason: INC-123 dead-letter diagnosis"
    ```
 
-   For a Tenant event, join `tenant.tenant_event` on `event_id` instead and read
-   `tenant_security_version`.
+   `state` is `open` (unresolved, waived or not) or `resolved`; absent lists both. The page is
+   `{"dead_letters": [...], "next": "<event_id>" | null}`, keyset on `event_id`, `limit` 1 to 100.
+   Each item carries:
+   - `event_id`, `consumer`, `event_type`, and `authority_bearing`: true for a Membership, Tenant or
+     provider grant event, which is security debt;
+   - `aggregate_id` and `version`: the Membership, Tenant or grant the event is about, and the
+     version it carried (`membership_version`, `tenant_security_version` or `grant_version`, read
+     from the stored payload). Null on a row that predates them, or whose payload was disposed of
+     after a waiver;
+   - `lane` (`priority` or `standard`, the lane a replay takes), `failure_class`, `failure_detail`,
+     `attempts`, `first_failed_at`, `dead_lettered_at`;
+   - `resolved_at`, `resolution_type`, `resolved_by`, `resolution_reference`;
+   - `waived_at`, `waived_until`, `waived_by`, `waiver_reason`.
+
+   Group by `aggregate_id` and order by `version`: the decision table turns on the highest version
+   of each. A retired consumer is listed too; a consumer never registered answers `404`. Each page is
+   recorded in `audit.privileged_access` with the reason.
 
 2. Read `failure_detail`. It is the consumer's refusal. Fix that cause with the consumer's owner
    before replaying anything: a replay of an event the consumer still refuses dead-letters again.
 
 3. Is the consumer active? `GET /v1/projections/consumers/{consumer}` as a provider.
 
-4. Has a newer version of the same Membership been applied by that consumer?
+4. Has a newer version of the same Membership been applied by that consumer? Read the Membership's
+   latest transition as a provider, naming its Tenant (the payload's `tenant_id`, or the Tenant the
+   incident is about):
+
+   ```sh
+   curl -sS "$OC/v1/tenants/$TENANT_ID/memberships/$MEMBERSHIP_ID/enforcement" \
+     -H "Authorization: Bearer $TOKEN" -H "X-Administrative-Reason: INC-123 superseded check"
+   ```
+
+   If its `event_id` is not the dead letter's and `consumers` shows `consumer_applied` for this
+   consumer, a newer version is applied: SUPERSEDED (B). For a Tenant event, or to see every version's
+   receipt, read the receipts (SQL, read-only; no route reads them):
 
    ```sql
    SELECT e.event_id, e.membership_version, r.evidence, r.recorded_at
@@ -53,6 +74,9 @@ consumer (TDD-organization-control-005).
     WHERE e.membership_id = $MEMBERSHIP_ID
     ORDER BY e.membership_version DESC;
    ```
+
+   For a Tenant, join `tenant.tenant_event` on `event_id` instead and read
+   `tenant_security_version`.
 
 ## Decision table
 
@@ -83,7 +107,9 @@ curl -sS -X POST "$OC/v1/dead-letters/$EVENT_ID/consumers/$CONSUMER/replay" \
   -H "Idempotency-Key: $(uuidgen)"
 ```
 
-`202` with `resolved: false`. Replay resolves nothing. Wait for the receipt:
+`202` with `resolved: false`. Replay resolves nothing. Wait for the receipt. For a Membership
+whose replayed event is its latest transition, the provider enforcement read of diagnosis 4 shows it
+as `consumer_applied`; otherwise read it (SQL, read-only):
 
 ```sql
 SELECT evidence, recorded_at FROM platform.delivery_receipt
@@ -139,8 +165,10 @@ item 12). Do not update the row by hand. Escalate to the design owner.
 
 - `organization_security_debt_dead_letters{consumer}` returns to 0 and `SecurityDebt` clears.
 - `GET /v1/projections/frontier` reads `security_debt: false`.
-- The incident row has `resolved_at`, `resolution_type`, `resolved_by` and
-  `resolution_reference`. `audit.privileged_access` holds both the attempt and the outcome.
+- `GET /v1/projections/consumers/{consumer_id}/dead-letters?state=open` no longer lists it, and
+  with `state=resolved` it carries `resolved_at`, `resolution_type`, `resolved_by` and
+  `resolution_reference`. `GET /v1/privileged-access?correlation_id=...` holds both the attempt and the
+  outcome.
 - The next `-stage=maintenance` run exits 0.
 
 ## Escalation
@@ -151,11 +179,17 @@ item 12). Do not update the row by hand. Escalate to the design owner.
 
 ## Gaps
 
-- No route lists dead letters, so diagnosis needs SQL on the migration credential.
+- No route reads `platform.delivery_receipt` beyond a Membership's latest transition, so a Tenant
+  event's receipts, and an older version's, need SQL on the migration credential.
+- A dead letter that names no consumer (`consumer` NULL, from before foundation-platform v0.2.8) is
+  in no consumer's list. It counts in every consumer's debt; find it with SQL:
+  `SELECT event_id, event_type, dead_lettered_at FROM platform.dead_letter WHERE consumer IS NULL AND resolved_at IS NULL;`.
+- `version` comes from the stored payload. Once a waiver lets the maintenance stage dispose of the
+  payload, it reads null.
 
 ## References
 
 | # | Source |
 | :-- | :-- |
-| R1 | TDD-organization-control-005 §API / Interface, §The resolution predicate, §WAIVED, §Rebuilding a consumer, §The superseded case, §Operational Notes |
+| R1 | TDD-organization-control-005 §API / Interface (the list, 2.5.0), §The resolution predicate, §WAIVED, §Rebuilding a consumer, §The superseded case, §Operational Notes |
 | R2 | Google, *Site Reliability Workbook*, "On-Call", <https://sre.google/workbook/on-call/>: "On-call engineers should update the playbook with fresh information when the corresponding page fires." |

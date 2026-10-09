@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.12.0
+  version: 1.13.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-08
+  last_reviewed: 2026-10-09
   parent_sad: SAD-004
 ---
 
@@ -108,6 +108,13 @@ does not exist yet.
 `retired` is terminal. There is no transition out of it, because the identifiers of a
 retired Tenant have been released to consumers as retired and reviving one would make
 a downstream projection wrong in a way no reconciliation would detect.
+
+**A refusal before the dispatch was recorded (1.13.0).** The machine has no `requested -> failed`
+edge, and a provisioning system can refuse a Tenant whose dispatch this service never recorded. The
+refusal walks the declared path, `provision` then `fail`, in one transaction. That is safe because
+both transitions are silent and neither increments the security version (§Published Events). The
+edge is not added: the machine is asserted as one table, and an edge added for one caller would be
+inherited by every other.
 
 #### Who issues which transition
 
@@ -355,6 +362,11 @@ POST   /v1/tenants/{tenant_id}/activate
 POST   /v1/tenants/{tenant_id}/suspend
 POST   /v1/tenants/{tenant_id}/restore
 
+POST   /v1/tenants/{tenant_id}/provisioning              dispatch, or retry after failed (1.13.0)
+POST   /v1/provisioning/realized         {"correlation_id", "detail"?}       the provisioning system's reports (1.13.0)
+POST   /v1/provisioning/failed           {"correlation_id", "detail"}
+POST   /v1/provisioning/sweep-unresolved {"size"}                             ages unanswered requests (1.13.0)
+
 Tenant-scoped: the Tenant is the caller's, from the token, and never in the path
 GET    /v1/workspaces                             ?after=&limit=&status=
 POST   /v1/workspaces
@@ -372,6 +384,17 @@ pattern. A Workspace route names no Tenant, because a tenant-scoped route takes 
 from the token (`TDD-organization-control-001` §Scope Resolution): a Tenant in the path
 would be a requested scope for a handler to compare, and here there is none to mistake for
 the bound one. A client follows this list, not the earlier one.
+
+**The provisioning routes (1.13.0).** The routes above this design's 1.12.0 list stopped at
+activation, while it requires realized-status correlation and gives this service no inbound
+transport but HTTP. The four provisioning routes mirror `POST /v1/offboardings/{id}/deprovisioning`,
+which reports the other direction's outcome. All four are provider routes. The two reports are made
+by the provisioning system, and they are authenticated all the same: a callback exempted for an
+external system's convenience would let anyone holding a correlation identifier declare a Tenant's
+boundary built, and activation reads exactly that statement. The correlation identifier is in the
+body, not the path, because it is the handle the desired-state publication carried outward and not
+this service's identifier for a resource. A report answers `200` on a first delivery and on a
+replay, and says which in `replay`.
 
 ### Lists
 
@@ -483,9 +506,18 @@ a caller the route does not admit is told `403` rather than about a header.
 | Workspaces (this design) | `POST /v1/workspaces`; `/{workspace_id}/archive`, `/restore`, `/retire` |
 | Organizations and Tenants (this design) | `POST /v1/organizations`; `/{organization_id}/suspend`, `/restore`, `/retire`; `POST /v1/tenants`; `/{tenant_id}/activate`, `/suspend`, `/restore`, `/provisioning` |
 | Invitations (`-004`) | `POST /v1/invitations`; `/{invitation_id}/revoke`; `/accept`; `/verify-identity` |
-| Offboardings and obligations (`-004`) | `POST /v1/offboardings`; `/{offboarding_id}/freeze`, `/complete-freeze`, `/release`, `/retire`, `/cancel`, `/legal-hold`, `/obligations`; `POST /v1/obligations/{obligation_id}/resolve` |
-| Provider authority (`-001`) | `POST /v1/provider-grants`; `/{grant_id}/revoke`; `POST /v1/provider-activations`; `/{activation_id}/approve`, `/deny`, `/end`; `POST /v1/tenants/{tenant_id}/administrators`; `/{grant_id}/revoke`; `POST /v1/privileged-access/reviews` (1.12.0) |
-| Consumer registry (`-002`) | `POST /v1/projections/consumers`; `/{consumer_id}/retire` |
+| Offboardings and obligations (`-004`) | `POST /v1/offboardings`; `/{offboarding_id}/freeze`, `/complete-freeze`, `/release`, `/retire`, `/cancel`, `/legal-hold`, `/obligations`, `/deprovisioning/resend` (1.13.0); `POST /v1/obligations/{obligation_id}/resolve` |
+| Provider authority (`-001`) | `POST /v1/provider-grants`; `/{grant_id}/revoke`; `POST /v1/provider-activations`; `/{activation_id}/approve`, `/deny`, `/end`; `POST /v1/tenants/{tenant_id}/administrators`; `/{grant_id}/revoke`; `POST /v1/privileged-access/reviews` (1.12.0); `POST /v1/tenant-administration-pause` (1.13.0) |
+| Consumer registry and recovery (`-002`) | `POST /v1/projections/consumers`; `/{consumer_id}/retire`; `POST /v1/projections/advance-versions` (1.13.0) |
+
+From 1.13.0 three more commands are classified as required, per STD-GLB-001 1.4.0 §Commands Require
+an `Idempotency-Key`: each is an operator's change to authoritative state. Sending a failed
+deprovisioning again publishes a command, and a retry of it without a key would publish it twice.
+A pause or its lifting is a decision recorded as a row, and a retry would record it twice. The
+version advance is safe to repeat by its own rule, since a second run finds no Membership behind
+the consumer, and is still a command: it changes authority's versions and publishes events, so it
+is held to the same rule as every other command rather than excepted for a property a later change
+could remove.
 
 **Every other `POST` honours a key and does not require one**, each for a reason of its own. None is
 a person's command:
@@ -623,6 +655,15 @@ com.scnehaux.organization.workspace.lifecycle.archived
 com.scnehaux.organization.workspace.lifecycle.restored
 com.scnehaux.organization.workspace.lifecycle.retired
 ```
+
+**`tenant.lifecycle.requested` carries the desired state (1.13.0).** It is the desired-state
+publication: the event by which the provisioning system learns what to build. The shared Tenant
+payload carries no profile, so this event's payload embeds it unchanged and adds `display_name`,
+`isolation_profile`, `residency_region` (omitted when unset), `provisioning_request_id` and
+`correlation_id`, the two identifiers the provisioning system reports back on
+(`internal/tenant.RequestedPayload`). A consumer projecting Tenants reads the same common fields here
+as on every other Tenant event. Widening the shared payload instead would have made every lifecycle
+event carry an empty display name.
 
 `registry.restored` and `workspace.lifecycle.restored` are additions to the original list,
 which gave both aggregates a way in to their withdrawn state and no way back. An archive or a
@@ -772,6 +813,12 @@ on timeout with no status:
     reconciliation queries the provisioning system and resolves it
 ```
 
+**A correlation identifier matching two Tenants is refused (1.13.0).** "Match by correlation
+identifier" does not say what happens when it matches more than one request. Two requests of one
+Tenant sharing an identifier are unusual and unambiguous: the most recent is the one the outcome is
+about. Requests of two Tenants are refused as ambiguous (`tenant.ErrAmbiguousCorrelation`, `412`),
+never resolved by taking the most recent, which would mark the wrong Tenant's boundary as built.
+
 An unresolved request is never retried automatically. Retrying an operation whose
 outcome is unknown is how a Tenant gets provisioned twice, and EAD-004 §6.6 requires
 critical mutations to define duplicate protection at the business boundary rather than
@@ -885,8 +932,23 @@ The last signal is a correctness assertion expressed as an alert. A suspension t
 does not move the version leaves every consumer holding a projection it has no way to
 know is stale.
 
+**Exported from 1.13.0.** The first two are gauges over `tenant.provisioning_request`, read on each
+metric collection through `operation.lifecycle_signals` (`TDD-organization-control-004` §Operational
+Notes describes the view and why it exists): `organization_provisioning_requests` and
+`organization_provisioning_oldest_request_age_seconds`, labelled `operation` (`provision` or
+`deprovision`) and `state` (`requested` or `unresolved`). `observability/alerts` evaluates them:
+
+| Signal | As alerted |
+| :-- | :-- |
+| Provisioning requests in `unresolved` | `ProvisioningUnresolved`, warning at any. The critical "older than two reconcile intervals" is not alerted, because no reconcile interval is declared: `POST /v1/provisioning/sweep-unresolved` is called, not scheduled |
+| Tenants stuck in `provisioning` | `ProvisioningStuckWarning` and `ProvisioningStuckCritical`, on the oldest `provision` request still `requested`, at 1 and 4 hours. A Tenant is in `provisioning` exactly while its dispatched request awaits an outcome, so the request's age is the Tenant's time there |
+
+Organization retirement refused is a `409` to the operator who asked, and the version assertion is a
+test (§Testing Strategy, Security Version); neither is exported.
+
 Runbooks required before production: stuck provisioning, unresolved provisioning
-resolution, and Tenant activation refused.
+resolution, and Tenant activation refused. Written (1.13.0): `docs/runbooks/provisioning.md`, all
+three.
 
 ## Traceability
 

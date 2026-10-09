@@ -1,6 +1,6 @@
 # Runbook: stuck offboarding
 
-Version 1.0.0. Owner: Core Platform Team. Last reviewed 2026-10-07.
+Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
 
 An offboarding moves `freeze -> obligations -> release -> retired`, or ends `cancelled`. Each stage
 is persisted, so a stopped offboarding resumes from where it is. This runbook finds why one has not
@@ -8,14 +8,24 @@ moved and moves it, or stops it (TDD-organization-control-004 §Offboarding Stag
 
 ## Trigger
 
-The signals TDD-004 §Operational Notes names:
+The signals TDD-004 §Operational Notes names, exported as gauges and alerted:
 
-- an obligation past `due_at`;
-- an offboarding held in `release` by an ambiguous deprovisioning outcome (critical past 24 hours);
-- a Tenant in `offboarding` over 30 days (warning) or 90 days (critical).
+- `OffboardingObligationOverdue` (warning): `organization_offboarding_obligations_overdue > 0`, an
+  open obligation past its `due_at`. `organization_offboarding_oldest_overdue_obligation_age_seconds`
+  is how long past.
+- `OffboardingReleaseAmbiguous` (warning): an offboarding held in `release` by an `unresolved`
+  deprovisioning, `organization_provisioning_requests{operation="deprovision",state="unresolved"} > 0`.
+  `OffboardingReleaseAmbiguousCritical` (critical) when it has been ambiguous over 24 hours,
+  `organization_provisioning_oldest_request_age_seconds{operation="deprovision",state="unresolved"}`.
+- `OffboardingProlongedWarning` (over 30 days) and `OffboardingProlongedCritical` (over 90 days):
+  the oldest offboarding still in `freeze`, `obligations` or `release`,
+  `organization_offboarding_oldest_in_progress_age_seconds`; `organization_offboarding_in_progress`
+  counts them.
+- `LifecycleTelemetryAbsent` (warning): none of these for 10 minutes. The alerts above are blind; run
+  diagnosis step 1 by hand until it clears.
+- An operator or a domain reports an offboarding that does not move.
 
-None of them is exported as a metric yet (see "Gaps"). Until then, run diagnosis step 1 weekly and
-whenever an operator or a domain reports an offboarding that does not move.
+The gauges name no offboarding and no Tenant. Find them with diagnosis step 1.
 
 ## Impact
 
@@ -60,7 +70,7 @@ whenever an operator or a domain reports an offboarding that does not move.
 | `obligations` | None outstanding, no hold | Release (D) |
 | `release` | `deprovisioning.state` `requested` | In flight. Wait for the provisioning system. Past `ORGANIZATION_PROVISIONING_TIMEOUT` (default 30m), the sweep marks it `unresolved` (E) |
 | `release` | `unresolved` | Ambiguous: the infrastructure may or may not be released (E) |
-| `release` | `failed` | Refused by the provisioning system (E) |
+| `release` | `failed` | Refused by the provisioning system. Once its cause is fixed, send it again (H) |
 | `release` | `realized` | Retire (F) |
 | `freeze` or `obligations` | The offboarding was a mistake | Cancel (G) |
 | `cancelled` | `restore_pending` above 0 | Send the cancel again (G) |
@@ -113,8 +123,9 @@ All are provider commands: `X-Administrative-Reason` and an `Idempotency-Key` ar
   3. The provisioning system reports, or you report on its behalf with its confirmation:
      `POST /v1/offboardings/{id}/deprovisioning` with `{"state":"realized"}`, or
      `{"state":"failed","detail":"..."}`. `204`. It records; it never advances the stage.
-  4. A `failed` deprovisioning is retried by the provisioning system, which reports `realized`
-     when it succeeds. This service has no route to send the command again.
+  4. A `failed` deprovisioning is sent again with H once the provisioning system's owner has fixed
+     the cause the `detail` names. An `unresolved` one is never sent again: report its outcome
+     first.
 
 - **F. Retire.** `POST /v1/offboardings/{id}/retire` with `{"expected_version": <Tenant version>}`.
   All three gates are checked again at this moment: no obligation open or failed, no legal hold,
@@ -126,6 +137,24 @@ All are provider commands: `X-Administrative-Reason` and an `Idempotency-Key` ar
   `cancelled`, and the frozen Memberships are restored after the Tenant commits. If
   `restore_pending` is above 0 afterwards, send the cancel again with a new key. An offboarding
   begun before TDD-004 1.8.0 shipped has no freeze record, and its cancellation is refused `409`.
+
+- **H. Send a failed deprovisioning again.**
+
+  ```sh
+  curl -sS -X POST "$OC/v1/offboardings/$ID/deprovisioning/resend" -H "Authorization: Bearer $TOKEN" \
+    -H "X-Administrative-Reason: INC-123 infra fixed quota, resend" -H "Idempotency-Key: $(uuidgen)"
+  ```
+
+  - Only in `release`, and only when the latest deprovisioning is `failed`. Anything else is `409`:
+    `requested` is in flight, `realized` is done, and `unresolved` is ambiguous, so sending it again
+    would retry an unknown outcome (SAD-004 §7.5).
+  - The two release gates are checked again: a legal hold or an open or failed obligation refuses it
+    `412`, as it would have refused the release.
+  - It records a new deprovisioning request under the offboarding's `correlation_id` and publishes
+    the `released` event again with a new event identifier, in one transaction. The failed request
+    keeps its record. The stage does not move.
+  - The response is the offboarding view; `deprovisioning.state` reads `requested` with a new
+    `requested_at`.
 
 ## Verification
 
@@ -141,13 +170,16 @@ All are provider commands: `X-Administrative-Reason` and an `Idempotency-Key` ar
 
 ## Gaps
 
-- The four offboarding signals of TDD-004 §Operational Notes are not exported and have no alert
-  rule. Detection is the weekly read above.
+- TDD-004's critical for an obligation "past the contract deadline" is not alerted: no contract
+  deadline is recorded, only `due_at`.
+- The sweep that ages a `requested` deprovisioning into `unresolved` runs only when called
+  (`POST /v1/provisioning/sweep-unresolved`); nothing schedules it ([provisioning](provisioning.md),
+  Gaps). Until it runs, a deprovisioning with no answer reads `requested`, not ambiguous.
 
 ## References
 
 | # | Source |
 | :-- | :-- |
-| R1 | TDD-organization-control-004 §Offboarding, §Offboarding Stages, §Cancellation, §Legal Hold, §Operational Notes |
+| R1 | TDD-organization-control-004 §Offboarding, §Offboarding Stages, §Cancellation, §Legal Hold, §Sending a Failed Deprovisioning Again, §Operational Notes |
 | R2 | TDD-organization-control-003 §Provisioning Correlation (the `unresolved` state) |
 | R3 | NIST SP 800-61r3, §2.3, <https://doi.org/10.6028/NIST.SP.800-61r3>: "Formatting procedures within a playbook instead of another format can improve their usability." |

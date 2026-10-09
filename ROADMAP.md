@@ -287,8 +287,8 @@ breaks the idempotence this design requires and makes a diff of two runs meaning
 
 ## Week 4 · Lifecycle and offboarding
 
-- ✅ Organization, Tenant, and Workspace command surfaces — the services and their state
-  machines; the HTTP routes wait with the composition root below
+- ✅ Organization, Tenant, and Workspace command surfaces — the services, their state machines,
+  and their HTTP routes, served since the composition root below
 - ✅ Invitation intent, expiry, and identity-onboarding correlation
 - ✅ Offboarding: access freeze, obligation tracking, staged retirement
 - ✅ Provider administration paths with reason, approval, and evidence — every cross-Tenant
@@ -366,7 +366,7 @@ on disk, and every column the designs declare against `schema.hcl`.
 | Three events published by code and declared by no design: `organization.registry.restored`, `workspace.lifecycle.restored`, `tenant.offboarding.released` | Added to the Published Events lists in 003 and 004 with the reasoning. A consumer reading the design would not have known to expect them, which is the whole purpose of that list |
 | Four events declared and not published: three `membership.invitation.*`, and `tenant.lifecycle.requested` | All four now published. The three invitation events came with the invitation flow; `tenant.lifecycle.requested` came with Tenant intake, where it doubles as the desired-state publication — no event drift remains in either direction |
 | `internal/db`, `internal/controldb`, and `internal/system` exist and appeared in no component table | Added to TDD-001 §"Packages". A reader who met `TenantPool` in a service signature had no design that mentioned it |
-| `internal/invitation` named by 004 and absent from disk | Correct, and tracked above |
+| `internal/invitation` named by 004 and absent from disk | Built since, with the invitation flow (Week 4 above) |
 | Every schema column the designs declare | Present in `schema.hcl`; no drift |
 
 ### What building the HTTP surface found
@@ -389,8 +389,8 @@ schema rather than the invariant growing a carve-out. That check had never fired
 ### What building the provisioning path found
 
 One live defect and four places where the design stops short of what an implementation has to decide.
-All five are recorded rather than resolved quietly, because four of them are design amendments and
-that is not this repository's call to make alone.
+All five were recorded rather than resolved quietly, because four of them are design amendments. The
+four are in TDD-organization-control-003 from 1.13.0 (2026-10-09).
 
 | Finding | Resolution |
 | :-- | :-- |
@@ -400,9 +400,9 @@ that is not this repository's call to make alone.
 | **The shared `Payload` cannot carry a desired profile**, and `tenant.lifecycle.requested` is the desired-state publication — the event by which the external system learns what to build | `RequestedPayload` embeds `Payload` so the five common fields are unchanged for any consumer projecting Tenants, and adds the profile, the region, and the two correlation identifiers. Widening the shared payload instead would have made every lifecycle event carry an empty display name |
 | **"Match by correlation identifier" does not say what happens when it matches two Tenants**, which it does whenever one call creates two | Refused as ambiguous rather than resolved by taking the most recent. Resolving the newest would silently mark the wrong Tenant's boundary as built |
 
-**The design amendments this implies**, for 003: the four provisioning routes in §"API / Interface",
-the `requested -> failed` question in §"Tenant State Machine", the desired-state payload in
-§"Published Events", and the ambiguous-correlation rule in §"Provisioning Correlation".
+**The design amendments this implied are made** (TDD-003 1.13.0): the four provisioning routes in
+§"API / Interface", the `requested -> failed` answer in §"Tenant State Machine", the desired-state
+payload in §"Published Events", and the ambiguous-correlation rule in §"Provisioning Correlation".
 
 ### What wiring idempotency found
 
@@ -492,8 +492,9 @@ Items 11 to 18 were recorded as P1 in the review record but were missing from th
 | 36 | ✅ Reconciliation age per consumer | Done (TDD-002 1.13.0, 2026-10-07). Every reconciliation run, clean ones included, records `last_reconciled_at`, `_mark` and `_findings` on the consumer, in the transaction that publishes the repair, and the consumer read and list serve them with `reconciliation_age_seconds`. Additive columns, no new grant | TDD-organization-experience-002 §Projection Health |
 | 37 | ✅ The isolation posture checked at startup and behind readiness | Done (TDD-001 1.19.0 §Verifying the Posture at Runtime, 2026-10-07). `AssertIsolation` moved to `internal/posture`, a package that reads the catalog and holds no stage SQL, so the serving binary does not import `internal/controldb`. `cmd/organization-control` runs it as the tenant login role before it binds a port and refuses to start on a problem, and `GET /readyz` runs it on every probe, so a replica whose database loses a policy between deploys leaves the load balancer. `TestReadinessAndStartupRefuseAWeakenedDatabase` drops `FORCE` from one table as the service's own role watches; `TestTheRuntimeRoleSeesTheWholePosture` shows that role sees every protected table. grantcheck plans the catalog reads as `organization_rt` | ROADMAP §Debt, `internal/controldb/assert.go` |
 | 38 | ✅ The response is recorded with the effect | Done (TDD-003 1.11.0 §The Response Is Recorded with the Effect, 2026-10-07). The window the HTTP surface left between a command's commit and its `Idempotency-Key` completion is closed for every command whose effect commits in one transaction: the service hands its result to `db.Respond`, which renders it with the handler's renderer and completes the claim in that transaction. The provider role gains `UPDATE` on the three completion columns of `platform.idempotency_key` and nothing else. `TestAResponseRecordedWithTheEffectSurvivesACrashBeforeTheReply` commits, skips everything after the commit, and shows the retry replayed; before, the same sequence was refused as in progress. `TestEveryCommandRecordsItsResponseWithItsEffect` holds each new command route to it or to a named reason. Request validation was audited in the same change | draft-ietf-httpapi-idempotency-key-header-07 §2.6, brandur.org/idempotency-keys |
-| 39 | ✅ The production gate's five runbooks | Written (`docs/runbooks/`, 2026-10-07): revocation not enforced within budget, projection drift repair, provider-access review, stuck offboarding, and dead-letter resolution. Each is grounded in the routes, alerts and tables it names, and lists the gaps it found, which stay open: an `extra` reconciliation finding is not alerted, accept to enforcement has no alert of its own, TDD-004's offboarding signals are not exported, a provider cannot read the enforcement route, no route lists dead letters or reads `audit.privileged_access` (the read closed by item 40), and a failed deprovisioning cannot be sent again. The other runbooks the TDDs require are not written yet | STD-GLB-004 §3.15, Google SRE Workbook "On-Call", NIST SP 800-61r3 §2.3 |
+| 39 | ✅ The production gate's five runbooks, and the gaps they found | Written (`docs/runbooks/`, 2026-10-07): revocation not enforced within budget, projection drift repair, provider-access review, stuck offboarding, and dead-letter resolution. The gaps they found are closed (2026-10-09), except one that waits on a decision. An `extra` finding is recorded on the consumer (`last_reconciled_extra_findings`), logged at ERROR and alerted (`ReconciliationExtraFinding`, TDD-002 1.15.0). Accept to enforcement has its own gauge and alerts, the oldest security event a consumer has not applied, at 10 s and 20 s (`AcceptToEnforcement*`). TDD-004's offboarding signals and TDD-003's provisioning signals are gauges read through `operation.lifecycle_signals`, a view of counts naming no row, with alert rules tested by `promtool` (TDD-004 1.11.0, TDD-003 1.13.0); the critical "past the contract deadline" is not alerted because no deadline is recorded. A provider reads the enforcement route at `GET /v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement`, recorded with its reason and the Tenant. `GET /v1/projections/consumers/{consumer_id}/dead-letters` lists a consumer's incidents (TDD-005 2.5.0). `POST /v1/offboardings/{id}/deprovisioning/resend` sends a failed deprovisioning again, never an ambiguous one (TDD-004 1.11.0). `GET`/`POST /v1/tenant-administration-pause` pauses every Tenant administrator's command during a restore, and `restore.sh` records the pause before the service starts (TDD-001 1.22.0). WITH CHECK rejections and unset bindings are counted and alerted (`organization_isolation_refusals_total`, TDD-001 1.22.0). The six remaining runbooks the TDDs require are written: unset binding, WITH CHECK triage, cross-tenant exposure, fresh-check misuse, provisioning, and invitation token enumeration. **Scheduled reconciliation is not built**: who starts a run is a contract with every consumer, and the options with a recommendation are in TDD-002 1.15.0 §Scheduled Reconciliation, waiting on the owner | STD-GLB-004 §3.15, Google SRE Workbook "On-Call", NIST SP 800-61r3 §2.3 |
 | 40 | ✅ The privileged-access record is read and reviewed | Done (ADR-ORG-002 §5.6, TDD-001 1.21.0 §Privileged Access Review, TDD-003 1.12.0, runbook 1.1.0, 2026-10-08). Each row now records the authority it acted on (`emergency`, `activation` with the activation, `eligible`, `consumer`), the one Tenant it named (the Tenant a provider act binds, or the route path's) and the route pattern; `db.ProviderScope` refuses a scope without an authority. A provider in force reads the record (`GET /v1/privileged-access`, keyset by `access_id`, filters `actor_id`, `tenant_id`, `correlation_id`, `authority`, `from`/`to` per STD-GLB-001 1.6.0) and records a review of another provider's access over a period (`POST /v1/privileged-access/reviews`, a command, its `X-Administrative-Reason` the statement, outcome `appropriate` or `escalated`, counts taken in its transaction). The database refuses a review by its own subject. An access unreviewed seven days after it occurred is overdue (CIS 8.11), on `GET /v1/privileged-access:unreviewed` and at WARN from the daily maintenance stage. A Tenant administrator reads the provider rows that named its Tenant (`GET /v1/provider-access`) through `audit.tenant_provider_access`, a `security_barrier` view owned by the migration credential that owns the table, bound by `app.tenant_id`; `organization_rt` holds nothing on the tables. No runtime role updates, deletes or truncates either table, and nothing purges them. Consumer updated in the same change: organization-experience's review screens | NIST SP 800-53 AU-3, AU-6, AU-9(4), AC-5; CIS 8.10, 8.11; Google Access Transparency; Microsoft Customer Lockbox, Entra PIM |
+| 41 | ✅ Security versions reconciled after a restore to an older point, for Memberships | Done (TDD-002 1.15.0 §After a Restore to an Older Point, TDD-001 1.22.0 §Pausing Tenant Administration, 2026-10-09). SAD-004 §6.6 forbids a restore that silently rolls a security version back, and §9.1.1 has it reconciled and contained before normal operation. `POST /v1/projections/advance-versions` takes a consumer's report and moves each Membership the consumer holds at a higher version past it, publishing authority's state there, so the consumer applies it and every later change instead of discarding them as already seen. It advances only Memberships the consumer reports active, so what it publishes is never wider than what the consumer holds. The pause is the containment. **Not covered**, with options in TDD-002 for the owner: Tenant security versions and provider grant versions, because the consumer's report carries Memberships only (recommended: extend the report, which changes identity-control and foundation-reference) | SAD-004 §6.6, §9.1.1; NIST SP 800-53 CP-10 |
 
 ## Waiting on nothing
 
@@ -545,9 +546,9 @@ against 900 s. Two gaps stay recorded, not claimed:
 
 - **RPO.** A daily `pg_dump` loses up to 24 hours, against PAD-PLT-002's 1 minute, which needs WAL
   archiving with point-in-time recovery on the production platform.
-- **A restore to an older point** is not reconciled: the security-version reconciliation SAD-004
-  §6.6 requires is not built. `docs/runbooks/organization-database-restore.md` says what an operator
-  does meanwhile.
+- **A restore to an older point** is reconciled for Memberships and contained by a pause of Tenant
+  administration (backlog item 41, `docs/runbooks/organization-database-restore.md`). Tenant security
+  versions and provider grant versions are not, and the drill exercises neither part.
 
 ## Debt, named rather than implied
 
