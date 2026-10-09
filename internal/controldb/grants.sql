@@ -453,17 +453,27 @@ GRANT UPDATE (response_status, response_body, completed_at) ON platform.idempote
 -- foundation-reference's own database. Referenced in this repository only by the ordering
 -- guard at the top of this file, and by the comment below.
 
--- platform.delivery_receipt -- nothing for the provider role, and for the tenant role only the
--- four columns the enforcement read selects, above.
+-- platform.delivery_receipt -- for the provider role three columns, read and never written, and for
+-- the tenant role only the four columns the enforcement read selects, above.
+--
+-- organization_provider_rt -> projection.SignalsReader.Read -> unappliedSignals -> SELECT
+--
+-- The accept-to-enforcement gauge (TDD-organization-control-002 1.15.0) asks, per consumer, which
+-- security deliveries carry no consumer_applied receipt. It needs whether a receipt exists for the
+-- event, the consumer and that evidence, and nothing else: no event_type, no recorded_at.
 --
 -- It is the root of trust for dead-letter resolution: a row saying this event reached this
 -- consumer, and the only evidence in that contract not derived from the consumer's own report
 -- about itself. A request path able to INSERT here could forge the proof that closes a security
 -- debt, so forging the evidence and forging the resolution are the same act.
 --
+-- Column-level and SELECT only, so the provider role still cannot write a receipt.
+--
 -- It arrived with the v0.2.5 bump, and it arrived closed. That is the default-privilege revoke
 -- above doing the one thing it exists for: before it, this table would have been handed full DML
 -- to both runtime roles by inheritance, with nothing failing and nothing logging.
+GRANT SELECT (event_id, consumer, evidence) ON platform.delivery_receipt TO organization_provider_rt;
+
 --
 -- The dispatcher's INSERT is granted with its other privileges below.
 

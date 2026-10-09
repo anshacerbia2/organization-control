@@ -835,7 +835,7 @@ provider's look at one Tenant's Membership is access to that Tenant. And the rea
 the tenant role under that Tenant's policy, with the four grants above and nothing new, so a
 Membership of another Tenant is `404` whatever identifier the path carries. A route keyed on the
 Membership alone would have had to read it across Tenants to find its Tenant first, on the provider
-role, which holds none of those four grants.
+role, and the read would record no Tenant.
 
 `:verify` is the authoritative fresh check, reserved for high-risk operations and
 never placed on an ordinary request path. Its use is measured: a consumer whose
@@ -1398,6 +1398,11 @@ withdrawal of a Membership, a Tenant or a provider grant. Three choices in it:
   report age and reconciliation are for.
 - **It is per consumer**, as every enforcement signal is (ADR-GLB-018 §6), so the alert names the
   consumer that is behind.
+
+It is read on the provider connections with the other enforcement gauges, so the provider role gains
+`SELECT (event_id, consumer, evidence)` on `platform.delivery_receipt`: whether a receipt exists, and
+nothing it could write. The receipt stays the root of trust for dead-letter resolution because no
+request path can insert one.
 
 Runbooks required before production: revocation not enforced within budget, projection
 drift repair, consumer read model rebuild, reconciliation reporting an `extra`
