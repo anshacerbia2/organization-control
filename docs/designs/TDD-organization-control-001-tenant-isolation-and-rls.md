@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.22.0
+  version: 1.23.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -1341,6 +1341,7 @@ of place:
   | `projection.FrontierReader.FrontierFor` | `organization_provider_rt`, `organization_consumer_rt` | `projection.NewFrontierReader(providerConns)`, and `(consumerConns)` |
   | `projection.SignalsReader.Read`, `.ReadLifecycle` (1.22.0) | `organization_provider_rt` | `projection.NewSignalsReader(providerConns)` |
   | `authority.Reader.ProviderStanding`, `.ConsumerFor`, `.TenantAdministrationPaused` (1.22.0), and the reader's other methods | `organization_provider_rt` | `authority.NewReader(providerConns)` |
+  | `tenant.ScheduledSweep.SweepUnresolved`, `invitation.ScheduledExpiry.ExpireLapsed` (1.23.0): the scheduled sweeps, through `operation.provisioning_sweep` and `operation.invitation_expiry` (`TDD-organization-control-003` §Scheduled Sweeps) | `organization_provider_rt` | `provisioning.Scheduled(providerConns)`, `invitations.Scheduled(providerConns)` |
 
   Changing that wiring means changing the tool's table in the same change.
 

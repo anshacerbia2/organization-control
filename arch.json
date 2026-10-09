@@ -185,6 +185,15 @@
     ],
     "internal/telemetry": ["internal/projection"],
 
+    "_comment_sweep": [
+      "internal/sweep runs one pass of a scheduled sweep and records its outcome (TDD-003",
+      "Scheduled Sweeps). It reaches internal/telemetry for the instrument names, as internal/httpapi",
+      "does, so the alert rules and the series cannot drift apart. It reaches no service: the",
+      "composition root hands it each sweep's batch as a function, and the goroutine that calls it",
+      "once per interval is the composition root's."
+    ],
+    "internal/sweep": ["internal/telemetry"],
+
     "_comment_cmd_control": [
       "cmd/organization-control is the composition root: the only place the pools, the recorder,",
       "and the ten services are constructed, and the only place net/http is used to serve. It",
@@ -206,6 +215,7 @@
       "internal/organization",
       "internal/posture",
       "internal/projection",
+      "internal/sweep",
       "internal/telemetry",
       "internal/tenant",
       "internal/workspace"

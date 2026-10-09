@@ -16,7 +16,9 @@
 #   obligation past due      warning at any occurrence     TDD-004 §Operational Notes
 #   ambiguous release        warning any, critical 24h     TDD-004 §Operational Notes
 #   offboarding duration     warning 30d, critical 90d     TDD-004 §Operational Notes
-#   unresolved provisioning  warning at any occurrence     TDD-003 §Operational Notes
+#   unresolved provisioning  warning at any occurrence,    TDD-003 §Operational Notes
+#                            critical past two reconcile intervals
+#   scheduled sweep stopped  warning past two intervals    TDD-003 §Scheduled Sweeps
 #   provisioning in flight   warning 1h, critical 4h       TDD-003 §Operational Notes
 #   WITH CHECK rejection     critical at any occurrence    TDD-001 §Operational Notes
 #   unset binding            warning any, critical 5/hour  TDD-001 §Operational Notes
@@ -180,6 +182,19 @@ groups:
           summary: A provisioning request timed out with no outcome; the boundary may or may not exist.
           description: Never retried automatically (docs/runbooks/provisioning.md).
 
+      - alert: ProvisioningUnresolvedCritical
+        # The age runs from when the sweep found the request ambiguous. The threshold is read from the
+        # configured interval rather than written here, so it follows ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL.
+        expr: >
+          organization_provisioning_oldest_request_age_seconds{operation="provision",state="unresolved"}
+            > ignoring (operation, state, sweep) group_left
+          2 * organization_sweep_interval_seconds{sweep="provisioning_unresolved"}
+        labels:
+          severity: critical
+        annotations:
+          summary: A provisioning request has been unresolved for longer than two reconcile intervals.
+          description: Ask the provisioning system whether the boundary exists, then report realized or failed (docs/runbooks/provisioning.md). Never retried automatically.
+
       - alert: ProvisioningStuckWarning
         expr: organization_provisioning_oldest_request_age_seconds{operation="provision",state="requested"} > 3600
         labels:
@@ -202,6 +217,22 @@ groups:
         annotations:
           summary: organization-control has exported no offboarding or provisioning metric for 10 minutes.
           description: The lifecycle alerts above are blind. The view operation.lifecycle_signals may be missing, or the process is not exporting.
+
+  - name: organization-control-schedules
+    rules:
+      - alert: ScheduledSweepStopped
+        # Two intervals without a success, held 5 minutes: "at least enough time for 2 full runs"
+        # (Prometheus, Alerting, Batch jobs). The last success starts at the process's start, so a
+        # sweep that has never succeeded fires in the same time as one that stopped.
+        expr: >
+          time() - organization_sweep_last_success_timestamp_seconds
+            > 2 * organization_sweep_interval_seconds
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A scheduled sweep has not succeeded for two of its intervals.
+          description: Unanswered provisioning requests are not aged to unresolved, or lapsed invitations are not expired, while it lasts. The process logs each failure as "scheduled sweep failed" with the sweep's name (docs/runbooks/provisioning.md).
 
   - name: organization-control-isolation
     rules:

@@ -57,6 +57,9 @@ type fixture struct {
 	// looking necessary. Narrowing the grants turned every one of these tests red, which is how
 	// the conflation surfaced.
 	setup *fdb.Pool
+
+	// raw is the provider connections with no scope wrapper, as the scheduled sweep holds them.
+	raw *fdb.Pool
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -132,6 +135,7 @@ func newFixture(t *testing.T) *fixture {
 		fixed:    fixed,
 		actor:    actor,
 		setup:    setup,
+		raw:      pool,
 	}
 }
 

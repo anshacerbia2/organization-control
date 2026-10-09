@@ -238,7 +238,8 @@ misconfigured process start and fail later.
 | `ORGANIZATION_TOKEN_MAX_SKEW` | no | 30s; capped at 60s by STD-IAM-002 §3.5 |
 | `ORGANIZATION_TOKEN_TYPE` | no | `report` (default) accepts a token whose header `typ` is not `at+jwt` and logs it with its `azp`; `enforce` refuses it with 401 (STD-IAM-002 §3.5 step 5, RFC 9068 §4). The dev issuer types its tokens `at+jwt` |
 | `ORGANIZATION_PROVISIONING_TIMEOUT` | no | 30m. Age at which a provisioning request becomes `unresolved` |
-| `ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL` | no | 15m. Cadence for the unresolved sweep |
+| `ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL` | no | 15m. Cadence of the scheduled sweep that ages unanswered requests to `unresolved`. At least `1m`, at most the timeout |
+| `ORGANIZATION_INVITATION_SWEEP_INTERVAL` | no | 1h. Cadence of the scheduled invitation expiry. At least `1m` |
 | `ORGANIZATION_TENANT_NAME_MAX` | no | 120. Tenant display-name bound |
 
 ### Who a caller is
@@ -518,7 +519,7 @@ routes cover the path:
 | `POST /v1/tenants/{id}/provisioning` | operator | `requested → provisioning`, or a retry from `failed` with a new request row |
 | `POST /v1/provisioning/realized` | provisioning system | Marks the request `realized`. Does **not** activate |
 | `POST /v1/provisioning/failed` | provisioning system | Marks the request `failed` and moves the Tenant to `failed` |
-| `POST /v1/provisioning/sweep-unresolved` | scheduler | Ages unanswered requests to `unresolved`. Never retries |
+| `POST /v1/provisioning/sweep-unresolved` | operator; the same sweep runs in-process every reconcile interval | Ages unanswered requests to `unresolved`. Never retries |
 | `POST /v1/tenants/{id}/activate` | operator | `provisioning → active`, once realized and the sponsor is active |
 
 Four properties are worth naming because each is a decision rather than a detail.

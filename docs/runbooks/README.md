@@ -18,7 +18,7 @@ and the commands this service serves.
 | [`WITH CHECK` rejection triage](with-check-rejection.md) | `IsolationWithCheckRejection` |
 | [Suspected cross-tenant exposure](cross-tenant-exposure.md) | a posture failure behind readiness, an unexplained `WITH CHECK` rejection, a cross-Tenant `extra`, an escalated access review, a Tenant's report |
 | [Fresh-check misuse](fresh-check-misuse.md) | `ConsumerFreshCheckRateWarning`, `ConsumerFreshCheckRateCritical` |
-| [Provisioning](provisioning.md) | `ProvisioningUnresolved`, `ProvisioningStuck*`, a Tenant activation refused `412` |
+| [Provisioning](provisioning.md) | `ProvisioningUnresolved`, `ProvisioningUnresolvedCritical`, `ProvisioningStuck*`, `ScheduledSweepStopped`, a Tenant activation refused `412` |
 | [Invitation token enumeration](invitation-token-enumeration.md) | a rising `organization_invitation_lookups_total`, the gateway's report of one source |
 
 ## Why these exist

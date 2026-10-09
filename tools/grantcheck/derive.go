@@ -112,6 +112,11 @@ var boundaries = map[string][]string{
 	// read from the catalog at startup and behind readiness. Catalog reads only; planned as the
 	// tenant role so a catalog the role could not read would fail here.
 	module + "/internal/posture.AssertIsolation": {tenantRole},
+	// coordinator.Scheduled(providerConns) and invitations.Scheduled(providerConns): the two scheduled
+	// sweeps, on the raw provider connections through views the migration role owns
+	// (TDD-organization-control-003 §Scheduled Sweeps). Their statements are the routes' as well.
+	"(*" + module + "/internal/tenant.ScheduledSweep).SweepUnresolved":   {providerRole},
+	"(*" + module + "/internal/invitation.ScheduledExpiry).ExpireLapsed": {providerRole},
 	// authority.NewGrants(conns) in cmd/organization-control/bootstrap.go, on
 	// ORGANIZATION_PROVIDER_DATABASE_URL: the bootstrap that makes the first provider grant.
 	"(*" + module + "/internal/authority.Grants).Bootstrap": {providerRole},

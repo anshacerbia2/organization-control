@@ -12,7 +12,7 @@ The Compose project is `scnehaux-organization-control-dev`.
 | :-- | :-- |
 | `postgres` | This service's own Control Database, in the named volume `postgres` |
 | `migrate` | One-shot: the cluster roles, the owned schemas, the platform schema, RLS, privileges, the five runtime login roles, and a check of the privilege shape |
-| `organization-control` | The API, with its delivery dispatcher in process (ADR-GLB-018 §5.4), on `127.0.0.1:8083` (`ORGANIZATION_CONTROL_PORT`) |
+| `organization-control` | The API, with its delivery dispatcher (ADR-GLB-018 §5.4) and the two scheduled sweeps (TDD-003 §Scheduled Sweeps) in process, on `127.0.0.1:8083` (`ORGANIZATION_CONTROL_PORT`) |
 | `bootstrap-provider` | One-off task: the first provider grant |
 | `maintenance` | One-off task: the daily maintenance stage |
 

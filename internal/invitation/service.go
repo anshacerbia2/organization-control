@@ -478,15 +478,30 @@ func (s *Service) Revoke(ctx context.Context, invitationID id.UUID) (Invitation,
 	return record, nil
 }
 
-const selectLapsed = `SELECT invitation_id::text
-FROM invitation.invitation
-WHERE state IN ('pending', 'identity_verified')
-  AND expires_at <= $1
+// selectLapsed and expireStatement go through operation.invitation_expiry, a view the migration role
+// owns, whose rows are the invitations past their expiry by the database clock and whose policy lets
+// the state become `expired` and nothing else (TDD-organization-control-004 §Expiry Sweep). It carries
+// what the event needs and never the target identifier. The route and the schedule run these same
+// statements: the route under a provider scope, the schedule on the raw provider connections.
+//
+// `expires_at <= $1` as well as the view's own `now()`: the service's clock decides which invitations
+// a run takes, and the database's clock bounds it, so neither can expire an invitation the other
+// still holds to be live.
+const selectLapsed = `SELECT invitation_id::text,
+       tenant_id::text,
+       coalesce(workspace_id::text, ''),
+       subject_type,
+       state,
+       correlation_id::text,
+       coalesce(principal_id::text, ''),
+       expires_at
+FROM operation.invitation_expiry
+WHERE expires_at <= $1
 ORDER BY expires_at
 LIMIT $2
 FOR UPDATE SKIP LOCKED`
 
-const expireStatement = `UPDATE invitation.invitation SET state = 'expired' WHERE invitation_id = $1`
+const expireStatement = `UPDATE operation.invitation_expiry SET state = 'expired' WHERE invitation_id = $1`
 
 // ExpireLapsed materialises expiry for up to size invitations and reports how many it changed.
 //
@@ -503,51 +518,130 @@ func (s *Service) ExpireLapsed(ctx context.Context, size int) (int, error) {
 		return 0, fmt.Errorf("%w: a positive batch size is required", ErrInvalid)
 	}
 
-	at := s.now().UTC()
 	var expired int
-
 	if err := db.WithProviderScope(ctx, s.provider, "materialise lapsed invitations",
 		func(ctx context.Context, tx db.Tx) error {
-			rows, err := tx.Query(ctx, selectLapsed, at, size)
-			if err != nil {
-				return fmt.Errorf("invitation: select lapsed: %w", err)
-			}
-			var ids []string
-			for rows.Next() {
-				var raw string
-				if err := rows.Scan(&raw); err != nil {
-					rows.Close()
-					return fmt.Errorf("invitation: scan lapsed: %w", err)
-				}
-				ids = append(ids, raw)
-			}
-			rows.Close()
-			if err := rows.Err(); err != nil {
-				return fmt.Errorf("invitation: read lapsed: %w", err)
-			}
-
-			for _, raw := range ids {
-				loaded, err := load(ctx, tx, selectForUpdate, raw)
-				if err != nil {
-					return err
-				}
-				if _, err := Resolve(ActionExpire, loaded.State); err != nil {
-					return err
-				}
-				if _, err := tx.Exec(ctx, expireStatement, raw); err != nil {
-					return fmt.Errorf("invitation: expire: %w", err)
-				}
-				loaded.State = StateExpired
-				if err := s.publishAction(ctx, tx, ActionExpire, loaded, at); err != nil {
-					return err
-				}
-				expired++
-			}
-			return nil
+			var err error
+			expired, err = s.expireLapsed(ctx, tx, size)
+			return err
 		}); err != nil {
 		return 0, err
 	}
+	return expired, nil
+}
 
+func (s *Service) expireLapsed(ctx context.Context, tx db.Tx, size int) (int, error) {
+	at := s.now().UTC()
+
+	rows, err := tx.Query(ctx, selectLapsed, at, size)
+	if err != nil {
+		return 0, fmt.Errorf("invitation: select lapsed: %w", err)
+	}
+	var lapsed []Invitation
+	for rows.Next() {
+		record, err := scanLapsed(rows)
+		if err != nil {
+			rows.Close()
+			return 0, err
+		}
+		lapsed = append(lapsed, record)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("invitation: read lapsed: %w", err)
+	}
+
+	expired := 0
+	for _, record := range lapsed {
+		if _, err := Resolve(ActionExpire, record.State); err != nil {
+			return 0, err
+		}
+		tag, err := tx.Exec(ctx, expireStatement, record.InvitationID.String())
+		if err != nil {
+			return 0, fmt.Errorf("invitation: expire: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			// Locked by the select, so nothing else changed it; a row the view no longer returns is
+			// one this run does not expire, and it publishes nothing for it.
+			continue
+		}
+		record.State = StateExpired
+		if err := s.publishAction(ctx, tx, ActionExpire, record, at); err != nil {
+			return 0, err
+		}
+		expired++
+	}
+	return expired, nil
+}
+
+// scanLapsed reads one row of selectLapsed: the identifiers, state and expiry the event is built from.
+func scanLapsed(r rowScanner) (Invitation, error) {
+	var (
+		record                                    Invitation
+		rawID, rawTenant, rawWorkspace, rawCorrel string
+		rawPrincipal, state                       string
+	)
+	if err := r.Scan(&rawID, &rawTenant, &rawWorkspace, &record.SubjectType, &state, &rawCorrel,
+		&rawPrincipal, &record.ExpiresAt); err != nil {
+		return Invitation{}, fmt.Errorf("invitation: scan lapsed: %w", err)
+	}
+	for target, raw := range map[*id.UUID]string{
+		&record.InvitationID:  rawID,
+		&record.TenantID:      rawTenant,
+		&record.CorrelationID: rawCorrel,
+	} {
+		parsed, err := id.Parse(raw)
+		if err != nil {
+			return Invitation{}, fmt.Errorf("invitation: stored identifier %q: %w", raw, err)
+		}
+		*target = parsed
+	}
+	for target, raw := range map[**id.UUID]string{&record.WorkspaceID: rawWorkspace, &record.PrincipalID: rawPrincipal} {
+		if raw == "" {
+			continue
+		}
+		parsed, err := id.Parse(raw)
+		if err != nil {
+			return Invitation{}, fmt.Errorf("invitation: stored identifier %q: %w", raw, err)
+		}
+		*target = &parsed
+	}
+	record.State = State(state)
+	return record, nil
+}
+
+// ScheduledExpiry is the expiry sweep the serving process runs every
+// `ORGANIZATION_INVITATION_SWEEP_INTERVAL` (TDD-organization-control-004 §Expiry Sweep).
+//
+// It holds the raw provider connections and binds no scope, so a run files no privileged-access
+// record: a timer is not a provider. What a run did is the `invitation.expired` event each expiry
+// publishes in its own transaction.
+type ScheduledExpiry struct {
+	tx      db.Transactor
+	service *Service
+}
+
+// Scheduled returns the scheduled form of ExpireLapsed over tx, the raw provider connections.
+func (s *Service) Scheduled(tx db.Transactor) (*ScheduledExpiry, error) {
+	if tx == nil {
+		return nil, errors.New("invitation: the scheduled expiry requires the provider connections")
+	}
+	return &ScheduledExpiry{tx: tx, service: s}, nil
+}
+
+// ExpireLapsed materialises expiry for up to size invitations and reports how many it changed.
+func (e *ScheduledExpiry) ExpireLapsed(ctx context.Context, size int) (int, error) {
+	if size <= 0 {
+		return 0, fmt.Errorf("%w: a positive batch size is required", ErrInvalid)
+	}
+	var expired int
+	if err := e.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		var err error
+		expired, err = e.service.expireLapsed(ctx, tx, size)
+		return err
+	}); err != nil {
+		return 0, err
+	}
 	return expired, nil
 }
 

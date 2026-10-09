@@ -7,8 +7,10 @@ import (
 	"github.com/anshacerbia2/organization-control/internal/authority"
 	"github.com/anshacerbia2/organization-control/internal/db"
 	"github.com/anshacerbia2/organization-control/internal/delivery"
+	"github.com/anshacerbia2/organization-control/internal/invitation"
 	"github.com/anshacerbia2/organization-control/internal/posture"
 	"github.com/anshacerbia2/organization-control/internal/projection"
+	"github.com/anshacerbia2/organization-control/internal/tenant"
 )
 
 // main wires a concrete recorder into a pool, as the real composition root does. Without it no
@@ -24,6 +26,10 @@ func main() {
 	_ = records.EmergencyGrants(context.Background())
 	_ = records.ConsumerFor(context.Background())
 	_ = grants.Bootstrap(context.Background())
+
+	// The two scheduled sweeps, on the provider connections.
+	_ = (&tenant.ScheduledSweep{}).SweepUnresolved(context.Background())
+	_ = (&invitation.ScheduledExpiry{}).ExpireLapsed(context.Background())
 
 	// The isolation posture, read at startup on the tenant connections.
 	_ = posture.AssertIsolation(context.Background(), nil)

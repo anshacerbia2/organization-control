@@ -487,13 +487,21 @@ func outstandingRequest(ctx context.Context, tx db.Tx, tenantID id.UUID) error {
 // an operation whose outcome is unknown is how a Tenant gets provisioned twice. Reconciliation
 // queries the provisioning system and resolves it, which is an operator's act with a real answer
 // behind it.
-const sweepStatement = `UPDATE tenant.provisioning_request
+//
+// Through operation.provisioning_sweep, a view the migration role owns, whose policy admits this one
+// transition and no other (TDD-organization-control-003 §Scheduled Sweeps). The route and the
+// schedule run this same statement: the route under a provider scope that records the operator's
+// access, the schedule on the raw provider connections, which record nothing per run.
+//
+// The view's own predicate, `state = 'requested'`, is re-evaluated on a row another sweep updated
+// first, so two replicas sweeping at once age each request once.
+const sweepStatement = `UPDATE operation.provisioning_sweep
 SET state = 'unresolved',
     resolved_at = $1,
     detail = coalesce(detail, 'no realized status within the provisioning timeout')
 WHERE request_id IN (
-    SELECT request_id FROM tenant.provisioning_request
-    WHERE state = 'requested' AND requested_at < $2
+    SELECT request_id FROM operation.provisioning_sweep
+    WHERE requested_at < $2
     ORDER BY requested_at
     LIMIT $3
 )`
@@ -508,19 +516,57 @@ func (c *Coordinator) SweepUnresolved(ctx context.Context, size int) (int64, err
 		return 0, fmt.Errorf("%w: a positive batch size is required", ErrInvalid)
 	}
 
-	at := c.now().UTC()
-	cutoff := at.Add(-c.timeout)
-
 	var affected int64
 	if err := db.WithProviderScope(ctx, c.pool, "age unanswered provisioning requests to unresolved",
 		func(ctx context.Context, tx db.Tx) error {
-			tag, err := tx.Exec(ctx, sweepStatement, at, cutoff, size)
-			if err != nil {
-				return fmt.Errorf("tenant: sweep unresolved provisioning requests: %w", err)
-			}
-			affected = tag.RowsAffected()
-			return nil
+			var err error
+			affected, err = c.sweep(ctx, tx, size)
+			return err
 		}); err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
+
+func (c *Coordinator) sweep(ctx context.Context, tx db.Tx, size int) (int64, error) {
+	at := c.now().UTC()
+	tag, err := tx.Exec(ctx, sweepStatement, at, at.Add(-c.timeout), size)
+	if err != nil {
+		return 0, fmt.Errorf("tenant: sweep unresolved provisioning requests: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// ScheduledSweep is the sweep the serving process runs every
+// `ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL` (TDD-organization-control-003 §Scheduled Sweeps).
+//
+// It holds the raw provider connections and binds no scope, so a run files no privileged-access
+// record: a timer is not a provider, and 96 records a day of one would bury the accesses the review
+// exists for. What a run did is on the rows it aged, in `resolved_at` and `detail`.
+type ScheduledSweep struct {
+	tx          db.Transactor
+	coordinator *Coordinator
+}
+
+// Scheduled returns the scheduled form of SweepUnresolved over tx, the raw provider connections.
+func (c *Coordinator) Scheduled(tx db.Transactor) (*ScheduledSweep, error) {
+	if tx == nil {
+		return nil, errors.New("tenant: the scheduled sweep requires the provider connections")
+	}
+	return &ScheduledSweep{tx: tx, coordinator: c}, nil
+}
+
+// SweepUnresolved ages up to size unanswered requests to `unresolved` and reports how many it aged.
+func (s *ScheduledSweep) SweepUnresolved(ctx context.Context, size int) (int64, error) {
+	if size <= 0 {
+		return 0, fmt.Errorf("%w: a positive batch size is required", ErrInvalid)
+	}
+	var affected int64
+	if err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		var err error
+		affected, err = s.coordinator.sweep(ctx, tx, size)
+		return err
+	}); err != nil {
 		return 0, err
 	}
 	return affected, nil

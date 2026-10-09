@@ -56,6 +56,10 @@ func TestTheProvisioningBoundsCarryTheirDocumentedDefaults(t *testing.T) {
 	if cfg.ProvisioningReconcileInterval != 15*time.Minute {
 		t.Errorf("the reconcile interval defaulted to %s, want 15m", cfg.ProvisioningReconcileInterval)
 	}
+	if cfg.InvitationSweepInterval != time.Hour {
+		t.Errorf("the invitation sweep interval defaulted to %s, want 1h (TDD-organization-control-004 §Configuration)",
+			cfg.InvitationSweepInterval)
+	}
 	if cfg.TenantNameMax != 120 {
 		t.Errorf("the Tenant name bound defaulted to %d, want 120", cfg.TenantNameMax)
 	}
@@ -301,5 +305,26 @@ func TestADispatchCredentialSharedWithAnotherPoolIsRefused(t *testing.T) {
 	t.Setenv("ORGANIZATION_DISPATCH_DATABASE_URL", "postgres://organization_provider_rt@localhost/control")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ORGANIZATION_DISPATCH_DATABASE_URL") {
 		t.Errorf("a dispatch DSN equal to the provider DSN answered %v", err)
+	}
+}
+
+// TestASubMinuteSweepIntervalIsRefused keeps a forgotten unit from running a sweep in a loop.
+//
+// `1ms` meant as `1m` is a valid duration, so only a floor catches it, and the refusal names the
+// variable to change.
+func TestASubMinuteSweepIntervalIsRefused(t *testing.T) {
+	for _, name := range []string{"ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL", "ORGANIZATION_INVITATION_SWEEP_INTERVAL"} {
+		t.Run(name, func(t *testing.T) {
+			required(t)
+			t.Setenv(name, "1ms")
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load accepted %s=1ms", name)
+			}
+			if !strings.Contains(err.Error(), name) {
+				t.Errorf("the refusal did not name %s:\n%v", name, err)
+			}
+		})
 	}
 }
