@@ -150,6 +150,8 @@ var recordedAfter = map[string]string{
 	"cancelOffboarding": "the Tenant's return commits first and each Membership restore after it " +
 		"(ADR-ORG-006 §5.2)",
 	"retireConsumer": "204 with no body: there is no JSON response to record, before or after",
+	"advanceVersions": "each Tenant's Memberships advance in their own transaction, a provider's act " +
+		"inside that Tenant, so no one transaction holds every effect the response reports",
 }
 
 // TestEveryCommandRecordsItsResponseWithItsEffect holds each command route to answer -- which hands

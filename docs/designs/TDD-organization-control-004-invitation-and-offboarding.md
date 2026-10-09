@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.10.0
+  version: 1.11.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-07
+  last_reviewed: 2026-10-09
   parent_sad: SAD-004
 ---
 
@@ -364,6 +364,7 @@ POST   /v1/offboardings/{offboarding_id}/legal-hold
 POST   /v1/offboardings/{offboarding_id}/obligations
 GET    /v1/offboardings/{offboarding_id}/obligations
 POST   /v1/offboardings/{offboarding_id}/deprovisioning
+POST   /v1/offboardings/{offboarding_id}/deprovisioning/resend               (1.11.0)
 POST   /v1/offboardings/{offboarding_id}/cancel      {"expected_version": n}   (1.8.0)
 POST   /v1/obligations/{obligation_id}/resolve
 ```
@@ -709,6 +710,43 @@ completed, and retirement stays a deliberate act — the alternative is infrastr
 reporting success and a Tenant disappearing from the estate with nobody having decided
 that it should.
 
+#### Sending a Failed Deprovisioning Again
+
+1.11.0. The three holding states are answered differently, and until 1.11.0 the one meant to be
+retried could not be: nothing in this service sent the command a second time, so a `failed`
+deprovisioning held the offboarding in `release` until the provisioning system retried on its own.
+
+```text
+POST /v1/offboardings/{offboarding_id}/deprovisioning/resend
+    provider, X-Administrative-Reason, Idempotency-Key required
+    -- one provider transaction
+    lock the offboarding
+    refuse unless stage is release                          -- 409
+    refuse on a legal hold or an open or failed obligation   -- 412, the release gates again
+    refuse unless the latest deprovisioning is failed        -- 409, naming its state
+    record a new deprovisioning request, state requested, same correlation identifier
+    publish tenant.offboarding.released again
+    answer the offboarding
+```
+
+**Only `failed`.** A failure is the provisioning system's refusal, reported with its detail, and
+retrying it is the case §"Where the deprovisioning outcome is recorded" gives that state. `unresolved`
+is not retried: the target may have released the infrastructure, and sending the command again is
+the retry of an unknown outcome that SAD-004 §7.5 and §Provisioning Correlation in
+`TDD-organization-control-003` forbid. An operator establishes what happened and reports it with
+`POST /v1/offboardings/{id}/deprovisioning`, which records and never advances. `requested` is in
+flight and `realized` is done.
+
+**The gates are checked again.** Release passed them, and a legal hold placed since, or an obligation
+reopened, holds the command as it would have held the release: a gate that exists at one stage and
+not the next is a gate somebody can wait out.
+
+**A new request, under the same correlation identifier.** The earlier request keeps its `failed`
+record, which is evidence. The new one is the most recent, which is the one retirement gates on and
+the one a report updates, so the provisioning system's next report correlates to it as the first
+did. The command is the `released` event published again, with a new event identifier: the
+provisioning system acts on it as on the first. The stage does not move.
+
 Access stops at the first stage and data release happens at the third. That ordering is
 the design: freezing is reversible and immediate, release is neither, and putting them
 in one step would make every offboarding an irreversible act taken under time pressure.
@@ -845,11 +883,60 @@ those batches: `tenant.security.suspended` was committed when offboarding began.
 A rising unauthenticated lookup rate from one source is token enumeration in progress,
 and the uniform response is what makes it expensive rather than impossible.
 
+**Exported from 1.11.0.** The four offboarding signals are the obligation past `due_at` (warning)
+and past the contract deadline (critical), the ambiguous release, and the prolonged offboarding.
+Three are gauges and alerts in `observability/alerts`:
+
+| Signal | Gauge | Alert |
+| :-- | :-- | :-- |
+| Obligations past `due_at` | `organization_offboarding_obligations_overdue`, and the oldest's age past its due date | `OffboardingObligationOverdue`, warning at any |
+| Held in `release` by an ambiguous outcome | `organization_provisioning_requests{operation="deprovision",state="unresolved"}`, and the age since the sweep found it ambiguous | `OffboardingReleaseAmbiguous`, warning at any; `OffboardingReleaseAmbiguousCritical` past 24 hours |
+| Tenant in `offboarding` beyond the window | `organization_offboarding_in_progress`, and `organization_offboarding_oldest_in_progress_age_seconds` since `started_at` | `OffboardingProlongedWarning` at 30 days, `OffboardingProlongedCritical` at 90 |
+
+The fourth, past the contract deadline, is not alerted. No contract deadline is recorded: an
+obligation carries `due_at` and nothing else, and a threshold invented here would be a deadline no
+contract states.
+
+**How they are read.** The gauges are read on every metric collection, on the raw provider
+connections, as the enforcement gauges are. A provider scope would record a privileged access per
+collection, and the weekly review of that record (`ADR-ORG-002 §5.6`) would become a review of a
+timer. The rows are under Row-Level Security all the same, so the read is
+`SELECT ... FROM operation.lifecycle_signals`: a `security_barrier` view, owned by the migration role,
+that returns one row of counts and ages and names no Tenant, offboarding or person
+(`internal/controldb/rls.sql`). A view reads with its owner's privileges, and "if any of the
+underlying base relations has row-level security enabled, then by default, the row-level security
+policies of the view owner are applied" [R1]. The owner is bound by `FORCE ROW LEVEL SECURITY` like
+every role, so three `SELECT` policies give it exactly the rows the counts need: an offboarding in
+`freeze`, `obligations` or `release`; an open obligation past `due_at`; a provisioning request
+`requested` or `unresolved`. They are declared in `posture.AdditionalPolicies`, so the startup and
+readiness check refuses a database with a policy missing or one more. `organization_provider_rt`
+holds `SELECT` on the view and nothing new on the tables.
+
+The alternatives were weighed and refused. A `SECURITY DEFINER` function would do the same with a
+second object to own and grant, and its safety rests on a pinned `search_path`: "search_path should
+be set to exclude any schemas writable by untrusted users" [R3]. A view's references are resolved
+when it is created. Recording the reads as provider access was rejected above. Counting in
+the daily maintenance stage would leave the 24-hour critical a day late.
+
+**Invitation lookups (1.11.0).** `organization_invitation_lookups_total` counts every request to
+`POST /v1/invitations/lookup`, malformed ones included, because an enumeration sends both. It is not
+alerted: this design gives "above baseline" and no baseline is recorded. It carries no source label.
+A label per source address is unbounded, and Prometheus warns that "every unique combination of
+key-value label pairs represents a new time series" [R2]. The rate by source is read from the
+gateway's and this service's request logs instead.
+
 Runbooks required before production: stuck offboarding obligation, ambiguous
 deprovisioning outcome, invitation token enumeration, and legal hold release.
 Written (1.10.0): `docs/runbooks/stuck-offboarding.md`, which covers a stuck obligation, the
-ambiguous deprovisioning outcome and a legal-hold release. Invitation token enumeration is not
-written yet.
+ambiguous deprovisioning outcome and a legal-hold release; from 1.11.0 it answers the alerts above
+and sends a failed deprovisioning again. Written (1.11.0):
+`docs/runbooks/invitation-token-enumeration.md`.
+
+| # | Source |
+| :-- | :-- |
+| R1 | PostgreSQL 17, *CREATE VIEW*, Notes, <https://www.postgresql.org/docs/17/sql-createview.html>, accessed 2026-10-09: "By default, access to the underlying base relations referenced in the view is determined by the permissions of the view owner." and "If any of the underlying base relations has row-level security enabled, then by default, the row-level security policies of the view owner are applied, and access to any additional relations referred to by those policies is determined by the permissions of the view owner." |
+| R2 | Prometheus, *Metric and label naming*, <https://prometheus.io/docs/practices/naming/>, accessed 2026-10-09: "Remember that every unique combination of key-value label pairs represents a new time series" and "Do not use labels to store dimensions with high cardinality (many different label values), such as user IDs, email addresses, or other unbounded sets of values." |
+| R3 | PostgreSQL 17, *CREATE FUNCTION*, "Writing SECURITY DEFINER Functions Safely", <https://www.postgresql.org/docs/17/sql-createfunction.html>, accessed 2026-10-09: "For security, search_path should be set to exclude any schemas writable by untrusted users." |
 
 ## Traceability
 

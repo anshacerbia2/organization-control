@@ -147,3 +147,195 @@ tests:
             exp_annotations:
               summary: organization-control has exported no enforcement metrics for 10 minutes.
               description: Either the process is down, OTEL_EXPORTER_OTLP_ENDPOINT is unset, or the Collector is not receiving. Every alert above is blind until this clears.
+
+  - name: an extra finding, and a security event past its budget
+    interval: 30s
+    input_series:
+      - series: 'organization_projection_consumer_extra_findings{consumer="identity-control"}'
+        values: '0 2 0'
+      - series: 'organization_enforcement_oldest_unapplied_age_seconds{consumer="identity-control"}'
+        values: '5 15 25'
+    alert_rule_test:
+      - eval_time: 0s
+        alertname: ReconciliationExtraFinding
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: ReconciliationExtraFinding
+        exp_alerts:
+          - exp_labels: { severity: critical, consumer: identity-control }
+            exp_annotations:
+              summary: The consumer's last reconciliation found access it serves that authority does not grant.
+              description: A security incident at any count. It holds until a reconciliation of this consumer finds none (docs/runbooks/projection-drift-repair.md).
+      - eval_time: 60s
+        alertname: ReconciliationExtraFinding
+        exp_alerts: []
+      - eval_time: 0s
+        alertname: AcceptToEnforcementOverBudget
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: AcceptToEnforcementOverBudget
+        exp_alerts:
+          - exp_labels: { severity: warning, consumer: identity-control }
+            exp_annotations:
+              summary: A security event accepted over 10s ago is not yet applied by this consumer.
+              description: The propagation budget is 10s (TDD-organization-control-002 §Enforcement Budget). Withdrawn access may still be served there (docs/runbooks/revocation-not-enforced.md).
+      - eval_time: 30s
+        alertname: AcceptToEnforcementCritical
+        exp_alerts: []
+      - eval_time: 60s
+        alertname: AcceptToEnforcementCritical
+        exp_alerts:
+          - exp_labels: { severity: critical, consumer: identity-control }
+            exp_annotations:
+              summary: A security event accepted over 20s ago, twice the budget, is not yet applied by this consumer.
+
+  - name: offboarding and provisioning
+    interval: 30s
+    input_series:
+      - series: 'organization_offboarding_obligations_overdue'
+        values: '0 1'
+      - series: 'organization_offboarding_in_progress'
+        values: '1 1'
+      - series: 'organization_offboarding_oldest_in_progress_age_seconds'
+        values: '2000000 3000000 8000000'
+      - series: 'organization_provisioning_requests{operation="deprovision",state="unresolved"}'
+        values: '0 1'
+      - series: 'organization_provisioning_oldest_request_age_seconds{operation="deprovision",state="unresolved"}'
+        values: '0 3600 90000'
+      - series: 'organization_provisioning_requests{operation="provision",state="unresolved"}'
+        values: '0 1'
+      - series: 'organization_provisioning_oldest_request_age_seconds{operation="provision",state="requested"}'
+        values: '1800 4000 20000'
+    alert_rule_test:
+      - eval_time: 0s
+        alertname: OffboardingObligationOverdue
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: OffboardingObligationOverdue
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: An offboarding obligation is open past its due date.
+              description: Chase the owning domain (docs/runbooks/stuck-offboarding.md).
+      - eval_time: 0s
+        alertname: OffboardingReleaseAmbiguous
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: OffboardingReleaseAmbiguous
+        exp_alerts:
+          - exp_labels: { severity: warning, operation: deprovision, state: unresolved }
+            exp_annotations:
+              summary: An offboarding is held in release by an ambiguous deprovisioning outcome.
+      - eval_time: 30s
+        alertname: OffboardingReleaseAmbiguousCritical
+        exp_alerts: []
+      - eval_time: 60s
+        alertname: OffboardingReleaseAmbiguousCritical
+        exp_alerts:
+          - exp_labels: { severity: critical, operation: deprovision, state: unresolved }
+            exp_annotations:
+              summary: An offboarding has been held in release by an ambiguous deprovisioning outcome for over 24 hours.
+      - eval_time: 0s
+        alertname: OffboardingProlongedWarning
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: OffboardingProlongedWarning
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: A Tenant has been offboarding for over 30 days.
+      - eval_time: 30s
+        alertname: OffboardingProlongedCritical
+        exp_alerts: []
+      - eval_time: 60s
+        alertname: OffboardingProlongedCritical
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: A Tenant has been offboarding for over 90 days.
+      - eval_time: 0s
+        alertname: ProvisioningUnresolved
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: ProvisioningUnresolved
+        exp_alerts:
+          - exp_labels: { severity: warning, operation: provision, state: unresolved }
+            exp_annotations:
+              summary: A provisioning request timed out with no outcome; the boundary may or may not exist.
+              description: Never retried automatically (docs/runbooks/provisioning.md).
+      - eval_time: 0s
+        alertname: ProvisioningStuckWarning
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: ProvisioningStuckWarning
+        exp_alerts:
+          - exp_labels: { severity: warning, operation: provision, state: requested }
+            exp_annotations:
+              summary: A provisioning request has been in flight for over an hour.
+      - eval_time: 30s
+        alertname: ProvisioningStuckCritical
+        exp_alerts: []
+      - eval_time: 60s
+        alertname: ProvisioningStuckCritical
+        exp_alerts:
+          - exp_labels: { severity: critical, operation: provision, state: requested }
+            exp_annotations:
+              summary: A provisioning request has been in flight for over four hours.
+      - eval_time: 60s
+        alertname: LifecycleTelemetryAbsent
+        exp_alerts: []
+
+  - name: no lifecycle telemetry
+    interval: 1m
+    input_series:
+      - series: 'organization_dead_letters_unresolved_unwaived'
+        values: '0x15'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LifecycleTelemetryAbsent
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: LifecycleTelemetryAbsent
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: organization-control has exported no offboarding or provisioning metric for 10 minutes.
+              description: The lifecycle alerts above are blind. The view operation.lifecycle_signals may be missing, or the process is not exporting.
+
+  - name: isolation refusals
+    interval: 1m
+    input_series:
+      - series: 'organization_isolation_refusals_total{control="with_check"}'
+        values: '0 0 0 1 1'
+      - series: 'organization_isolation_refusals_total{control="unset_binding"}'
+        values: '0 0 1 1 6'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: IsolationWithCheckRejection
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: IsolationWithCheckRejection
+        exp_alerts:
+          - exp_labels: { severity: critical, control: with_check }
+            exp_annotations:
+              summary: The database refused a write into a Tenant the transaction was not bound to.
+              description: A defect or an attack, treated as a security finding (docs/runbooks/with-check-rejection.md).
+      - eval_time: 1m
+        alertname: IsolationUnsetBindingWarning
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: IsolationUnsetBindingWarning
+        exp_alerts:
+          - exp_labels: { severity: warning, control: unset_binding }
+            exp_annotations:
+              summary: A statement reached a Row-Level Security policy with no scope bound.
+              description: docs/runbooks/unset-binding.md
+      - eval_time: 3m
+        alertname: IsolationUnsetBindingCritical
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: IsolationUnsetBindingCritical
+        exp_alerts:
+          - exp_labels: { severity: critical, control: unset_binding }
+            exp_annotations:
+              summary: Five or more statements in an hour reached a Row-Level Security policy with no scope bound.

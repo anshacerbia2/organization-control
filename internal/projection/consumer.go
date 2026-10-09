@@ -118,6 +118,10 @@ type Consumer struct {
 	LastReconciledAt       *time.Time
 	LastReconciledMark     *int64
 	LastReconciledFindings *int
+
+	// LastReconciledExtraFindings is how many of the last run's findings were `extra`: access the
+	// consumer serves and authority does not grant (TDD-organization-control-002 §Operational Notes).
+	LastReconciledExtraFindings *int
 }
 
 // Registration is a consumer declaring what it needs.
@@ -442,7 +446,8 @@ const selectConsumer = `SELECT c.consumer_id,
        coalesce(s.event_types, '{}'),
        c.last_reconciled_at,
        c.last_reconciled_mark,
-       c.last_reconciled_findings
+       c.last_reconciled_findings,
+       c.last_reconciled_extra_findings
 FROM projection.consumer c
 LEFT JOIN platform.subscription s ON s.consumer = c.consumer_id AND s.retired_at IS NULL
 WHERE c.consumer_id = $1 AND c.retired_at IS NULL`
@@ -470,7 +475,8 @@ func load(ctx context.Context, tx db.Tx, consumerID string, consumer *Consumer) 
 		&consumer.ConsumerID, &principal, &consumer.ProjectionVersion, &consumer.MaxAcceptedAge,
 		&behavior, &consumer.RegisteredAt, &consumer.SnapshotMark,
 		&consumer.LastReportedMark, &consumer.LastReportedAt, &consumer.EventTypes,
-		&consumer.LastReconciledAt, &consumer.LastReconciledMark, &consumer.LastReconciledFindings); err != nil {
+		&consumer.LastReconciledAt, &consumer.LastReconciledMark, &consumer.LastReconciledFindings,
+		&consumer.LastReconciledExtraFindings); err != nil {
 		return fmt.Errorf("%w: %s", ErrNotRegistered, consumerID)
 	}
 	return decodeStored(consumer, principal, behavior)
@@ -556,7 +562,8 @@ const listStatement = `SELECT c.consumer_id,
        c.retired_at,
        c.last_reconciled_at,
        c.last_reconciled_mark,
-       c.last_reconciled_findings
+       c.last_reconciled_findings,
+       c.last_reconciled_extra_findings
 FROM projection.consumer c
 LEFT JOIN platform.subscription s ON s.consumer = c.consumer_id AND s.retired_at IS NULL
 WHERE ($1::text = ''
@@ -599,7 +606,7 @@ func (r *Registry) List(ctx context.Context, query ConsumerListQuery, reason str
 			if err := rows.Scan(&item.ConsumerID, &principal, &item.ProjectionVersion, &item.MaxAcceptedAge,
 				&behavior, &item.RegisteredAt, &item.SnapshotMark, &item.LastReportedMark,
 				&item.LastReportedAt, &item.EventTypes, &item.RetiredAt, &item.LastReconciledAt,
-				&item.LastReconciledMark, &item.LastReconciledFindings); err != nil {
+				&item.LastReconciledMark, &item.LastReconciledFindings, &item.LastReconciledExtraFindings); err != nil {
 				return fmt.Errorf("projection: scan consumer list: %w", err)
 			}
 			if err := decodeStored(&item.Consumer, principal, behavior); err != nil {

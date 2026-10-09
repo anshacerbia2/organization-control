@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+
 	platform "github.com/anshacerbia2/foundation-platform/httpapi"
 	"github.com/anshacerbia2/foundation-platform/observability"
 
@@ -54,7 +56,10 @@ type Services struct {
 	Reconciler    *projection.Reconciler
 	Replayer      *projection.Replayer
 	Resolver      *projection.Resolver
-	Contexts      *occontext.Service
+
+	// DeadLetters lists one consumer's dead letters (TDD-organization-control-005 2.5.0).
+	DeadLetters *projection.DeadLetterReader
+	Contexts    *occontext.Service
 
 	// ContextList lists a Principal's contexts: the caller's own as organization_self_rt, or anyone's
 	// for a provider (ADR-ORG-005).
@@ -91,6 +96,10 @@ type RoutesConfig struct {
 	Services  Services
 	Database  Prober
 	Telemetry *observability.Telemetry
+
+	// Meter is where the surface's counters go: isolation refusals and anonymous invitation lookups.
+	// Nil counts into a no-op provider, as a process with no Collector does.
+	Meter metric.MeterProvider
 
 	// ReadinessTimeout bounds the dependency check. It sits well below any orchestrator probe
 	// interval so a slow database produces a failed probe rather than a hung one.
@@ -138,7 +147,11 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 		cfg.ReadinessTimeout = 2 * time.Second
 	}
 
-	h := &handlers{services: cfg.Services}
+	signals, err := newSurfaceSignals(cfg.Meter, cfg.Telemetry)
+	if err != nil {
+		return Surface{}, err
+	}
+	h := &handlers{services: cfg.Services, signals: signals}
 
 	probes := http.NewServeMux()
 
@@ -166,11 +179,14 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	})
 
 	anonymous := http.NewServeMux()
-	anonymous.HandleFunc("POST /v1/invitations/lookup", h.lookupInvitation)
+	anonymous.HandleFunc("POST /v1/invitations/lookup", func(w http.ResponseWriter, r *http.Request) {
+		h.lookupInvitation(w, r.WithContext(withSignals(r.Context(), signals)))
+	})
 
 	// Each route records its pattern, and the Tenant its path names, for the privileged-access
 	// record (ADR-ORG-002 §5.6).
 	api := newRouteMux()
+	api.signals = signals
 
 	// Every POST is either a command, wrapped in `command` and refused without an Idempotency-Key,
 	// or named in keyOptional with the reason it is not (commands.go). TestEveryPostRouteIsClassified
@@ -231,6 +247,10 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/tenants/{tenant_id}/administrators", command(h.grantTenantAdministrator))
 	api.HandleFunc("POST /v1/tenants/{tenant_id}/administrators/{grant_id}/revoke", command(h.revokeTenantAdministrator))
 
+	// A provider's read of one Membership's enforcement evidence, inside the Tenant the path names
+	// (TDD-organization-control-002 1.15.0 §Enforcement Evidence).
+	api.HandleFunc("GET /v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement", h.tenantMembershipEnforcement)
+
 	// The provisioning correlation surface.
 	//
 	// Two of these are driven by the external system that owns the isolation boundary rather than by
@@ -259,6 +279,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/obligations", command(h.raiseObligation))
 	api.HandleFunc("GET /v1/offboardings/{offboarding_id}/obligations", h.outstandingObligations)
 	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/deprovisioning", h.recordDeprovisioning)
+	// A failed deprovisioning sent again (TDD-organization-control-004 1.11.0). A literal segment under
+	// the report's path: the report is the provisioning system's, this is an operator's command.
+	api.HandleFunc("POST /v1/offboardings/{offboarding_id}/deprovisioning/resend", command(h.resendDeprovisioning))
 	api.HandleFunc("POST /v1/obligations/{obligation_id}/resolve", command(h.resolveObligation))
 
 	api.HandleFunc("GET /v1/provider-grants", h.listProviderGrants)
@@ -297,6 +320,14 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/projections/provider-authority/snapshot", h.providerSnapshot)
 	api.HandleFunc("GET /v1/projections/frontier", h.frontier)
 	api.HandleFunc("POST /v1/projections/reconcile", h.reconcile)
+	// After a restore to an older point: move each Membership a consumer holds at a higher version
+	// past it (TDD-organization-control-002 1.15.0 §After a Restore to an Older Point).
+	api.HandleFunc("POST /v1/projections/advance-versions", command(h.advanceVersions))
+
+	// Pausing every Tenant administrator's commands while that runs (TDD-organization-control-001
+	// 1.22.0 §Pausing Tenant Administration). The pause itself is enforced at authentication.
+	api.HandleFunc("GET /v1/tenant-administration-pause", h.tenantAdministrationPause)
+	api.HandleFunc("POST /v1/tenant-administration-pause", command(h.setTenantAdministrationPause))
 
 	// Replay does not resolve. It puts an abandoned delivery back on the wire so the dispatcher
 	// carries it again; the incident stays open and the security debt stays blocking until a
@@ -304,6 +335,8 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	//
 	// A dead letter is keyed (event_id, consumer) (ADR-GLB-018 §5.3), so the path names both: an
 	// event dead-lettered at two consumers is two incidents, and acting on one touches only it.
+	// One consumer's dead letters, open or resolved (TDD-organization-control-005 2.5.0).
+	api.HandleFunc("GET /v1/projections/consumers/{consumer_id}/dead-letters", h.listDeadLetters)
 	api.HandleFunc("POST /v1/dead-letters/{event_id}/consumers/{consumer}/replay", h.replayDeadLetter)
 
 	// And the second act, under a different database role. Replay puts the event back on the
@@ -348,6 +381,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the dead-letter replayer is required")
 	case s.Resolver == nil:
 		return errors.New("httpapi: the dead-letter resolver is required")
+	case s.DeadLetters == nil:
+		return errors.New("httpapi: the dead-letter reader is required")
 	case s.Contexts == nil:
 		return errors.New("httpapi: the context service is required")
 	case s.ContextList == nil:
@@ -368,7 +403,10 @@ func (s Services) validate() error {
 
 // handlers holds the services the routes call. Unexported: the routes are the surface's contract,
 // not the methods.
-type handlers struct{ services Services }
+type handlers struct {
+	services Services
+	signals  *surfaceSignals
+}
 
 // Mount joins the three halves onto one root mux, each behind the chain its half requires.
 //

@@ -90,12 +90,16 @@ var boundaries = map[string][]string{
 	"(*" + module + "/internal/projection.FrontierReader).FrontierFor": {providerRole, consumerRole},
 	// projection.NewSignalsReader(providerConns), read by the enforcement gauges on each collection.
 	"(*" + module + "/internal/projection.SignalsReader).Read": {providerRole},
+	// The lifecycle gauges, from the same reader, through operation.lifecycle_signals.
+	"(*" + module + "/internal/projection.SignalsReader).ReadLifecycle": {providerRole},
 	// authority.NewReader(providerConns), the caller records authentication reads for each request.
 	"(*" + module + "/internal/authority.Reader).ProviderStanding": {providerRole},
 	// Read once at startup, to report a production deployment holding fewer than two emergency
 	// grants (ADR-ORG-002 §5.2).
 	"(*" + module + "/internal/authority.Reader).EmergencyGrants": {providerRole},
 	"(*" + module + "/internal/authority.Reader).ConsumerFor":     {providerRole},
+	// Read for each Tenant administrator's command: whether a provider has paused them.
+	"(*" + module + "/internal/authority.Reader).TenantAdministrationPaused": {providerRole},
 	// Each request an emergency grant authorizes records the grant's use, and the maintenance stage
 	// reads the validation report (ADR-ORG-002 §5.2). The stage runs as the owner; the server hands
 	// the reader the provider connections.

@@ -49,6 +49,8 @@ type fakeRecords struct {
 	standings map[[2]id.UUID]authority.TenantStanding
 	err       error
 	reads     int
+	paused    bool
+	pauseErr  error
 }
 
 func (f *fakeRecords) ProviderStanding(_ context.Context, principal id.UUID) (authority.Standing, error) {
@@ -67,6 +69,10 @@ func (f *fakeRecords) ProviderStanding(_ context.Context, principal id.UUID) (au
 func (f *fakeRecords) ConsumerFor(_ context.Context, principal id.UUID) (string, error) {
 	f.reads++
 	return f.consumers[principal], f.err
+}
+
+func (f *fakeRecords) TenantAdministrationPaused(context.Context) (bool, error) {
+	return f.paused, f.pauseErr
 }
 
 func (f *fakeRecords) TenantStanding(_ context.Context, principal, tenant, _ id.UUID) (authority.TenantStanding, error) {
@@ -777,5 +783,46 @@ func TestASelfCallerReachesOnlyItsOwnContexts(t *testing.T) {
 		own(testConsumerWorkload))
 	if !called || caller.Self || caller.Consumer == "" {
 		t.Errorf("a workload on its own principal_id resolved to %+v, want the consumer it is", caller)
+	}
+}
+
+// While a provider has paused Tenant administration, a Tenant administrator's command is refused 503
+// before it reaches a handler, and its reads are not (TDD-organization-control-001 §Pausing Tenant
+// Administration). A provider is not paused: the operator's repairs are provider acts.
+func TestAPauseRefusesATenantAdministratorsCommandsAndNotItsReads(t *testing.T) {
+	t.Parallel()
+
+	s := newSigner(t)
+	records := testRecords()
+	records.paused = true
+	cfg := AuthenticationConfig{Records: records, Consumers: true}
+	token := s.sign(t, tenantClaims(testAdministrator, testTenant))
+
+	_, called, recorder := authenticatedWith(t, s, cfg, token, http.MethodPost, "/v1/memberships")
+	if called || recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "paused") {
+		t.Errorf("a command during a pause answered %d (handler ran: %v): %s", recorder.Code, called, recorder.Body.String())
+	}
+	if _, called, recorder := authenticatedWith(t, s, cfg, token, http.MethodGet, "/v1/memberships"); !called {
+		t.Errorf("a read during a pause was refused %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	records.paused = false
+	if _, called, recorder := authenticatedWith(t, s, cfg, token, http.MethodPost, "/v1/memberships"); !called {
+		t.Errorf("a command after the pause was lifted was refused %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// A pause that cannot be read refuses the command rather than admitting it: a Tenant administrator let
+// through because the record was unreachable is the change the pause exists to stop.
+func TestAnUnreadablePauseRefusesTheCommand(t *testing.T) {
+	t.Parallel()
+
+	s := newSigner(t)
+	records := testRecords()
+	records.pauseErr = errors.New("database unreachable")
+	_, called, recorder := authenticatedWith(t, s, AuthenticationConfig{Records: records, Consumers: true},
+		s.sign(t, tenantClaims(testAdministrator, testTenant)), http.MethodPost, "/v1/memberships")
+	if called || recorder.Code != http.StatusServiceUnavailable {
+		t.Errorf("an unreadable pause answered %d (handler ran: %v)", recorder.Code, called)
 	}
 }

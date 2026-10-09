@@ -18,6 +18,7 @@ import (
 	stdcontext "context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -1088,7 +1089,26 @@ func (h *handlers) reconcile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	logSecurityFindings(r, result)
 	respond(w, http.StatusOK, result)
+}
+
+// logSecurityFindings writes each `extra` finding at ERROR. TDD-organization-control-002 §Operational
+// Notes makes one critical at any occurrence: somebody holds access nothing granted. The run itself
+// records the count on the consumer, which the alert reads; this is the line an investigator starts
+// from, naming the Membership, so whoever ran the reconciliation is not the only one who knows.
+func logSecurityFindings(r *http.Request, result projection.Result) {
+	log := signalsFrom(r.Context()).logger(r.Context())
+	for _, finding := range result.SecurityFindings() {
+		log.ErrorContext(r.Context(), "reconciliation found access authority does not grant",
+			slog.String("consumer_id", result.ConsumerID), slog.Int64("mark", result.Mark),
+			slog.String("membership_id", finding.MembershipID.String()),
+			slog.String("tenant_id", finding.TenantID.String()),
+			slog.String("principal_id", finding.PrincipalID.String()),
+			slog.Int64("projected_version", finding.ProjectedVersion),
+			slog.Int64("authoritative_version", finding.AuthoritativeVersion),
+			slog.Bool("authority_holds_it", finding.State != nil))
+	}
 }
 
 type verifyContextRequest struct {

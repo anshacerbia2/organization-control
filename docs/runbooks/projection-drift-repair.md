@@ -1,6 +1,6 @@
 # Runbook: projection drift repair
 
-Version 1.0.0. Owner: Core Platform Team. Last reviewed 2026-10-07.
+Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
 
 A consumer's projection of Memberships disagrees with authority. Reconciliation finds the
 difference and publishes a repair. Authority is never changed from a projection: repair runs one
@@ -8,8 +8,14 @@ way, toward authority (TDD-organization-control-002 §Reconciliation).
 
 ## Trigger
 
+- `ReconciliationExtraFinding` (critical): `organization_projection_consumer_extra_findings > 0`,
+  labelled with the `consumer`. The last reconciliation of that consumer found an `extra`. It holds
+  until a reconciliation of the consumer finds none.
+- The ERROR log line `reconciliation found access authority does not grant`, one per `extra`
+  finding, with `consumer_id`, `mark`, `membership_id`, `tenant_id`, `principal_id`,
+  `projected_version`, `authoritative_version` and `authority_holds_it`.
 - A reconciliation run returns findings. `GET /v1/projections/consumers/{consumer_id}` shows
-  `last_reconciled_findings` above 0.
+  `last_reconciled_findings` above 0, and `last_reconciled_extra_findings`, the `extra` among them.
 - A person is refused a context they hold, or admitted to one they do not, at a consumer, while
   `POST /v1/context/verify` (`{"consumer_id", "tenant_id", "principal_id"}`) answers the opposite in `granted`.
 - `reconciliation_age_seconds` on a consumer is older than the team's sweep interval.
@@ -58,7 +64,8 @@ curl -sS -X POST "$OC/v1/projections/reconcile" -H "Authorization: Bearer $TOKEN
   `membership_id`, `tenant_id`, `principal_id`, `authoritative_version`, `projected_version`, and
   `state`: the authoritative Membership, or null for an `extra` authority never granted.
 - The same call publishes `projection.repair.reconciled` to subscribers, and records
-  `last_reconciled_at`, `_mark` and `_findings` on the consumer. A clean run is recorded too.
+  `last_reconciled_at`, `_mark`, `_findings` and `_extra_findings` on the consumer. A clean run is
+  recorded too, and is what clears `ReconciliationExtraFinding`.
 - Repeating it against the same report finds the same findings. The repair is applied by version,
   so a second one changes nothing.
 
@@ -68,7 +75,8 @@ curl -sS -X POST "$OC/v1/projections/reconcile" -H "Authorization: Bearer $TOKEN
 | :-- | :-- |
 | `missing`, `mismatch` with authority higher, `extra` with authority holding a withdrawn Membership | The repair carries the state. The consumer applies it by higher-version-wins. Wait for its next report and reconcile again |
 | `extra` with `state` null | The repair tells the consumer to remove the row. Open a security incident anyway: find out how the row got there before closing it |
-| `mismatch` or `extra` with `projected_version` above `authoritative_version` | The consumer is ahead of authority. It is corrupt, and no repair applies. Rebuild it (C) and open a security incident |
+| `mismatch` or `extra` with `projected_version` above `authoritative_version`, after a restore of the Organization Database to an older point | Authority is behind, not the consumer. Follow [Organization Database restore](organization-database-restore.md), §After a restore to an older point (`POST /v1/projections/advance-versions`) |
+| `mismatch` or `extra` with `projected_version` above `authoritative_version`, no restore | The consumer is ahead of authority. It is corrupt, and no repair applies. Rebuild it (C) and open a security incident |
 | Findings return after a repair the consumer applied | The projection path has a defect. Rebuild (C) and raise a defect with the consumer's owner |
 
 **C. Rebuild under a new identity** (TDD-005 §Rebuilding a consumer). It is an outage: between steps
@@ -91,7 +99,8 @@ identity is enough. A re-bootstrap may move the mark forward and never backward.
 ## Verification
 
 - Reconcile again with a fresh report. `findings` is empty, and the consumer read shows
-  `last_reconciled_findings` 0 and a new `last_reconciled_at`.
+  `last_reconciled_findings` 0, `last_reconciled_extra_findings` 0 and a new `last_reconciled_at`.
+  `ReconciliationExtraFinding` clears at the next metric collection.
 - For an `extra`: `POST /v1/context/verify` for that principal and Tenant answers `"granted": false` at the
   consumer and here.
 
@@ -103,17 +112,21 @@ identity is enough. A re-bootstrap may move the mark forward and never backward.
 
 ## Gaps
 
-- `Result.SecurityFindings` exists and nothing calls it. An `extra` finding is not logged or
-  alerted by this service, although TDD-002 §Operational Notes lists it as critical at any
-  occurrence. Whoever runs reconciliation must read the response.
-- Nothing here runs reconciliation on a schedule. A consumer, or an operator, calls it.
+- Nothing runs reconciliation on a schedule. A consumer, or an operator, calls it, so an `extra` is
+  found when somebody looks. Who should start a run is a contract with every consumer, recorded as
+  options with a recommendation in TDD-organization-control-002 §Scheduled Reconciliation and waiting
+  on the owner. Until then, reconcile each consumer at the team's interval and read
+  `reconciliation_age_seconds`.
 - Reconciliation compares Memberships only. Tenant and provider grant projections are corrected
   by their events and by bootstrap.
+- A consumer ahead of authority after a restore to an older point is not corrupt: authority is behind.
+  That case is [Organization Database restore](organization-database-restore.md), §After a restore to
+  an older point, not a rebuild.
 
 ## References
 
 | # | Source |
 | :-- | :-- |
-| R1 | TDD-organization-control-002 §Reconciliation, §Consumer Registry, §Bootstrap Contract, §Operational Notes |
+| R1 | TDD-organization-control-002 §Reconciliation, §Scheduled Reconciliation, §Consumer Registry, §Bootstrap Contract, §Operational Notes |
 | R2 | TDD-organization-control-005 §Rebuilding a consumer |
 | R3 | NIST SP 800-61r3, §2.3, <https://doi.org/10.6028/NIST.SP.800-61r3>: "Playbooks provide actionable steps or tasks for people to perform during various scenarios or situations." |

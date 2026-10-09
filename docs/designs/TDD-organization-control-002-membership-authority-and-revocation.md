@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.14.0
+  version: 1.15.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-07
+  last_reviewed: 2026-10-09
   parent_sad: SAD-004
 ---
 
@@ -441,11 +441,13 @@ POST   /v1/memberships/{membership_id}/suspend   {"expected_version": n}, Idempo
 POST   /v1/memberships/{membership_id}/revoke    {"expected_version": n}, X-Administrative-Reason, Idempotency-Key
 POST   /v1/memberships/{membership_id}/restore   {"expected_version": n}, Idempotency-Key
 GET    /v1/memberships/{membership_id}/enforcement
+GET    /v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement   X-Administrative-Reason (1.15.0)
 POST   /v1/membership-batches                     X-Administrative-Reason (required for revoke), Idempotency-Key
 GET    /v1/membership-batches/{batch_id}
 POST   /v1/membership-batches/{batch_id}/execute  Idempotency-Key
 POST   /v1/projections/snapshot
 POST   /v1/projections/reconcile
+POST   /v1/projections/advance-versions          X-Administrative-Reason, Idempotency-Key (1.15.0)
 GET    /v1/projections/consumers                 ?after=&limit=&state=
 GET    /v1/projections/consumers/{consumer_id}
 POST   /v1/projections/consumers
@@ -822,6 +824,19 @@ it reaches them only by the `event_id` the Tenant's own policy returned. The rol
 `INSERT` on `delivery_receipt`, which is what keeps a request path from forging the evidence that
 closes a security debt (`TDD-organization-control-005`).
 
+**A provider reads it too** (1.15.0), at
+`GET /v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement`, with `X-Administrative-Reason`.
+Until 1.15.0 only a Tenant administrator could, so an operator answering an over-budget revocation
+asked the Tenant or read the tables with SQL. The response is the same document. The Tenant is in the
+path, not inferred from the Membership, for two reasons. The read runs through
+`db.WithProviderInTenant`, which records the access with the provider's reason and that Tenant before
+it reads, so the Tenant's administrator sees it in `GET /v1/provider-access` (`ADR-ORG-002 §5.6`): a
+provider's look at one Tenant's Membership is access to that Tenant. And the read itself then runs as
+the tenant role under that Tenant's policy, with the four grants above and nothing new, so a
+Membership of another Tenant is `404` whatever identifier the path carries. A route keyed on the
+Membership alone would have had to read it across Tenants to find its Tenant first, on the provider
+role, and the read would record no Tenant.
+
 `:verify` is the authoritative fresh check, reserved for high-risk operations and
 never placed on an ordinary request path. Its use is measured: a consumer whose
 `:verify` rate approaches its request rate has misclassified its operations, and that
@@ -1099,6 +1114,100 @@ agreed. A retired consumer's row is left as it was. The consumer view serves the
 (§The Consumer List). The "Consumer reconciliation age" signal in §Operational Notes is still alerted
 from the report age, because no reconciliation cadence is declared per consumer to alert against.
 
+**An `extra` finding is recorded and alerted** (1.15.0). `Result.SecurityFindings` existed and nothing
+called it, so an `extra` reached whoever read the response and nobody else. Now each run also writes
+`last_reconciled_extra_findings`, the count of its `extra` findings, on the consumer, served in the
+consumer read and list. The gauge `organization_projection_consumer_extra_findings{consumer}` reads
+it, and `ReconciliationExtraFinding` is critical above 0, as §Operational Notes asks at any
+occurrence. Read from the record, not counted in the process, so the alert holds until a run of
+that consumer finds none rather than for one scrape, and it survives a restart. Each `extra` is also
+logged at ERROR, "reconciliation found access authority does not grant", naming the consumer, mark,
+Membership, Tenant, Principal and both versions, which is where an investigation starts.
+
+### Scheduled Reconciliation
+
+1.15.0. **Not built: a decision for the owner.** Nothing runs reconciliation on a schedule. It runs
+when someone sends a consumer's report to `POST /v1/projections/reconcile`, so drift is found when an
+operator looks. The run needs the consumer's report, its own account of its projection at a mark, and
+only the consumer can produce that. Who starts a run, and when, is therefore a contract between this
+service and every consumer, and identity-control and foundation-reference would change with it.
+
+| Option | How | For | Against |
+| :-- | :-- | :-- | :-- |
+| A. The consumer reconciles itself | Each consumer sends its report on its own schedule, as itself: `POST /v1/projections/reconcile` joins its routes. It declares `reconciliation_interval` at registration, and this side alerts when `last_reconciled_at` is older (the one-interval warning of §Operational Notes, which has no interval today) | Uses the route and the recording that exist; the consumer already reports progress the same way. The age alert catches a consumer that stops | Each consumer builds a scheduler; the consumer's role gains a route that publishes a repair event |
+| B. This service pulls | Each consumer declares a report endpoint, as it declares its acceptance endpoint (ADR-GLB-018 §5.4). This service fetches the report on a schedule with its workload token and reconciles | One schedule, one place; the direction delivery already takes | A new outbound contract in every consumer, and a workload token that consumer must accept on a provider-only read |
+| C. An operator schedule | The runbook's procedure, run by a job outside both services with a provider credential | Nothing to build in either service | A provider credential held by a job; every run is a privileged access the weekly review then reads |
+
+Recommendation: A. It reuses what is built, keeps the report with the party that produces it, and
+gives the age alert an interval to measure. Waiting on the owner, because it changes
+identity-control and foundation-reference, and the cadence is a commitment of each consumer.
+
+### After a Restore to an Older Point
+
+1.15.0. SAD-004 §6.6: "restore cannot silently roll back a security version without a reconciliation
+and containment plan", and §9.1.1 has the restore reconciled and contained "before normal
+operation". The containment is the pause of Tenant administration (`TDD-organization-control-001`
+§Pausing Tenant Administration). This is the reconciliation.
+
+**The defect.** A restore loses every change after the backup. A consumer keeps what it applied, so
+it holds some Memberships at versions authority no longer has. Authority's next version of such a
+Membership equals one the consumer already holds, and the consumer discards it as already applied:
+a revocation made after the restore never arrives. A reconciliation repair does not fix it, because
+it carries authority's lower version, which the consumer discards for the same reason.
+
+```text
+POST /v1/projections/advance-versions     the reconcile body: {"consumer_id", "mark", "rows"}
+    provider, X-Administrative-Reason, Idempotency-Key required
+    reconcile the report (read-only, as POST /v1/projections/reconcile, publishing nothing)
+    for each finding whose projected_version is above authoritative_version, and authority holds it:
+        per Tenant, one provider-in-Tenant transaction, access recorded with the reason:
+        lock the Membership
+        if its version is already above the projected one: report it, change nothing
+        set membership_version := projected_version + 1, state unchanged
+        publish authority's state at that version, recorded in membership_event
+            active    -> membership.lifecycle.restored  (standard lane)
+            suspended -> membership.security.suspended  (priority lane)
+            revoked   -> membership.security.revoked    (priority lane)
+    200 {"consumer_id", "mark", "advanced": [{"membership_id", "tenant_id", "from_version",
+         "to_version", "membership_status", "event_id" | null}]}
+```
+
+The consumers apply a Membership event by its payload's state and version, whatever its type
+(identity-control's desired state and foundation-reference's projection both upsert on a higher
+`membership_version`), so the type is chosen for the lane: a withdrawal travels the priority lane as
+the transition that made it did. The `membership_event` row records the provider as actor and the
+reason, prefixed "version advanced past *n* after a restore", so the enforcement read and the
+`SUPERSEDED` predicate see an ordinary transition.
+
+**Why it never widens access.** It advances only Memberships the consumer reports, and a consumer
+reports only active ones. Authority's state published over an active row is active, which changes
+nothing, or a withdrawal, which narrows. A Membership the consumer holds suspended or revoked at a
+higher version is not reported, so it is not advanced: publishing authority's restored, wider state
+over it would grant again access a lost withdrawal took away. That case stays the operator's: the
+runbook re-applies lost withdrawals through their routes, and until authority's version passes the
+consumer's, the consumer keeps the narrower state, a denial rather than an exposure.
+
+**Why several transactions.** A provider's write inside a Tenant runs as the tenant role under that
+Tenant's policy (`TDD-organization-control-001` §The Single Binding Path), and a report spans Tenants.
+Each Tenant commits on its own, and a failure part way leaves the Tenants before it advanced; sending
+the same report again advances the rest, since the advanced ones are no longer behind. The response
+is therefore written after them, not recorded inside one (§The `Idempotency-Key` Is Required on
+Commands in `TDD-organization-control-003`).
+
+**What it does not cover**, recorded rather than claimed:
+
+- **Tenant security versions and provider grant versions.** The consumer's report carries Memberships
+  only, so nothing says which Tenant or grant version a consumer holds. Options for the owner:
+  (a) extend the report with Tenants and grants, which changes identity-control and
+  foundation-reference; (b) advance every withdrawn Tenant and grant by a margin and publish, and every
+  active one without publishing, which assumes a bound on the changes a backup can lose; (c) leave
+  them to the runbook's re-application, as today. Recommendation: (a), the same rule as Memberships,
+  on evidence rather than a margin.
+- **The same version, two states.** A report gives versions, not states, so a consumer holding version
+  6 of a change authority lost while authority's own version 6 is a different change is not a
+  finding. The pause keeps authority from making one while the procedure runs; a provider's change in
+  that window is the remaining exposure.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -1267,14 +1376,41 @@ This side exports these signals from `internal/telemetry` over OTLP, together wi
 and security debt of TDD-foundation-platform-001 and TDD-005. `observability/alerts` evaluates them at
 these thresholds. "Consumer reconciliation age" is alerted critical when a consumer's report age
 exceeds its own `max_accepted_age`. The one-interval warning is not alerted, because no reporting
-interval is declared per consumer.
+interval is declared per consumer (§Scheduled Reconciliation).
+
+**Two of them had no metric until 1.15.0.** `extra` findings are alerted as §Reconciliation
+describes (`ReconciliationExtraFinding`). Accept-to-enforcement is
+`organization_enforcement_oldest_unapplied_age_seconds{consumer}`: for each active consumer, the age
+of its oldest priority-lane delivery, accepted in the last 24 hours, that carries no
+`consumer_applied` receipt and no open dead letter. Its age runs from the delivery's `created_at`,
+written in the transaction that accepted the change. `AcceptToEnforcementOverBudget` warns above 10 s
+(§Enforcement Budget's propagation subtotal) and `AcceptToEnforcementCritical` pages above 20 s, twice
+it. It measures the delay while it is still running, which is when it can be acted on; the delay of
+an event already applied is the enforcement read's. The priority lane is the security events: every
+withdrawal of a Membership, a Tenant or a provider grant. Three choices in it:
+
+- **An open dead letter is left out.** `SecurityDebt` pages for it already, and one incident should
+  page once.
+- **The window is 24 hours.** The deliveries are partitioned by day on `created_at`, so the bound
+  keeps the read to the newest partitions on every collection, and receipts are pruned after 90
+  days, past which every delivery would look unapplied. A security event unapplied for a day has been
+  paged on for that day; a delivery a consumer dropped silently and never receipted is what its
+  report age and reconciliation are for.
+- **It is per consumer**, as every enforcement signal is (ADR-GLB-018 §6), so the alert names the
+  consumer that is behind.
+
+It is read on the provider connections with the other enforcement gauges, so the provider role gains
+`SELECT (event_id, consumer, evidence)` on `platform.delivery_receipt`: whether a receipt exists, and
+nothing it could write. The receipt stays the root of trust for dead-letter resolution because no
+request path can insert one.
 
 Runbooks required before production: revocation not enforced within budget, projection
 drift repair, consumer read model rebuild, reconciliation reporting an `extra`
 finding, and consumer misuse of the fresh-check path.
 Written (1.14.0): `docs/runbooks/revocation-not-enforced.md`, and
 `docs/runbooks/projection-drift-repair.md`, which also covers a consumer read model rebuild and an
-`extra` finding. Consumer misuse of the fresh check is not written yet.
+`extra` finding; from 1.15.0 both answer the alerts above, and the first reads the enforcement route
+as a provider. Written (1.15.0): `docs/runbooks/fresh-check-misuse.md`.
 
 ## Traceability
 

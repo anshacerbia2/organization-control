@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 2.4.0
+  version: 2.5.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-09-17
-  last_reviewed: 2026-10-07
+  last_reviewed: 2026-10-09
   parent_sad: SAD-004
 ---
 
@@ -377,6 +377,51 @@ the consumer's marker. A broker cannot produce that marker, so introducing one d
 to `transport_accepted` and resolution stops finding proof. It fails loudly, which is the
 intended outcome rather than a regression to work around.
 
+### Listing a consumer's dead letters
+
+2.5.0. Until this version no route listed dead letters, and the runbook's diagnosis was SQL on the
+migration credential: which incidents are open, at which versions, under which waivers. Now:
+
+```
+GET /v1/projections/consumers/{consumer_id}/dead-letters?after=&limit=&state=open|resolved
+    200 {"dead_letters": [...], "next": "<event_id>" | null}
+```
+
+Provider-only, with `X-Administrative-Reason`, in the provider scope, so each page records the
+access before it reads. It follows STD-GLB-001 1.3.0 §Pagination in the form of every list here.
+
+| Part | Form |
+| :-- | :-- |
+| Path | The consumer, registered now or before: a retired consumer's incidents are the ones a waiver closes. A consumer never registered is `404` |
+| Cursor | `after`: the `event_id` of the last item of the previous page. Within one consumer an event is dead-lettered at most once (the key is `(event_id, consumer)`), so the `event_id` is the item's key. Not a UUID: `400` |
+| Page size | `limit`: 50 when absent, 1 to 100, anything else `400` |
+| Order | `event_id`, a UUIDv7, so the order events were made in |
+| Filter | `state` = `open` (unresolved, waived or not) \| `resolved`; absent, both |
+
+Each item carries the incident as the decision table of the runbook needs it:
+
+```json
+{"event_id", "consumer", "event_type", "authority_bearing", "aggregate_id", "version", "lane",
+ "failure_class", "failure_detail", "attempts", "first_failed_at", "dead_lettered_at",
+ "resolved_at", "resolution_type", "resolved_by", "resolution_reference",
+ "waived_at", "waived_until", "waived_by", "waiver_reason"}
+```
+
+`authority_bearing` is whether the type is security debt (`projection.AuthorityEventTypes`).
+`aggregate_id` is the Membership, Tenant or grant, and `version` the version the event carried, read
+from the stored payload: `membership_version`, `tenant_security_version` or `grant_version`. Both are
+null on a row from before foundation-platform v0.2.3, and `version` on one whose payload a waiver let
+the maintenance stage dispose of. `lane` is `priority` or `standard`, the lane a replay takes.
+
+Read from the payload rather than joined to `membership.membership_event` and `tenant.tenant_event`,
+because the payload is the event as the consumer refused it, and the provider role then needs no new
+privilege on either history table. The resolution predicate still reads the history tables
+(§The resolution predicate); the list only helps the operator choose.
+
+A dead letter naming no consumer is in no consumer's list. No code path writes one since
+foundation-platform v0.2.8, and an authority-bearing one already stops the deploy (§The superseded
+case), so it is read with SQL when it exists, and the runbook says so.
+
 ## Algorithms / Logic
 
 ### The resolution predicate
@@ -739,7 +784,8 @@ handler-level tests cover only refusals that must land before the database is re
 
 ## Operational Notes
 
-The step-by-step procedure is `docs/runbooks/dead-letter-resolution.md` (2.4.0). §Rebuilding a
+The step-by-step procedure is `docs/runbooks/dead-letter-resolution.md` (2.4.0; from 2.5.0 it reads
+the incidents through §Listing a consumer's dead letters rather than SQL). §Rebuilding a
 consumer step 3 names `ORGANIZATION_DELIVERY_TARGETS` from 2.4.0: since item 25 of the ROADMAP
 backlog, this service delivers to its consumers itself.
 

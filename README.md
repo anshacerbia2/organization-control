@@ -373,7 +373,7 @@ What a provider reads about projection health and provisioning (TDD-organization
 
 ```text
 GET   /v1/projections/consumers              ?state=active|retired   each item adds state, retired_at, stale
-GET   /v1/projections/consumers/{id}         with the list, last_reconciled_at, _mark, _findings and reconciliation_age_seconds
+GET   /v1/projections/consumers/{id}         with the list, last_reconciled_at, _mark, _findings, _extra_findings and reconciliation_age_seconds
 GET   /v1/tenants/{tenant_id}                adds provisioning: the latest request, unresolved included
 ```
 
@@ -383,6 +383,18 @@ A person lists where they may work, and a provider cancels an offboarding begun 
 ```text
 GET   /v1/principals/{principal_id}/contexts      your own, with any human token; anyone's, as a provider with a reason
 POST  /v1/offboardings/{offboarding_id}/cancel    {"expected_version": n}   in freeze or obligations only
+```
+
+What an operator recovers with (TDD-organization-control-001 1.22.0, -002 1.15.0, -004 1.11.0,
+-005 2.5.0; the runbooks in `docs/runbooks/` say when):
+
+```text
+GET   /v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement   a provider's read, recorded with the Tenant
+GET   /v1/projections/consumers/{consumer_id}/dead-letters   ?state=open|resolved   one consumer's incidents
+POST  /v1/offboardings/{offboarding_id}/deprovisioning/resend   a failed deprovisioning only; Idempotency-Key
+GET   /v1/tenant-administration-pause
+POST  /v1/tenant-administration-pause      {"paused": true|false}   Tenant administrators' commands answer 503 while paused
+POST  /v1/projections/advance-versions     a consumer's report; after a restore to an older point
 ```
 
 ### Locally: `.env` and the Makefile
@@ -610,6 +622,22 @@ the provider connections, by `projection.SignalsReader`:
 | `organization_projection_consumer_report_age_seconds{consumer}` | seconds since the consumer last reported progress, or since it registered |
 | `organization_projection_consumer_max_accepted_age_seconds{consumer}` | its declared budget |
 | `organization_projection_consumer_verify_ratio{consumer}` | its last measured fresh-check ratio |
+| `organization_projection_consumer_extra_findings{consumer}` | `extra` findings in its last reconciliation: access it serves that authority does not grant; held until a clean run |
+| `organization_enforcement_oldest_unapplied_age_seconds{consumer}` | the age of its oldest security event, accepted in the last 24 hours, with no `consumer_applied` receipt and no open dead letter: accept to enforcement while it runs |
+
+A second callback reads the offboarding and provisioning gauges through `operation.lifecycle_signals`,
+a view of counts and ages that names no row (TDD-organization-control-004 §Operational Notes), so a
+failure there leaves the gauges above reporting:
+
+| Series (Prometheus name) | What it is |
+| :-- | :-- |
+| `organization_offboarding_obligations_overdue`, `organization_offboarding_oldest_overdue_obligation_age_seconds` | open obligations past `due_at`, and the oldest's time past it |
+| `organization_offboarding_in_progress`, `organization_offboarding_oldest_in_progress_age_seconds` | offboardings in `freeze`, `obligations` or `release`, and the oldest's time since it began |
+| `organization_provisioning_requests{operation,state}`, `organization_provisioning_oldest_request_age_seconds{operation,state}` | provisioning and deprovisioning requests `requested` or `unresolved`, and the oldest's age |
+
+Two counters are added to by the HTTP surface: `organization_isolation_refusals_total{control}`, a
+statement a `WITH CHECK` policy or an unset binding refused (TDD-organization-control-001
+§Operational Notes), and `organization_invitation_lookups_total`, every anonymous invitation lookup.
 
 `observability/alerts/organization-control.rules.yml` holds the alert rules, with each threshold's source
 noted beside it (SAD-004 §9.3.2 and the TDDs). CI checks the rules and runs their unit tests with a
@@ -625,7 +653,10 @@ promtool test rules observability/alerts/organization-control.test.yml
 
 `docs/runbooks/` answers the production gate's five procedures and the alerts in
 `observability/alerts`: revocation not enforced within budget, projection drift repair,
-provider-access review, stuck offboarding, and dead-letter resolution. Each lists the gaps it found.
+provider-access review, stuck offboarding, and dead-letter resolution; the Organization Database
+restore; and the six more the TDDs require: unset binding, WITH CHECK rejection, suspected
+cross-tenant exposure, fresh-check misuse, provisioning, and invitation token enumeration. Each lists
+the gaps it found.
 A change to a route, metric or alert updates the runbook that names it in the same change.
 
 ## Row-Level Security is not in `schema.hcl`, and that is a vendor limitation rather than a design choice

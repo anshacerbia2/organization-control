@@ -33,6 +33,8 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/anshacerbia2/foundation-platform/clientauth"
 	fdb "github.com/anshacerbia2/foundation-platform/db"
 	fhttp "github.com/anshacerbia2/foundation-platform/httpapi"
@@ -212,7 +214,7 @@ func run() error {
 		return fmt.Errorf("idempotency claim store: %w", err)
 	}
 
-	memberships, err := membership.New(tenantPool)
+	memberships, err := membership.New(tenantPool, membership.WithProviderPool(providerPool))
 	if err != nil {
 		return fmt.Errorf("membership service: %w", err)
 	}
@@ -257,6 +259,12 @@ func run() error {
 	replayer, err := projection.NewReplayer(providerPool)
 	if err != nil {
 		return fmt.Errorf("dead-letter replayer: %w", err)
+	}
+
+	// One consumer's dead letters, listed in the provider scope so each page records the access.
+	deadLetters, err := projection.NewDeadLetterReader(providerPool)
+	if err != nil {
+		return fmt.Errorf("dead-letter reader: %w", err)
 	}
 
 	// Its own connections, as its own role. Closing an incident is the act that makes every
@@ -373,13 +381,18 @@ func run() error {
 	// whether this replica can serve, and it is the tenant one because that is the pool ordinary
 	// traffic uses: a replica whose tenant pool is unreachable can serve almost nothing, while one
 	// whose provider pool is unreachable can still serve every tenant-scoped route.
+	// The surface's counters go where the gauges go; with no Collector they count into nothing.
+	var meter metric.MeterProvider
+	if exported != nil {
+		meter = exported.MeterProvider
+	}
 	surface, err := httpapi.Routes(httpapi.RoutesConfig{
 		Services: httpapi.Services{
 			Memberships: memberships, Tenants: tenants, Provisioning: provisioning,
 			Organizations: organizations,
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts, ContextList: contextList,
-			Replayer: replayer, Resolver: resolver,
+			Replayer: replayer, Resolver: resolver, DeadLetters: deadLetters,
 			ProviderGrants:       providerGrants,
 			ProviderActivations:  providerActivations,
 			TenantAdministrators: tenantAdministrators,
@@ -389,6 +402,7 @@ func run() error {
 		},
 		Database:         readiness,
 		Telemetry:        telemetry,
+		Meter:            meter,
 		ReadinessTimeout: cfg.ReadinessTimeout,
 	})
 	if err != nil {

@@ -1,6 +1,6 @@
 # Runbook: revocation not enforced within budget
 
-Version 1.0.0. Owner: Core Platform Team. Last reviewed 2026-10-07.
+Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
 
 A Membership revocation, suspension, or Tenant suspension was accepted here and has not reached
 every subscribed consumer within the propagation budget. Access that authority has withdrawn may
@@ -10,6 +10,12 @@ still be served.
 
 Any of:
 
+- `AcceptToEnforcementOverBudget` (warning, over 10 s) or `AcceptToEnforcementCritical` (critical,
+  over 20 s, twice the budget), labelled with the `consumer`:
+  `organization_enforcement_oldest_unapplied_age_seconds`. The age of that consumer's oldest
+  security event (priority lane) accepted in the last 24 hours that has no `consumer_applied`
+  receipt and no open dead letter. It is the accept-to-enforcement delay of TDD-002 §Operational
+  Notes, measured while it runs.
 - `PriorityOutboxLagWarning` (over 30 s) or `PriorityOutboxLagCritical` (over 2 min), labelled
   with the `consumer` that is behind.
 - `SecurityDebt` (critical): an authority-bearing event was dead-lettered at a consumer. Go to
@@ -48,15 +54,21 @@ Any of:
    - Each consumer item carries `stale`, `last_reported_at`, `last_reported_mark` and
      `max_accepted_age_seconds`.
 
-2. One Membership's evidence. Only a Tenant administrator of that Tenant can read it:
+2. One Membership's evidence. As a provider, naming its Tenant:
 
    ```sh
-   curl -sS "$OC/v1/memberships/$MEMBERSHIP_ID/enforcement" -H "Authorization: Bearer $TENANT_TOKEN"
+   curl -sS "$OC/v1/tenants/$TENANT_ID/memberships/$MEMBERSHIP_ID/enforcement" \
+     -H "Authorization: Bearer $TOKEN" -H "X-Administrative-Reason: INC-123 revocation over budget"
    ```
 
-   It returns `event_id`, `accepted_at`, `published_at`, `budget_seconds` (10), `state`, and per
-   consumer `evidence` (`pending`, `transport_accepted`, `consumer_applied`, `dead_lettered`) with
-   `recorded_at`.
+   The read is recorded with the reason and the Tenant, so the Tenant's administrator sees it in
+   `GET /v1/provider-access`. A Membership of another Tenant answers `404`. A Tenant administrator
+   reads the same evidence at `GET /v1/memberships/{membership_id}/enforcement`.
+
+   Both return `membership_id`, `event_id`, `transition`, `accepted_at`, `published_at`,
+   `budget_seconds` (10), `state` (`accepted`, `propagating`, `enforced`, `over_budget`),
+   `evaluated_at`, and `consumers`: per consumer `consumer_id`, `evidence` (`pending`,
+   `transport_accepted`, `consumer_applied`, `dead_lettered`) and `recorded_at`.
 
 3. Is this process delivering? Read the service log for each consumer in
    `ORGANIZATION_DELIVERY_TARGETS`:
@@ -89,6 +101,7 @@ Any of:
 | Log says the dispatcher waits for the registration | The consumer is retired or its name does not match | Remediation C |
 | No `delivering to the consumer` line and no unpublished rows are being claimed | The dispatcher is not running | Remediation D |
 | Rows are published (`published_at` set) and `evidence` is `transport_accepted` or `pending`, consumer report age rising | Delivered, not applied: the consumer is behind | Remediation E |
+| `AcceptToEnforcement*` fires, no lag on the priority lane, no debt | Published and not applied: the consumer is behind or applies without receipting | Remediation E |
 | `EnforcementTelemetryAbsent` | No metrics reach the Collector | Remediation F |
 
 ## Remediation
@@ -120,6 +133,7 @@ member, so it is a business decision. Take it with the Tenant's owner and record
 ## Verification
 
 - The alert clears, and the frontier reads `unpublished` 0 on the priority lane or falling.
+- `organization_enforcement_oldest_unapplied_age_seconds` for the consumer is back under 10.
 - The enforcement read reads `enforced`, with `consumer_applied` for every consumer.
 - Record in the incident: `accepted_at`, the last consumer's `recorded_at`, and the difference.
   That difference is the enforcement delay to report, not the time the alert cleared.
@@ -134,10 +148,12 @@ member, so it is a business decision. Take it with the Tenant's owner and record
 
 ## Gaps
 
-- No alert reads accept-to-enforcement directly. TDD-002 §Operational Notes lists it as a signal;
-  the rules alert on its parts (lag, debt, report age).
-- A provider cannot read the enforcement route; it is Tenant-scoped. Diagnosis of one Membership
-  needs the Tenant administrator or SQL.
+- The accept-to-enforcement gauge looks back 24 hours (`projection.UnappliedWindow`). A security
+  event unapplied for longer has been paged on for a day, then drops out of the gauge; past that, the
+  consumer's report age and reconciliation are what find a delivery its consumer dropped silently.
+- The gauge measures from the delivery's `created_at`, the accepting transaction's start, and ends
+  at a `consumer_applied` receipt. A consumer that applies without receipting reads as unenforced.
+- A dead-lettered security event is left out of the gauge, because `SecurityDebt` pages for it.
 
 ## References
 
@@ -147,3 +163,4 @@ member, so it is a business decision. Take it with the Tenant's owner and record
 | R2 | NIST SP 800-61r3, §2.3, <https://doi.org/10.6028/NIST.SP.800-61r3>: "organizations should also develop and maintain procedures for particularly important processes that may be urgently needed during emergency situations" |
 | R3 | TDD-organization-control-002 §Enforcement Budget, §Enforcement Evidence, §Consumer Registry, §Operational Notes |
 | R4 | TDD-organization-control-005 §Configuration; `observability/alerts/organization-control.rules.yml` |
+| R5 | TDD-organization-control-002 §Enforcement Evidence: the provider read (1.15.0) |

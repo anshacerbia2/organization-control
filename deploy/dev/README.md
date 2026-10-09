@@ -294,6 +294,7 @@ credentials to match and the service no workload key.
 To restore into an empty volume, put `.env` and `keys/` back first, then:
 
 ```sh
+PAUSE_REASON="INC-<n> restored from the <date> backup" \
 ./restore.sh /mnt/imam-storage/backups/organization-control/globals-<date>.sql \
              /mnt/imam-storage/backups/organization-control/organization_control-<date>.dump
 docker compose up -d --build
@@ -307,6 +308,13 @@ exists", then restores the database whole with `pg_restore --create --exit-on-er
 the first error. The migrate job that `up` runs then applies anything newer and asserts RLS, the
 privileges and the five login roles' passwords from `.env` again.
 
+`PAUSE_REASON` makes `restore.sh` record a pause of Tenant administration in the restored database
+before anything serves, so no Tenant administrator changes authority until the runbook's
+reconciliation is done; a provider lifts it with `POST /v1/tenant-administration-pause`
+`{"paused": false}`. A backup taken before the table existed (TDD-organization-control-001 1.22.0)
+cannot hold the row: `restore.sh` then stops after the restore, and the pause is made through the
+API as soon as the service answers. The drill leaves it unset.
+
 Until 2026-10-08 this section ran `migrate` first, for the roles, and then `pg_restore --clean` over
 the schema it had built. That suits only a dump of the same release: a dump of an older one would
 restore older migration history over tables the newer migrate job had made, and the next migration
@@ -319,8 +327,9 @@ version, every table, sequence and role with the source. The outbox, its deliver
 and the consumer registry must be among the non-empty tables. It then starts the service, reads the
 provider grants, Organizations and offboardings through the API, and times the recovery against the
 15-minute RTO. The evidence is the job's `restore-evidence` artifact. A daily dump loses up to 24
-hours, against the 1-minute RPO of `PAD-PLT-002 §6.2`, and a restore to an older point is not
-reconciled yet (SAD-004 §6.6). The runbook is
+hours, against the 1-minute RPO of `PAD-PLT-002 §6.2`. A restore to an older point is reconciled by
+the runbook's procedure, which moves each Membership a consumer holds at a higher version past it
+(`POST /v1/projections/advance-versions`, SAD-004 §6.6); the drill does not exercise it. The runbook is
 [`docs/runbooks/organization-database-restore.md`](../../docs/runbooks/organization-database-restore.md).
 
 ## Never do

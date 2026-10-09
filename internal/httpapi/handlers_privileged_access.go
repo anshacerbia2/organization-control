@@ -26,9 +26,12 @@ import (
 // A wrapper at registration rather than a middleware, because only the mux knows the pattern and the
 // path values, and only for the handler it chose. Routes registers every API route through it, so a
 // route cannot be added that records no operation.
-type routeMux struct{ *http.ServeMux }
+type routeMux struct {
+	*http.ServeMux
+	signals *surfaceSignals
+}
 
-func newRouteMux() routeMux { return routeMux{http.NewServeMux()} }
+func newRouteMux() routeMux { return routeMux{ServeMux: http.NewServeMux()} }
 
 // HandleFunc registers handler for pattern, with the pattern and the path's Tenant in its context.
 func (m routeMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
@@ -40,7 +43,11 @@ func (m routeMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *
 				tenant = parsed
 			}
 		}
-		handler(w, r.WithContext(db.WithAccessRoute(r.Context(), pattern, tenant)))
+		ctx := db.WithAccessRoute(r.Context(), pattern, tenant)
+		if m.signals != nil {
+			ctx = withSignals(ctx, m.signals)
+		}
+		handler(w, r.WithContext(ctx))
 	})
 }
 

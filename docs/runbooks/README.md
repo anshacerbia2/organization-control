@@ -1,19 +1,25 @@
 # Organization Control runbooks
 
-Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-08.
+Version 1.2.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
 
-These are the runbooks the production gate requires (ROADMAP §Gates). Each one answers an
-alert or a signal this service already emits, with the reads and the commands this service already
-serves.
+These are the runbooks the production gate requires (ROADMAP §Gates) and the ones the designs'
+§Operational Notes require. Each one answers an alert or a signal this service emits, with the reads
+and the commands this service serves.
 
 | Runbook | Answers |
 | :-- | :-- |
-| [Revocation not enforced within budget](revocation-not-enforced.md) | `PriorityOutboxLag*`, `SecurityDebt`, `ConsumerProjectionStale`, an enforcement read of `over_budget` |
-| [Projection drift repair](projection-drift-repair.md) | a reconciliation finding, a consumer serving the wrong context, a consumer ahead of authority |
+| [Revocation not enforced within budget](revocation-not-enforced.md) | `AcceptToEnforcementOverBudget`, `AcceptToEnforcementCritical`, `PriorityOutboxLag*`, `SecurityDebt`, `ConsumerProjectionStale`, `EnforcementTelemetryAbsent`, an enforcement read of `over_budget` |
+| [Projection drift repair](projection-drift-repair.md) | `ReconciliationExtraFinding`, a reconciliation finding, a consumer serving the wrong context, a consumer ahead of authority |
 | [Provider-access review](provider-access-review.md) | the scheduled review of provider authority, and each use of an emergency grant |
-| [Stuck offboarding](stuck-offboarding.md) | an offboarding that does not reach `retired` or `cancelled` |
+| [Stuck offboarding](stuck-offboarding.md) | `OffboardingObligationOverdue`, `OffboardingReleaseAmbiguous*`, `OffboardingProlonged*`, `LifecycleTelemetryAbsent`, an offboarding that does not reach `retired` or `cancelled` |
 | [Dead-letter resolution](dead-letter-resolution.md) | `SecurityDebt`, `UnresolvedDeadLetterStale`, `organization-migrate -stage=maintenance` exiting 3 |
 | [Organization Database restore](organization-database-restore.md) | a lost or damaged Organization Database, and a restore to an older point |
+| [Unset-binding investigation](unset-binding.md) | `IsolationUnsetBindingWarning`, `IsolationUnsetBindingCritical` |
+| [`WITH CHECK` rejection triage](with-check-rejection.md) | `IsolationWithCheckRejection` |
+| [Suspected cross-tenant exposure](cross-tenant-exposure.md) | a posture failure behind readiness, an unexplained `WITH CHECK` rejection, a cross-Tenant `extra`, an escalated access review, a Tenant's report |
+| [Fresh-check misuse](fresh-check-misuse.md) | `ConsumerFreshCheckRateWarning`, `ConsumerFreshCheckRateCritical` |
+| [Provisioning](provisioning.md) | `ProvisioningUnresolved`, `ProvisioningStuck*`, a Tenant activation refused `412` |
+| [Invitation token enumeration](invitation-token-enumeration.md) | a rising `organization_invitation_lookups_total`, the gateway's report of one source |
 
 ## Why these exist
 
@@ -34,13 +40,23 @@ serves.
 - Every command (a `POST` in `internal/httpapi/commands.go` that is not in `keyOptional`) needs an
   `Idempotency-Key`. Use one new value per command. Send the same value again only to retry the same
   command. The dead-letter replay, resolve and waive routes, the provisioning reports, the sweeps
-  and reconcile honour a key and do not require one.
+  and reconcile honour a key and do not require one. The version advance, the pause and the
+  deprovisioning resend are commands and require one.
 - `$OC` is the service base URL. `$TOKEN` is a provider access token. Examples use `curl`.
-- Direct SQL reads use the migration credential (`ORGANIZATION_MIGRATION_DATABASE_URL`). Use
-  `SELECT` only, inside `BEGIN READ ONLY;`, and paste the statement and its output into the
-  incident record. No route lists dead letters, which is why those reads are not API calls (see
-  each runbook's "Gaps"). `audit.privileged_access` is read through `GET /v1/privileged-access`
-  (`provider-access-review.md`).
+- Read through the API first. Dead letters are listed at
+  `GET /v1/projections/consumers/{consumer_id}/dead-letters`, one Membership's enforcement evidence
+  at `GET /v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement`, and
+  `audit.privileged_access` at `GET /v1/privileged-access` (`provider-access-review.md`). Each is a
+  provider read, recorded with your reason.
+- Direct SQL is for what no route reads, which today is `platform.delivery_receipt` beyond a
+  Membership's latest transition, and dead letters naming no consumer (each runbook's "Gaps"). Use
+  `SELECT` only, inside `BEGIN READ ONLY;`, and paste the statement and its output into the incident
+  record. The migration credential (`ORGANIZATION_MIGRATION_DATABASE_URL`) reads the `platform`
+  tables. It owns the Row-Level Security tables and `FORCE` binds it like everyone else, so it reads
+  only the rows its maintenance and signal policies admit (`rls.sql`), and none of
+  `membership.membership_event` or `tenant.tenant_event`; for those,
+  the database superuser's connection (`docker compose exec postgres psql -U postgres -d organization_control`)
+  is the one that sees them.
 - Severity follows the alert rule. A `critical` alert is a page. A `warning` alert is a ticket for
   the next working day.
 - After each use, update the runbook with what was missing. "Details in playbooks go out of date at
