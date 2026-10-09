@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.13.0
+  version: 1.14.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -365,7 +365,7 @@ POST   /v1/tenants/{tenant_id}/restore
 POST   /v1/tenants/{tenant_id}/provisioning              dispatch, or retry after failed (1.13.0)
 POST   /v1/provisioning/realized         {"correlation_id", "detail"?}       the provisioning system's reports (1.13.0)
 POST   /v1/provisioning/failed           {"correlation_id", "detail"}
-POST   /v1/provisioning/sweep-unresolved {"size"}                             ages unanswered requests (1.13.0)
+POST   /v1/provisioning/sweep-unresolved {"size"}                             ages unanswered requests (1.13.0); scheduled in-process from 1.14.0
 
 Tenant-scoped: the Tenant is the caller's, from the token, and never in the path
 GET    /v1/workspaces                             ?after=&limit=&status=
@@ -824,12 +824,104 @@ outcome is unknown is how a Tenant gets provisioned twice, and EAD-004 §6.6 req
 critical mutations to define duplicate protection at the business boundary rather than
 at the transport.
 
+### Scheduled Sweeps
+
+**The two periodic sweeps run in this process (1.14.0).** "On timeout with no status" above needs
+something that notices the timeout, and `TDD-organization-control-004` §Expiry Sweep runs
+"periodically". Until 1.14.0 neither ran unless someone called its route:
+`ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL` was read and validated and nothing used it. Both now
+run in the serving process:
+
+| Sweep (`sweep` label) | Cadence | What it does |
+| :-- | :-- | :-- |
+| `provisioning_unresolved` | `ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL`, `15m` | Ages a request still `requested` past `ORGANIZATION_PROVISIONING_TIMEOUT` to `unresolved`, in both directions. Sets no Tenant transition and never retries |
+| `invitation_expiry` | `ORGANIZATION_INVITATION_SWEEP_INTERVAL`, `1h` | Materialises expiry and publishes `invitation.expired` (`TDD-organization-control-004` §Expiry Sweep) |
+
+Each sweep runs once when the process starts and then once per interval. A run takes batches of
+100 until one comes back short, and stops after 50 batches so a defect cannot hold it in a loop;
+the next run continues where it stopped, because the batch predicate is the resume point. A run is
+bounded by its interval.
+
+The reconcile interval is the cadence of the timeout check. Resolving an `unresolved` request stays
+an operator's act with the provisioning system's answer behind it (`docs/runbooks/provisioning.md`):
+this service has no query interface on the provisioning system, which reports through the two
+provisioning routes, and an automatic resolution would be an inference the state exists to refuse.
+
+**Every replica schedules both, and no claim is taken.** Each is safe to run twice at once. The
+provisioning statement updates only rows still `requested`, and a row a concurrent sweep has just
+aged is skipped: the second updater "will wait for the first updating transaction to commit or roll
+back", and if it commits, "The search condition of the command (the WHERE clause) is re-evaluated to
+see if the updated version of the row still matches the search condition" [R1]. The expiry selects with `FOR UPDATE SKIP
+LOCKED`, so two replicas take different rows. identity-control schedules its sweeps the same way:
+"Every replica schedules the sweep" (`TDD-identity-control-003` §Reconciliation).
+
+**Where else they could have run.**
+
+- The daily `maintenance` stage runs once a day, against a 15-minute and a 1-hour cadence.
+  `TDD-organization-control-004` §Operational Notes refuses it for a 24-hour critical for the same
+  reason.
+- An external scheduler calling the two routes would need provider authority, and provider
+  authority is a person's: an activation lasts at most `ORGANIZATION_PROVIDER_ACTIVATION_MAX`, 8
+  hours, and in production another provider approves it (ADR-ORG-002 §5.1). An emergency grant is
+  break-glass. A scheduler would need a standing credential, and neither of these is one.
+
+**What they run as.** They run on the raw provider connections, as the lifecycle gauges are read,
+and they bind no scope. A provider scope would file a privileged-access record per run, 120 a day
+for one replica, and the review of that record (ADR-ORG-002 §5.6) would become a review of a timer.
+The gauges bind no scope for the same reason (`TDD-organization-control-004` §Operational Notes). A
+scheduled run records what it did in the rows it writes and in its telemetry: each aged request
+carries `resolved_at` and `detail`, and each expired invitation publishes `invitation.expired`.
+
+The rows are under Row-Level Security, so both sweeps write through a `security_barrier` view the
+migration role owns:
+
+| View | Rows | `organization_provider_rt` holds | Policies of the owner |
+| :-- | :-- | :-- | :-- |
+| `operation.provisioning_sweep` | `tenant.provisioning_request` still `requested` | `SELECT`, `UPDATE (state, resolved_at, detail)` | `provisioning_request_signals_read` (the gauges' `SELECT`, which admits `requested` and `unresolved`), `provisioning_request_sweep` (`UPDATE` from `requested` to `unresolved` only) |
+| `operation.invitation_expiry` | `invitation.invitation` `pending` or `identity_verified` past `expires_at` by the database clock; identifiers, state and expiry only, never the target identifier | `SELECT`, `UPDATE (state)` | `invitation_expiry_read` (`SELECT` of an invitation past its expiry), `invitation_expiry` (`UPDATE` to `expired` only) |
+
+Each view is automatically updatable: "If the view is automatically updatable the system will
+convert any INSERT, UPDATE, DELETE, or MERGE statement on the view into the corresponding statement
+on the underlying base relation" [R2]. The owner's policies govern the write: "the row-level security
+policies of the view owner are applied" [R2]. Each `UPDATE` policy's `USING` names the one state it
+leaves and its `WITH CHECK` the one state it enters, so a defect in either sweep can make no other
+transition. The `SELECT` policy is part of this design, not a convenience: an `UPDATE` that reads
+the row is also checked against the owner's `SELECT` policies, on the existing row and on the new
+one [R3]. So `invitation_expiry_read` admits `expired` as well as the two states it leaves. The
+policies are declared in `posture.AdditionalPolicies`, so startup and readiness refuse a database
+that has lost one or gained another.
+
+The two routes remain for an operator. They run the same statements through the same views under a
+provider scope, which records the operator's access as before.
+
+**Telemetry.** Each sweep exports, labelled `sweep`:
+
+| Series | Meaning |
+| :-- | :-- |
+| `organization_sweep_last_success_timestamp_seconds` | When a run last completed without error. It starts at the process's start, so a sweep that has never succeeded reaches the alert as soon as one that stopped would |
+| `organization_sweep_last_run_timestamp_seconds` | When a run last finished, with any outcome |
+| `organization_sweep_runs_total` | Runs by `outcome`: `success` or `failure` |
+| `organization_sweep_affected_total` | Requests aged or invitations expired |
+| `organization_sweep_interval_seconds` | The configured cadence, which the alert compares against |
+
+The timestamps are exported rather than an age: "export the Unix timestamp at which it happened -
+not the time since it happened", because `time() - my_timestamp_metric` then needs no update logic
+and protects "against the update logic getting stuck" [R4]. A failed run is also logged at `ERROR`
+with the sweep's name.
+
+`ScheduledSweepStopped`, warning, fires when a sweep has not succeeded for two of its intervals and
+that has held for 5 minutes. Prometheus puts a batch job's threshold at "at least enough time for 2
+full runs of the batch job" [R5]. It is a warning and not a page because what a stopped sweep
+delays is already guarded elsewhere: acceptance checks expiry against the clock rather than the
+state (`TDD-organization-control-004` §Membership Activation: "if expired: mark expired, emit, stop"), and a request left `requested` is alerted by
+`ProvisioningStuckWarning` and `ProvisioningStuckCritical`.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 | :-- | :-- | :-- |
 | `ORGANIZATION_PROVISIONING_TIMEOUT` | `30m` | Age at which a provisioning request becomes `unresolved` |
-| `ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL` | `15m` | Cadence for resolving unresolved requests |
+| `ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL` | `15m` | Cadence of the scheduled sweep that ages unanswered requests to `unresolved` (§Scheduled Sweeps). At most `ORGANIZATION_PROVISIONING_TIMEOUT`, and at least `1m`. Before 1.14.0 this read "cadence for resolving unresolved requests"; resolution is an operator's act, and the interval is when the timeout is noticed |
 | `ORGANIZATION_TENANT_NAME_MAX` | `120` | Display name bound |
 
 ## Testing Strategy
@@ -887,6 +979,11 @@ at the transport.
 - An unresolved request is not retried automatically.
 - A realized status arriving after the timeout resolves the request by correlation.
 - A duplicate realized status produces one effect.
+- The scheduled sweep, on the raw provider connections, ages a request past the timeout and files no
+  privileged-access record; through its view it cannot move a request out of any state but
+  `requested`, nor into any state but `unresolved` (1.14.0).
+- A scheduled run takes batches until one is short, stops at the batch bound, and records its
+  outcome: a failure leaves the last success where it was (1.14.0).
 - The single Tenant read carries the latest provisioning request with its state, detail and
   resolution instant, `unresolved` included; a retry's newer request replaces the failed one there;
   a deprovisioning command is not read as one; a Tenant with no request reads `null`.
@@ -940,11 +1037,14 @@ Notes describes the view and why it exists): `organization_provisioning_requests
 
 | Signal | As alerted |
 | :-- | :-- |
-| Provisioning requests in `unresolved` | `ProvisioningUnresolved`, warning at any. The critical "older than two reconcile intervals" is not alerted, because no reconcile interval is declared: `POST /v1/provisioning/sweep-unresolved` is called, not scheduled |
+| Provisioning requests in `unresolved` | `ProvisioningUnresolved`, warning at any. `ProvisioningUnresolvedCritical` from 1.14.0, when the oldest has been `unresolved` for longer than two reconcile intervals, compared against `organization_sweep_interval_seconds{sweep="provisioning_unresolved"}` so the threshold follows the configured value. Until 1.14.0 no interval was in force, because nothing scheduled the sweep |
 | Tenants stuck in `provisioning` | `ProvisioningStuckWarning` and `ProvisioningStuckCritical`, on the oldest `provision` request still `requested`, at 1 and 4 hours. A Tenant is in `provisioning` exactly while its dispatched request awaits an outcome, so the request's age is the Tenant's time there |
 
 Organization retirement refused is a `409` to the operator who asked, and the version assertion is a
 test (§Testing Strategy, Security Version); neither is exported.
+
+**The scheduled sweeps (1.14.0).** `ScheduledSweepStopped`, warning, when a sweep has not succeeded
+for two of its intervals (§Scheduled Sweeps). Answered in `docs/runbooks/provisioning.md`.
 
 Runbooks required before production: stuck provisioning, unresolved provisioning
 resolution, and Tenant activation refused. Written (1.13.0): `docs/runbooks/provisioning.md`, all
@@ -969,3 +1069,13 @@ three.
 | Governed by | ADR-ORG-006 §5.2 — a cancelled offboarding returns the Tenant to its prior status (1.9.0) |
 | Conforms to | draft-ietf-httpapi-idempotency-key-header-07 §2.7 — a missing key on an operation requiring it is `400` (1.10.0) |
 | Conforms to | draft-ietf-httpapi-idempotency-key-header-07 §2.6 — a retry after completion answers the first result; recorded with the effect (1.11.0) |
+| Governed by | ADR-ORG-002 §5.1, §5.6 — provider authority is a person's activation; its access record is reviewed, so a timer does not file one (1.14.0) |
+| Follows | `TDD-identity-control-003` §Reconciliation — every replica schedules an in-process sweep (1.14.0) |
+
+| # | Source |
+| :-- | :-- |
+| R1 | PostgreSQL 17, *Transaction Isolation*, 13.2.1 Read Committed Isolation Level, <https://www.postgresql.org/docs/17/transaction-iso.html>, accessed 2026-10-09: "the would-be updater will wait for the first updating transaction to commit or roll back (if it is still in progress)." and "The search condition of the command (the WHERE clause) is re-evaluated to see if the updated version of the row still matches the search condition." |
+| R2 | PostgreSQL 17, *CREATE VIEW*, Updatable Views and Notes, <https://www.postgresql.org/docs/17/sql-createview.html>, accessed 2026-10-09: "If the view is automatically updatable the system will convert any INSERT, UPDATE, DELETE, or MERGE statement on the view into the corresponding statement on the underlying base relation." and "If any of the underlying base relations has row-level security enabled, then by default, the row-level security policies of the view owner are applied" |
+| R3 | PostgreSQL 17, *CREATE POLICY*, <https://www.postgresql.org/docs/17/sql-createpolicy.html>, accessed 2026-10-09: "Typically an UPDATE command also needs to read data from columns in the relation being updated (e.g., in a WHERE clause or a RETURNING clause, or in an expression on the right hand side of the SET clause). In this case, SELECT rights are also required on the relation being updated, and the appropriate SELECT or ALL policies will be applied in addition to the UPDATE policies." Table 297 applies the `SELECT` policy to an `UPDATE`'s existing and new row "If read access is required to either the existing or new row" |
+| R4 | Prometheus, *Instrumentation*, "Timestamps, not time since", <https://prometheus.io/docs/practices/instrumentation/>, accessed 2026-10-09: "If you want to track the amount of time since something happened, export the Unix timestamp at which it happened - not the time since it happened. With the timestamp exported, you can use the expression time() - my_timestamp_metric to calculate the time since the event, removing the need for update logic and protecting you against the update logic getting stuck." and, of batch jobs, "The key metric of a batch job is the last time it succeeded." |
+| R5 | Prometheus, *Alerting*, "Batch jobs", <https://prometheus.io/docs/practices/alerting/>, accessed 2026-10-09: "For batch jobs it makes sense to page if the batch job has not succeeded recently enough, and this will cause user-visible problems. This should generally be at least enough time for 2 full runs of the batch job." |

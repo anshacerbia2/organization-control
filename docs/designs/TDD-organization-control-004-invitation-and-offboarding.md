@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.11.0
+  version: 1.12.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -781,13 +781,29 @@ Expiry is materialised rather than evaluated at read time, so an expired invitat
 visible as expired in every listing and in every report without each reader
 reimplementing the comparison.
 
+**Where "periodically" runs (1.12.0).** In the serving process, once at start and then every
+`ORGANIZATION_INVITATION_SWEEP_INTERVAL`, on every replica, as the `invitation_expiry` sweep of
+`TDD-organization-control-003` §Scheduled Sweeps, which states the schedule, the batches, why
+neither the daily maintenance stage nor an external scheduler, and the telemetry and alert. Until
+1.12.0 the interval was named here and read nowhere, and expiry was materialised only when someone
+called `POST /v1/invitations/expire-lapsed`; acceptance was never exposed by that, because it checks
+expiry against the clock (§Membership Activation).
+
+The scheduled run binds no scope and files no privileged-access record. It reads and writes through
+`operation.invitation_expiry`, a `security_barrier` view the migration role owns, which returns an
+invitation `pending` or `identity_verified` past `expires_at` by the database clock, with its
+identifiers, state and expiry and never its target identifier, and lets the state change to
+`expired` and nothing else. The selection keeps `FOR UPDATE SKIP LOCKED`, so two replicas expire
+different invitations, and each expired invitation still publishes `invitation.expired` in the same
+transaction. The route runs the same statements through the same view under a provider scope.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 | :-- | :-- | :-- |
 | `ORGANIZATION_INVITATION_TTL` | `7d` | Default invitation lifetime |
 | `ORGANIZATION_INVITATION_MAX_TTL` | `30d` | Ceiling an inviter cannot exceed |
-| `ORGANIZATION_INVITATION_SWEEP_INTERVAL` | `1h` | Expiry materialisation cadence |
+| `ORGANIZATION_INVITATION_SWEEP_INTERVAL` | `1h` | Expiry materialisation cadence, at least `1m`. Read from 1.12.0 (§Expiry Sweep) |
 | `ORGANIZATION_OFFBOARDING_OBLIGATION_SLA` | `30d` | Default obligation due window |
 | `ORGANIZATION_OFFBOARDING_DOMAINS` | none, required | Domains that receive obligations |
 
@@ -803,6 +819,9 @@ reimplementing the comparison.
 - Acceptance into a Tenant suspended after the invitation was issued is refused.
 - An expired invitation cannot be accepted, including in the race between the sweep and
   an acceptance.
+- The scheduled expiry, on the raw provider connections, expires a lapsed invitation, publishes
+  `invitation.expired`, and files no privileged-access record; through its view it cannot expire an
+  invitation still inside its lifetime, nor set any state but `expired` (1.12.0).
 
 ### Enumeration
 
