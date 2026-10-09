@@ -11,6 +11,17 @@
 #   unresolved dead letter   warning past 24h, unwaived    TDD-foundation-platform-001, TDD-005 §WAIVED
 #   consumer report age      critical past its budget      TDD-002 §Operational Notes
 #   verify ratio             warning 0.05, critical 0.5    TDD-002 §Configuration, ORGANIZATION_VERIFY_RATE_ALERT
+#   extra finding            critical at any occurrence    TDD-002 §Operational Notes
+#   accept to enforcement    warning 10s, critical 20s     TDD-002 §Operational Notes, §Enforcement Budget
+#   obligation past due      warning at any occurrence     TDD-004 §Operational Notes
+#   ambiguous release        warning any, critical 24h     TDD-004 §Operational Notes
+#   offboarding duration     warning 30d, critical 90d     TDD-004 §Operational Notes
+#   unresolved provisioning  warning at any occurrence     TDD-003 §Operational Notes
+#   provisioning in flight   warning 1h, critical 4h       TDD-003 §Operational Notes
+#   WITH CHECK rejection     critical at any occurrence    TDD-001 §Operational Notes
+#   unset binding            warning any, critical 5/hour  TDD-001 §Operational Notes
+#
+# Each alert has a runbook in docs/runbooks (README there maps alert to runbook).
 #
 # Lag and debt carry a consumer label: each consumer has its own deliveries and dead letters
 # (ADR-GLB-018), so an alert names the consumer that is behind or refusing.
@@ -99,3 +110,120 @@ groups:
         annotations:
           summary: organization-control has exported no enforcement metrics for 10 minutes.
           description: Either the process is down, OTEL_EXPORTER_OTLP_ENDPOINT is unset, or the Collector is not receiving. Every alert above is blind until this clears.
+
+      - alert: ReconciliationExtraFinding
+        expr: organization_projection_consumer_extra_findings > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: The consumer's last reconciliation found access it serves that authority does not grant.
+          description: A security incident at any count. It holds until a reconciliation of this consumer finds none (docs/runbooks/projection-drift-repair.md).
+
+      - alert: AcceptToEnforcementOverBudget
+        expr: organization_enforcement_oldest_unapplied_age_seconds > 10
+        labels:
+          severity: warning
+        annotations:
+          summary: A security event accepted over 10s ago is not yet applied by this consumer.
+          description: The propagation budget is 10s (TDD-organization-control-002 §Enforcement Budget). Withdrawn access may still be served there (docs/runbooks/revocation-not-enforced.md).
+
+      - alert: AcceptToEnforcementCritical
+        expr: organization_enforcement_oldest_unapplied_age_seconds > 20
+        labels:
+          severity: critical
+        annotations:
+          summary: A security event accepted over 20s ago, twice the budget, is not yet applied by this consumer.
+
+  - name: organization-control-lifecycle
+    rules:
+      - alert: OffboardingObligationOverdue
+        expr: organization_offboarding_obligations_overdue > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: An offboarding obligation is open past its due date.
+          description: Chase the owning domain (docs/runbooks/stuck-offboarding.md).
+
+      - alert: OffboardingReleaseAmbiguous
+        expr: organization_provisioning_requests{operation="deprovision",state="unresolved"} > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: An offboarding is held in release by an ambiguous deprovisioning outcome.
+
+      - alert: OffboardingReleaseAmbiguousCritical
+        expr: organization_provisioning_oldest_request_age_seconds{operation="deprovision",state="unresolved"} > 86400
+        labels:
+          severity: critical
+        annotations:
+          summary: An offboarding has been held in release by an ambiguous deprovisioning outcome for over 24 hours.
+
+      - alert: OffboardingProlongedWarning
+        expr: organization_offboarding_oldest_in_progress_age_seconds > 2592000
+        labels:
+          severity: warning
+        annotations:
+          summary: A Tenant has been offboarding for over 30 days.
+
+      - alert: OffboardingProlongedCritical
+        expr: organization_offboarding_oldest_in_progress_age_seconds > 7776000
+        labels:
+          severity: critical
+        annotations:
+          summary: A Tenant has been offboarding for over 90 days.
+
+      - alert: ProvisioningUnresolved
+        expr: organization_provisioning_requests{operation="provision",state="unresolved"} > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A provisioning request timed out with no outcome; the boundary may or may not exist.
+          description: Never retried automatically (docs/runbooks/provisioning.md).
+
+      - alert: ProvisioningStuckWarning
+        expr: organization_provisioning_oldest_request_age_seconds{operation="provision",state="requested"} > 3600
+        labels:
+          severity: warning
+        annotations:
+          summary: A provisioning request has been in flight for over an hour.
+
+      - alert: ProvisioningStuckCritical
+        expr: organization_provisioning_oldest_request_age_seconds{operation="provision",state="requested"} > 14400
+        labels:
+          severity: critical
+        annotations:
+          summary: A provisioning request has been in flight for over four hours.
+
+      - alert: LifecycleTelemetryAbsent
+        expr: absent(organization_offboarding_in_progress)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: organization-control has exported no offboarding or provisioning metric for 10 minutes.
+          description: The lifecycle alerts above are blind. The view operation.lifecycle_signals may be missing, or the process is not exporting.
+
+  - name: organization-control-isolation
+    rules:
+      - alert: IsolationWithCheckRejection
+        expr: increase(organization_isolation_refusals_total{control="with_check"}[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: The database refused a write into a Tenant the transaction was not bound to.
+          description: A defect or an attack, treated as a security finding (docs/runbooks/with-check-rejection.md).
+
+      - alert: IsolationUnsetBindingWarning
+        expr: increase(organization_isolation_refusals_total{control="unset_binding"}[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A statement reached a Row-Level Security policy with no scope bound.
+          description: docs/runbooks/unset-binding.md
+
+      - alert: IsolationUnsetBindingCritical
+        expr: increase(organization_isolation_refusals_total{control="unset_binding"}[1h]) >= 5
+        labels:
+          severity: critical
+        annotations:
+          summary: Five or more statements in an hour reached a Row-Level Security policy with no scope bound.

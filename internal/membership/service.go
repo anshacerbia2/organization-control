@@ -24,6 +24,11 @@ import (
 type Service struct {
 	pool *db.TenantPool
 
+	// provider records a provider's access before it acts inside one Tenant: the enforcement read
+	// and the version advance after a restore. Nil when the service was built without one, and those
+	// two then refuse.
+	provider *db.ProviderPool
+
 	// now is a seam for tests. TDD-organization-control-002 requires acknowledgement to carry an
 	// accepted timestamp so enforcement delay is measured from a recorded origin, and a service
 	// that reads the wall clock cannot be asserted against a fixed one.
@@ -47,12 +52,25 @@ type Service struct {
 	halt func(ctx context.Context, position int) error
 }
 
+// Option configures the service.
+type Option func(*Service)
+
+// WithProviderPool lets a provider act inside one Tenant: read a Membership's enforcement evidence,
+// and advance versions after a restore to an older point.
+func WithProviderPool(provider *db.ProviderPool) Option {
+	return func(s *Service) { s.provider = provider }
+}
+
 // New constructs the service.
-func New(pool *db.TenantPool) (*Service, error) {
+func New(pool *db.TenantPool, opts ...Option) (*Service, error) {
 	if pool == nil {
 		return nil, errors.New("membership: a tenant-scoped pool is required")
 	}
-	return &Service{pool: pool, now: time.Now, newID: id.NewV7}, nil
+	s := &Service{pool: pool, now: time.Now, newID: id.NewV7}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
 }
 
 // GrantRequest creates a Membership.

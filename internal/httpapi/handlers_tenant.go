@@ -426,6 +426,12 @@ type lookupResponse struct {
 }
 
 func (h *handlers) lookupInvitation(w http.ResponseWriter, r *http.Request) {
+	// Counted before anything is decoded, so a malformed probe counts as a lookup too: the rate is
+	// the token-enumeration signal (TDD-organization-control-004 §Operational Notes), and an
+	// enumeration sends malformed tokens as readily as well-formed ones.
+	if s := signalsFrom(r.Context()); s != nil {
+		s.lookups.Add(r.Context(), 1)
+	}
 	body, ok := decode[acceptInvitationRequest](w, r)
 	if !ok {
 		return

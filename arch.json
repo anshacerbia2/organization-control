@@ -122,6 +122,9 @@
       "would mean a domain package could answer an HTTP request, and no domain package declares",
       "one.",
       "",
+      "It reaches internal/telemetry for the names of the two counters it adds to, isolation",
+      "refusals and invitation lookups, so the alert rules and the counters cannot drift apart.",
+      "",
       "It does not import internal/controldb. Schema stage management belongs to the migrate",
       "deployable, and a serving process that could advance a stage could do so on a request."
     ],
@@ -134,6 +137,7 @@
       "internal/offboarding",
       "internal/organization",
       "internal/projection",
+      "internal/telemetry",
       "internal/tenant",
       "internal/workspace"
     ],

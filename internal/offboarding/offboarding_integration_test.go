@@ -1467,3 +1467,71 @@ func TestACancellationIsRefusedAfterReleaseAndForAnUnrecordedOffboarding(t *test
 		t.Errorf("a refused cancellation moved the Tenant from %s to %s", status, after)
 	}
 }
+
+// A failed deprovisioning is sent again, and only a failed one (TDD-organization-control-004 1.11.0):
+// a new request under the same correlation identifier, the released event published again, the stage
+// unchanged. An ambiguous outcome is never retried.
+func TestOnlyAFailedDeprovisioningIsSentAgain(t *testing.T) {
+	f := newFixture(t)
+	tenantID, _ := f.seed(t, 1)
+	record := f.begin(t, tenantID, false)
+	f.freezeAll(t, tenantID, 10)
+	if _, err := f.service.CompleteFreeze(f.providerCtx, record.OffboardingID); err != nil {
+		t.Fatalf("CompleteFreeze: %v", err)
+	}
+	if _, err := f.service.ResendDeprovisioning(f.providerCtx, record.OffboardingID, "INC-1 resend"); !errors.Is(err, ErrStageRefused) {
+		t.Fatalf("a resend before release returned %v, want ErrStageRefused", err)
+	}
+	if _, err := f.service.Release(f.providerCtx, record.OffboardingID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	released, err := EventType("released")
+	if err != nil {
+		t.Fatalf("EventType: %v", err)
+	}
+	sent := f.eventCount(t, string(released), record.OffboardingID)
+
+	// In flight, and then ambiguous: both refused.
+	if _, err := f.service.ResendDeprovisioning(f.providerCtx, record.OffboardingID, "INC-1 resend"); !errors.Is(err, ErrResendRefused) {
+		t.Fatalf("a resend of a requested deprovisioning returned %v, want ErrResendRefused", err)
+	}
+	if err := f.service.RecordDeprovisioning(f.providerCtx, DeprovisioningOutcome{
+		OffboardingID: record.OffboardingID, State: "unresolved", Detail: "no status within the timeout",
+	}); err != nil {
+		t.Fatalf("RecordDeprovisioning: %v", err)
+	}
+	if _, err := f.service.ResendDeprovisioning(f.providerCtx, record.OffboardingID, "INC-1 resend"); !errors.Is(err, ErrResendRefused) {
+		t.Fatalf("a resend of an unresolved deprovisioning returned %v, want ErrResendRefused", err)
+	}
+
+	// Failed: sent again.
+	if err := f.service.RecordDeprovisioning(f.providerCtx, DeprovisioningOutcome{
+		OffboardingID: record.OffboardingID, State: "failed", Detail: "the storage subsystem refused",
+	}); err != nil {
+		t.Fatalf("RecordDeprovisioning: %v", err)
+	}
+	again, err := f.service.ResendDeprovisioning(f.providerCtx, record.OffboardingID, "INC-1 resend")
+	if err != nil {
+		t.Fatalf("ResendDeprovisioning: %v", err)
+	}
+	switch {
+	case again.Stage != StageRelease:
+		t.Errorf("the stage moved to %s", again.Stage)
+	case again.Deprovisioning == nil || again.Deprovisioning.State != "requested":
+		t.Errorf("the latest deprovisioning reads %+v, want a new request in flight", again.Deprovisioning)
+	}
+	if got := f.eventCount(t, string(released), record.OffboardingID); got != sent+1 {
+		t.Errorf("the command was published %d times in all, want %d", got, sent+1)
+	}
+
+	// The new request is the one a report correlates to, so realized now retires.
+	if err := f.service.RecordDeprovisioning(f.providerCtx, DeprovisioningOutcome{
+		OffboardingID: record.OffboardingID, State: "realized",
+	}); err != nil {
+		t.Fatalf("RecordDeprovisioning: %v", err)
+	}
+	_, version, _ := f.tenantRow(t, tenantID)
+	if _, err := f.service.Retire(f.providerCtx, record.OffboardingID, version); err != nil {
+		t.Errorf("Retire after the resent deprovisioning was realized: %v", err)
+	}
+}

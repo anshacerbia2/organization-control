@@ -85,6 +85,7 @@ var mapping = []struct {
 	{membership.ErrUnknownAction, platform.Internal},
 	{membership.ErrVersionMismatch, platform.VersionConflict},
 	{membership.ErrReasonRequired, platform.ValidationFailed},
+	{membership.ErrAdvanceReasonRequired, platform.ValidationFailed},
 	// Batches (ADR-ORG-004). A batch already executed, or a preview past its expiry, cannot move
 	// to execution, and no retry changes that: preview again.
 	{membership.ErrBatchNotFound, platform.NotFound},
@@ -162,6 +163,7 @@ var mapping = []struct {
 	{offboarding.ErrLegalHold, platform.PreconditionUnmet},
 	{offboarding.ErrDeprovisioningIncomplete, platform.PreconditionUnmet},
 	{offboarding.ErrAmbiguousOutcome, platform.PreconditionUnmet},
+	{offboarding.ErrResendRefused, platform.StateTransitionRefused},
 	{offboarding.ErrWrongDomain, platform.Forbidden},
 	{offboarding.ErrAlreadyResolved, platform.StateTransitionRefused},
 	// StateTransitionRefused: the offboarding is well formed and can never be cancelled, because it
@@ -181,6 +183,7 @@ var mapping = []struct {
 
 	// Dead-letter replay.
 	{projection.ErrDeadLetterNotFound, platform.NotFound},
+	{projection.ErrConsumerNotFound, platform.NotFound},
 	// StateTransitionRefused, not NotFound: the incident exists and is closed, and saying so is
 	// the answer -- an operator replaying a resolved incident has a wrong picture of the estate,
 	// and "not found" would confirm it.
@@ -228,6 +231,7 @@ var mapping = []struct {
 	{authority.ErrAccessQueryInvalid, platform.ValidationFailed},
 	{authority.ErrReviewInvalid, platform.ValidationFailed},
 	{authority.ErrSelfReview, platform.Forbidden},
+	{authority.ErrPauseInvalid, platform.ValidationFailed},
 	// Tenant administration grants.
 	{authority.ErrTenantAdminInvalid, platform.ValidationFailed},
 	{authority.ErrAdminTenantNotFound, platform.NotFound},
@@ -278,6 +282,7 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 
 	problem, mapped := problemFor(err)
 	if !mapped || problem == platform.Internal {
+		recordInternal(r, err)
 		platform.Problem(w, r, platform.Internal, "The request could not be completed")
 		return
 	}

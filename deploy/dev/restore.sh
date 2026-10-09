@@ -14,6 +14,17 @@
 #    superuser's "role already exists", which PostgreSQL documents as harmless; any other stops here.
 # 4. Restores the database whole with pg_restore --create --exit-on-error: the first error stops it,
 #    rather than a count of errors at the end.
+# 5. With PAUSE_REASON set, records a pause of Tenant administration before anything can serve
+#    (TDD-organization-control-001 §Pausing Tenant Administration). A restore to an older point is
+#    reconciled before Tenant administrators change anything (SAD-004 §9.1.1), and a pause made
+#    through the API after the service starts would leave a window in which they can. A provider
+#    lifts it with POST /v1/tenant-administration-pause {"paused": false} when the reconciliation in
+#    docs/runbooks/organization-database-restore.md is done:
+#
+#      PAUSE_REASON="INC-123 restored from the 2026-10-08 backup" ./restore.sh <globals> <dump>
+#
+#    The drill (scripts/dev-restore-drill.sh) leaves it unset, because it compares every table with
+#    the source's and a pause row would be a difference it made itself.
 #
 # The migrate job that `docker compose up` runs next finds the schema at its revision, applies
 # anything newer, and re-asserts RLS, the privileges and the five login roles' passwords from .env.
@@ -59,5 +70,14 @@ fi
 
 echo "[4/4] $database"
 docker compose exec -T postgres pg_restore -U postgres -d postgres --create --exit-on-error < "$dump"
+
+if [ -n "${PAUSE_REASON:-}" ]; then
+	echo "[pause] Tenant administration"
+	docker compose exec -T postgres psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$database" \
+		-v reason="$PAUSE_REASON" <<'SQL'
+INSERT INTO organization.tenant_administration_pause (pause_id, paused, reason)
+VALUES (gen_random_uuid(), true, :'reason');
+SQL
+fi
 
 echo "restored $database; next: docker compose up -d --build"

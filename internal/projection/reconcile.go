@@ -320,7 +320,8 @@ const ReconciledEventType = "com.scnehaux.organization.projection.repair.reconci
 // age is a fact rather than an inference from the event stream. A retired consumer matches nothing:
 // its record stays as it was when it was retired.
 const recordReconciliation = `UPDATE projection.consumer
-SET last_reconciled_at = $2, last_reconciled_mark = $3, last_reconciled_findings = $4
+SET last_reconciled_at = $2, last_reconciled_mark = $3, last_reconciled_findings = $4,
+    last_reconciled_extra_findings = $5
 WHERE consumer_id = $1 AND retired_at IS NULL`
 
 // PublishReconciled records the sweep against its consumer and, when it found something, appends
@@ -386,7 +387,7 @@ func (r *Reconciler) PublishReconciled(ctx context.Context, result Result) error
 
 func recordRun(ctx context.Context, tx db.Tx, result Result) error {
 	if _, err := tx.Exec(ctx, recordReconciliation, result.ConsumerID, result.RunAt, result.Mark,
-		len(result.Findings)); err != nil {
+		len(result.Findings), len(result.SecurityFindings())); err != nil {
 		return fmt.Errorf("projection: record reconciliation: %w", err)
 	}
 	return nil

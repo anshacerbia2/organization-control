@@ -123,6 +123,30 @@ func (h *handlers) membershipEnforcement(w http.ResponseWriter, r *http.Request)
 	respond(w, http.StatusOK, viewEnforcement(report))
 }
 
+// tenantMembershipEnforcement serves
+// `GET /v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement`: the same evidence, for a
+// provider, with a reason. The Tenant is in the path so the access record names it and the Tenant's
+// administrator reads it in GET /v1/provider-access (TDD-organization-control-002 1.15.0).
+func (h *handlers) tenantMembershipEnforcement(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireProvider(w, r); !ok {
+		return
+	}
+	tenantID, ok := pathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	membershipID, ok := pathUUID(w, r, "membership_id")
+	if !ok {
+		return
+	}
+	report, err := h.services.Memberships.EnforcementInTenant(r.Context(), tenantID, membershipID, reason(r))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	respond(w, http.StatusOK, viewEnforcement(report))
+}
+
 // classifierFor renders an item's error as the problem document the single command would answer
 // the same request with: writeError itself, into a buffer, so the translation table stays the one
 // in problem.go (RFC 7644 §3.7.3).

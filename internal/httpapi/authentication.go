@@ -101,6 +101,10 @@ type CallerRecords interface {
 	// TenantStanding reads, in the Tenant, the Principal's Membership, the Tenant's status and its
 	// tenant administration grant (ADR-ORG-003 §5.3).
 	TenantStanding(ctx context.Context, principal, tenant, correlation id.UUID) (authority.TenantStanding, error)
+
+	// TenantAdministrationPaused reads whether a provider has paused every Tenant administrator's
+	// commands (TDD-organization-control-001 §Pausing Tenant Administration).
+	TenantAdministrationPaused(ctx context.Context) (bool, error)
 }
 
 // EmergencyUseRecorder records that a request was authorized by the Principal's emergency grant.
@@ -210,6 +214,20 @@ func Authenticate(verifier TokenVerifier, cfg AuthenticationConfig) (Middleware,
 			case err != nil:
 				platform.Problem(w, r, platform.Forbidden, err.Error())
 				return
+			case !caller.Tenant.IsNil() && changes(r):
+				// A Tenant administrator's command, while a provider has paused them: the operator is
+				// reconciling authority after a restore to an older point (SAD-004 §9.1.1), and a change
+				// made now would be made against a state not yet repaired. Read for each command, so the
+				// pause takes effect at the next one and its lifting likewise. Reads continue.
+				paused, err := cfg.Records.TenantAdministrationPaused(r.Context())
+				if err != nil {
+					platform.Problem(w, r, platform.DependencyUnavailable, "The caller's authority could not be read")
+					return
+				}
+				if paused {
+					platform.Problem(w, r, platform.DependencyUnavailable, administrationPaused)
+					return
+				}
 			case caller.Eligible && !activationRoute(r.URL.Path):
 				// Before a transaction opens: an eligible caller holds no authority in force, and the
 				// activation routes are how it gets some (TDD-organization-control-001 §Provider
@@ -239,6 +257,23 @@ func Authenticate(verifier TokenVerifier, cfg AuthenticationConfig) (Middleware,
 			next.ServeHTTP(w, r.WithContext(WithCaller(r.Context(), caller)))
 		})
 	}, nil
+}
+
+// administrationPaused is the 503 detail for a Tenant administrator's command during a pause. 503
+// because the refusal is temporary and the request may be sent again unchanged once the pause is
+// lifted: RFC 9110 §15.6.4 gives it to a server "currently unable to handle the request due to a
+// temporary overload or scheduled maintenance, which will likely be alleviated after some delay".
+const administrationPaused = "Tenant administration is paused while the provider reconciles authority; " +
+	"reads continue, and the same command can be sent again once the pause is lifted"
+
+// changes reports whether a request can change state: every method but the safe ones (RFC 9110
+// §9.2.1).
+func changes(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	return true
 }
 
 // Middleware is the shape platform.Chain accepts.

@@ -29,6 +29,13 @@ func (s *SignalsReader) Read(ctx context.Context) error {
 	})
 }
 
+func (s *SignalsReader) ReadLifecycle(ctx context.Context) error {
+	return s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT obligations_overdue FROM operation.lifecycle_signals`)
+		return err
+	})
+}
+
 const (
 	closeStatement    = `UPDATE platform.dead_letter SET resolved_at = now() WHERE event_id = $1`
 	evidenceStatement = `SELECT 1 FROM platform.delivery_receipt WHERE event_id = $1`

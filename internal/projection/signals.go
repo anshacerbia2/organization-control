@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/anshacerbia2/foundation-platform/outbox"
 
@@ -35,7 +36,30 @@ type Signals struct {
 
 	// Consumers are the active registered consumers.
 	Consumers []ConsumerSignal
+
+	// Unapplied is each active consumer's oldest security event not yet applied: the accept-to-
+	// enforcement delay of TDD-organization-control-002 §Operational Notes, measured while it is
+	// still running rather than after it ends.
+	Unapplied []UnappliedSignal
 }
+
+// UnappliedSignal is one consumer's oldest priority-lane delivery, accepted within
+// UnappliedWindow, that carries no consumer_applied receipt and no open dead letter.
+//
+// The age runs from the delivery's created_at, which is the accepting transaction's: outbox.Append
+// writes the delivery in the transaction that commits the change, so it is the acceptance instant to
+// the transaction's start. An open dead letter is left out because SecurityDebt pages for it
+// already, and one incident should not page twice under two names.
+type UnappliedSignal struct {
+	Consumer  string
+	OldestAge float64 // seconds; zero when every recent security event is applied
+}
+
+// UnappliedWindow bounds how far back the unapplied read looks. The deliveries are partitioned by
+// day on created_at, so the bound is also what keeps the read to the newest partitions. A security
+// event unapplied for longer than this has been paged on for a day by this alert; past it, the
+// consumer's report age and reconciliation are what find a delivery its consumer dropped silently.
+const UnappliedWindow = 24 * time.Hour
 
 // LaneSignal is one lane of one consumer's deliveries.
 type LaneSignal struct {
@@ -66,6 +90,10 @@ type ConsumerSignal struct {
 
 	// VerifyRatio is its last measured fresh-check ratio, when one has been measured.
 	VerifyRatio *float64
+
+	// ExtraFindings is how many `extra` findings its last reconciliation produced: access it serves
+	// that authority does not grant. Zero until a reconciliation has run, and after a clean one.
+	ExtraFindings int64
 }
 
 // SignalsReader reads Signals on the raw provider connections, as FrontierReader does: these tables
@@ -125,10 +153,40 @@ SELECT c.consumer_id,
  GROUP BY c.consumer_id, observed.at
  ORDER BY c.consumer_id`
 
+// unappliedSignals reads, per active consumer, the age of its oldest recent priority delivery with
+// no consumer_applied receipt and no open dead letter. now() bounds the window, because it is stable
+// within the statement and lets the planner prune partitions; clock_timestamp() measures the age.
+const unappliedSignals = `WITH observed AS (
+    SELECT clock_timestamp() AS at
+)
+SELECT c.consumer_id,
+       coalesce(extract(epoch FROM observed.at - min(d.created_at)), 0)::double precision
+  FROM observed
+ CROSS JOIN projection.consumer c
+  LEFT JOIN platform.outbox_delivery d
+         ON d.consumer = c.consumer_id
+        AND d.priority = $1
+        AND d.created_at >= now() - make_interval(secs => $2)
+        AND (d.failure_class IS NULL OR d.failure_class <> 'abandoned')
+        AND NOT EXISTS (SELECT 1
+                          FROM platform.delivery_receipt r
+                         WHERE r.event_id = d.event_id
+                           AND r.consumer = d.consumer
+                           AND r.evidence = 'consumer_applied')
+        AND NOT EXISTS (SELECT 1
+                          FROM platform.dead_letter dl
+                         WHERE dl.event_id = d.event_id
+                           AND dl.consumer = d.consumer
+                           AND dl.resolved_at IS NULL)
+ WHERE c.retired_at IS NULL
+ GROUP BY c.consumer_id, observed.at
+ ORDER BY c.consumer_id`
+
 const consumerSignals = `SELECT consumer_id,
        extract(epoch FROM clock_timestamp() - coalesce(last_reported_at, registered_at))::double precision,
        extract(epoch FROM max_accepted_age)::double precision,
-       last_verify_ratio
+       last_verify_ratio,
+       coalesce(last_reconciled_extra_findings, 0)
   FROM projection.consumer
  WHERE retired_at IS NULL
  ORDER BY consumer_id`
@@ -177,6 +235,23 @@ func (r *SignalsReader) Read(ctx context.Context) (Signals, error) {
 			return fmt.Errorf("projection: reading debt signals: %w", err)
 		}
 
+		unapplied, err := tx.Query(ctx, unappliedSignals, outbox.PriorityHigh, UnappliedWindow.Seconds())
+		if err != nil {
+			return fmt.Errorf("projection: reading unapplied signals: %w", err)
+		}
+		for unapplied.Next() {
+			var u UnappliedSignal
+			if err := unapplied.Scan(&u.Consumer, &u.OldestAge); err != nil {
+				unapplied.Close()
+				return fmt.Errorf("projection: reading a consumer's unapplied security event: %w", err)
+			}
+			s.Unapplied = append(s.Unapplied, u)
+		}
+		unapplied.Close()
+		if err := unapplied.Err(); err != nil {
+			return fmt.Errorf("projection: reading unapplied signals: %w", err)
+		}
+
 		rows, err := tx.Query(ctx, consumerSignals)
 		if err != nil {
 			return fmt.Errorf("projection: reading consumer signals: %w", err)
@@ -184,7 +259,7 @@ func (r *SignalsReader) Read(ctx context.Context) (Signals, error) {
 		defer rows.Close()
 		for rows.Next() {
 			var c ConsumerSignal
-			if err := rows.Scan(&c.Consumer, &c.ReportAge, &c.MaxAcceptedAge, &c.VerifyRatio); err != nil {
+			if err := rows.Scan(&c.Consumer, &c.ReportAge, &c.MaxAcceptedAge, &c.VerifyRatio, &c.ExtraFindings); err != nil {
 				return fmt.Errorf("projection: reading a consumer's signals: %w", err)
 			}
 			s.Consumers = append(s.Consumers, c)
@@ -194,5 +269,70 @@ func (r *SignalsReader) Read(ctx context.Context) (Signals, error) {
 	if err != nil {
 		return Signals{}, err
 	}
+	return s, nil
+}
+
+// LifecycleSignals are the offboarding and provisioning facts of TDD-organization-control-004 and
+// TDD-organization-control-003 §Operational Notes, read as aggregates.
+//
+// Read separately from Signals and observed by a callback of its own, so a failure here leaves the
+// enforcement gauges reporting. The rows are under Row-Level Security, which this raw connection
+// binds no scope for, so they are read through operation.lifecycle_signals: a security_barrier view
+// owned by the migration role, which reaches exactly the rows the counts need through three SELECT
+// policies and returns one row of counts and ages, naming no Tenant (rls.sql).
+type LifecycleSignals struct {
+	// ObligationsOverdue are open obligations past due_at, and the age of the oldest past it.
+	ObligationsOverdue      int64
+	OldestOverdueObligation float64
+
+	// OffboardingsInProgress are offboardings in freeze, obligations or release, and the age of the
+	// oldest since it began.
+	OffboardingsInProgress int64
+	OldestOffboarding      float64
+
+	// Requests are the provisioning requests in flight or ambiguous, per direction and state.
+	Requests []RequestSignal
+}
+
+// RequestSignal is one direction and state of tenant.provisioning_request.
+type RequestSignal struct {
+	Operation string // "provision" or "deprovision"
+	State     string // "requested" or "unresolved"
+	Count     int64
+
+	// OldestAge runs from requested_at for a request in flight, and from resolved_at, the instant the
+	// sweep found it ambiguous, for an unresolved one. Zero when there is none.
+	OldestAge float64
+}
+
+const lifecycleSignals = `SELECT obligations_overdue, oldest_overdue_obligation_age,
+       offboardings_in_progress, oldest_offboarding_age,
+       provision_requested, provision_requested_oldest_age,
+       provision_unresolved, provision_unresolved_oldest_age,
+       deprovision_requested, deprovision_requested_oldest_age,
+       deprovision_unresolved, deprovision_unresolved_oldest_age
+  FROM operation.lifecycle_signals`
+
+// ReadLifecycle returns the current lifecycle signals.
+func (r *SignalsReader) ReadLifecycle(ctx context.Context) (LifecycleSignals, error) {
+	var s LifecycleSignals
+	requests := []RequestSignal{
+		{Operation: "provision", State: "requested"}, {Operation: "provision", State: "unresolved"},
+		{Operation: "deprovision", State: "requested"}, {Operation: "deprovision", State: "unresolved"},
+	}
+	err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if err := tx.QueryRow(ctx, lifecycleSignals).Scan(
+			&s.ObligationsOverdue, &s.OldestOverdueObligation,
+			&s.OffboardingsInProgress, &s.OldestOffboarding,
+			&requests[0].Count, &requests[0].OldestAge, &requests[1].Count, &requests[1].OldestAge,
+			&requests[2].Count, &requests[2].OldestAge, &requests[3].Count, &requests[3].OldestAge); err != nil {
+			return fmt.Errorf("projection: reading the lifecycle signals: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return LifecycleSignals{}, err
+	}
+	s.Requests = requests
 	return s, nil
 }

@@ -90,6 +90,10 @@ var RuntimeRoles = []string{"organization_rt", "organization_provider_rt", "orga
 // membership.membership_batch and membership.membership_batch_item are purged of expired previews by
 // the maintenance stage, as the migration role that owns them, through one policy each that admits
 // expired previews only and no write but a delete.
+//
+// operation.offboarding, operation.offboarding_obligation and tenant.provisioning_request are read
+// by operation.lifecycle_signals, a view owned by the migration role, for the offboarding and
+// provisioning gauges: one SELECT policy each admits the rows still in progress, and no write.
 var AdditionalPolicies = map[string][]string{
 	"membership.membership_event": {"membership_event_resolution_read"},
 	"membership.tenant_admin_grant": {"tenant_admin_grant_granted_by_provider",
@@ -99,6 +103,9 @@ var AdditionalPolicies = map[string][]string{
 	"membership.membership_batch":      {"membership_batch_purge"},
 	"membership.membership_batch_item": {"membership_batch_item_purge"},
 	"tenant.tenant":                    {"tenant_consumer_read", "tenant_self_read"},
+	"operation.offboarding":            {"offboarding_signals_read"},
+	"operation.offboarding_obligation": {"offboarding_obligation_signals_read"},
+	"tenant.provisioning_request":      {"provisioning_request_signals_read"},
 }
 
 // TableProtection is the posture of one table.

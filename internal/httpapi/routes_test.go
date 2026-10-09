@@ -70,7 +70,7 @@ func testSurface(t *testing.T) Surface {
 		}
 	}
 
-	memberships, err := membership.New(tenantPool)
+	memberships, err := membership.New(tenantPool, membership.WithProviderPool(providerPool))
 	must(err, "membership service")
 	tenants, err := tenant.New(providerPool)
 	must(err, "tenant service")
@@ -98,6 +98,8 @@ func testSurface(t *testing.T) Surface {
 	must(err, "resolution scope pool")
 	resolver, err := projection.NewResolver(resolutionPool)
 	must(err, "dead-letter resolver")
+	deadLetters, err := projection.NewDeadLetterReader(providerPool)
+	must(err, "dead-letter reader")
 	contexts, err := occontext.New(providerPool)
 	must(err, "context service")
 	selfPool, err := db.NewSelfPool(transactor)
@@ -123,7 +125,7 @@ func testSurface(t *testing.T) Surface {
 			Organizations: organizations,
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
-			ContextList: contextList, Replayer: replayer, Resolver: resolver,
+			ContextList: contextList, Replayer: replayer, Resolver: resolver, DeadLetters: deadLetters,
 			Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
 			TenantAdministrators: tenantAdministrators, AccessReview: accessReview,
 		},
@@ -542,6 +544,7 @@ func testSurfaceServices(t *testing.T) Services {
 	replayer, _ := projection.NewReplayer(providerPool)
 	resolutionPool, _ := db.NewResolutionPool(transactor, stubRecorder{})
 	resolver, _ := projection.NewResolver(resolutionPool)
+	deadLetters, _ := projection.NewDeadLetterReader(providerPool)
 	contexts, _ := occontext.New(providerPool)
 	selfPool, _ := db.NewSelfPool(transactor)
 	contextList, _ := occontext.NewContexts(providerPool, selfPool)
@@ -558,7 +561,7 @@ func testSurfaceServices(t *testing.T) Services {
 		Organizations: organizations,
 		Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
 		Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
-		ContextList: contextList, Replayer: replayer, Resolver: resolver,
+		ContextList: contextList, Replayer: replayer, Resolver: resolver, DeadLetters: deadLetters,
 		Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
 		TenantAdministrators: tenantAdministrators, AccessReview: accessReview,
 	}

@@ -101,47 +101,81 @@ func (s *Service) Enforcement(ctx context.Context, membershipID id.UUID) (Enforc
 	if membershipID.IsNil() {
 		return Enforcement{}, fmt.Errorf("%w: a membership identifier is required", ErrInvalid)
 	}
-	report := Enforcement{MembershipID: membershipID, Budget: PropagationBudget, Consumers: []ConsumerEvidence{}}
-
+	var report Enforcement
 	if err := db.WithTenantRead(ctx, s.pool, func(ctx context.Context, tx db.Tx) error {
-		found, err := latestEvent(ctx, tx, &report)
-		if err != nil {
-			return err
-		}
-		if !found {
-			if _, err := load(ctx, tx, selectOne, membershipID); err != nil {
-				return err
-			}
-			return fmt.Errorf("%w: %s", ErrNoTransition, membershipID)
-		}
-
-		rows, err := tx.Query(ctx, evidenceStatement, report.EventID.String())
-		if err != nil {
-			return fmt.Errorf("membership: read enforcement evidence: %w", err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var (
-				consumer     string
-				publishedAt  *time.Time
-				evidence     *string
-				recordedAt   *time.Time
-				deadLettered bool
-			)
-			if err := rows.Scan(&consumer, &publishedAt, &evidence, &recordedAt, &deadLettered); err != nil {
-				return fmt.Errorf("membership: scan enforcement evidence: %w", err)
-			}
-			if publishedAt != nil && (report.PublishedAt == nil || publishedAt.Before(*report.PublishedAt)) {
-				at := *publishedAt
-				report.PublishedAt = &at
-			}
-			report.Consumers = append(report.Consumers, consumerEvidence(consumer, evidence, recordedAt, deadLettered))
-		}
-		return rows.Err()
+		var err error
+		report, err = s.enforcementWithin(ctx, tx, membershipID)
+		return err
 	}); err != nil {
 		return Enforcement{}, err
 	}
+	return report, nil
+}
 
+// EnforcementInTenant is the same read for a provider, inside the one Tenant it names
+// (TDD-organization-control-002 1.15.0 §Enforcement Evidence).
+//
+// db.WithProviderInTenant records the access with the provider's reason and that Tenant before it
+// reads, so the Tenant's administrator sees the read in its provider-access record
+// (ADR-ORG-002 §5.6). The read itself runs under the Tenant's policy, as the Tenant administrator's
+// does: a Membership of another Tenant is absent, whatever identifier the path carries.
+func (s *Service) EnforcementInTenant(ctx context.Context, tenantID, membershipID id.UUID, reason string) (Enforcement, error) {
+	switch {
+	case s.provider == nil:
+		return Enforcement{}, errors.New("membership: a provider pool is required for a provider's read")
+	case membershipID.IsNil() || tenantID.IsNil():
+		return Enforcement{}, fmt.Errorf("%w: a tenant and a membership identifier are required", ErrInvalid)
+	}
+	var report Enforcement
+	if err := db.WithProviderInTenant(ctx, s.provider, s.pool, tenantID, reason, func(ctx context.Context, tx db.Tx) error {
+		var err error
+		report, err = s.enforcementWithin(ctx, tx, membershipID)
+		return err
+	}); err != nil {
+		return Enforcement{}, err
+	}
+	return report, nil
+}
+
+// enforcementWithin reads the evidence inside a transaction bound to one Tenant.
+func (s *Service) enforcementWithin(ctx context.Context, tx db.Tx, membershipID id.UUID) (Enforcement, error) {
+	report := Enforcement{MembershipID: membershipID, Budget: PropagationBudget, Consumers: []ConsumerEvidence{}}
+	found, err := latestEvent(ctx, tx, &report)
+	if err != nil {
+		return Enforcement{}, err
+	}
+	if !found {
+		if _, err := load(ctx, tx, selectOne, membershipID); err != nil {
+			return Enforcement{}, err
+		}
+		return Enforcement{}, fmt.Errorf("%w: %s", ErrNoTransition, membershipID)
+	}
+
+	rows, err := tx.Query(ctx, evidenceStatement, report.EventID.String())
+	if err != nil {
+		return Enforcement{}, fmt.Errorf("membership: read enforcement evidence: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			consumer     string
+			publishedAt  *time.Time
+			evidence     *string
+			recordedAt   *time.Time
+			deadLettered bool
+		)
+		if err := rows.Scan(&consumer, &publishedAt, &evidence, &recordedAt, &deadLettered); err != nil {
+			return Enforcement{}, fmt.Errorf("membership: scan enforcement evidence: %w", err)
+		}
+		if publishedAt != nil && (report.PublishedAt == nil || publishedAt.Before(*report.PublishedAt)) {
+			at := *publishedAt
+			report.PublishedAt = &at
+		}
+		report.Consumers = append(report.Consumers, consumerEvidence(consumer, evidence, recordedAt, deadLettered))
+	}
+	if err := rows.Err(); err != nil {
+		return Enforcement{}, err
+	}
 	report.EvaluatedAt = s.now().UTC()
 	report.State = report.derive()
 	return report, nil

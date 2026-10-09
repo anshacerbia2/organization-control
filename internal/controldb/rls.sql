@@ -326,3 +326,96 @@ SELECT access_id, actor_id, authority, activation_id, tenant_id, operation, corr
    AND authority <> 'consumer';
 COMMENT ON VIEW audit.tenant_provider_access IS
     'The provider access that named the bound Tenant, for its Tenant administrator. ADR-ORG-002 §5.6.';
+
+-- operation.lifecycle_signals, the offboarding and provisioning gauges (TDD-organization-control-004
+-- and -003 §Operational Notes).
+--
+-- The signals are read on every metric collection, on the raw provider connections, which bind no
+-- scope: a provider scope would file a privileged-access record per collection, and the review of
+-- that record (ADR-ORG-002 §5.6) would then be a review of a timer. The rows are under Row-Level
+-- Security all the same, so the read goes through this view, which returns one row of counts and ages
+-- and names no Tenant, no offboarding and no person.
+--
+-- The view reads its tables with its owner's privileges: "If any of the underlying base relations
+-- has row-level security enabled, then by default, the row-level security policies of the view
+-- owner are applied" (PostgreSQL 17, CREATE VIEW, Notes). The owner is the migration role, which
+-- FORCE ROW LEVEL SECURITY binds like everyone else, so the three SELECT policies below give it
+-- exactly the rows the counts need: an offboarding still in progress, an open obligation past its
+-- due date, a provisioning request in flight or ambiguous. They are permissive, and the migration
+-- role has no other policy on these tables, so they are the whole of what it reads here. SELECT only:
+-- the migration role writes none of these rows.
+--
+-- security_barrier for the reason the Tenant's provider-access view carries it: a function in the
+-- caller's query is not evaluated against a row before the view's own predicates.
+DROP POLICY IF EXISTS offboarding_signals_read ON operation.offboarding;
+CREATE POLICY offboarding_signals_read ON operation.offboarding
+    FOR SELECT
+    TO organization_migrator
+    USING (stage IN ('freeze', 'obligations', 'release'));
+
+DROP POLICY IF EXISTS offboarding_obligation_signals_read ON operation.offboarding_obligation;
+CREATE POLICY offboarding_obligation_signals_read ON operation.offboarding_obligation
+    FOR SELECT
+    TO organization_migrator
+    USING (state = 'open' AND due_at < now());
+
+DROP POLICY IF EXISTS provisioning_request_signals_read ON tenant.provisioning_request;
+CREATE POLICY provisioning_request_signals_read ON tenant.provisioning_request
+    FOR SELECT
+    TO organization_migrator
+    USING (state IN ('requested', 'unresolved'));
+
+DROP VIEW IF EXISTS operation.lifecycle_signals;
+CREATE VIEW operation.lifecycle_signals WITH (security_barrier) AS
+WITH observed AS (
+    SELECT clock_timestamp() AS at
+),
+overdue AS (
+    SELECT count(*) AS n, min(due_at) AS oldest
+      FROM operation.offboarding_obligation
+     WHERE state = 'open' AND due_at < now()
+),
+running AS (
+    SELECT count(*) AS n, min(started_at) AS oldest
+      FROM operation.offboarding
+     WHERE stage IN ('freeze', 'obligations', 'release')
+),
+requests AS (
+    SELECT coalesce(desired_profile->>'operation', 'provision') AS operation,
+           state,
+           count(*) AS n,
+           min(CASE WHEN state = 'unresolved' THEN coalesce(resolved_at, requested_at)
+                    ELSE requested_at END) AS oldest
+      FROM tenant.provisioning_request
+     WHERE state IN ('requested', 'unresolved')
+     GROUP BY 1, 2
+)
+SELECT overdue.n AS obligations_overdue,
+       coalesce(extract(epoch FROM observed.at - overdue.oldest), 0)::double precision
+           AS oldest_overdue_obligation_age,
+       running.n AS offboardings_in_progress,
+       coalesce(extract(epoch FROM observed.at - running.oldest), 0)::double precision
+           AS oldest_offboarding_age,
+       coalesce((SELECT n FROM requests WHERE operation = 'provision' AND state = 'requested'), 0)
+           AS provision_requested,
+       coalesce(extract(epoch FROM observed.at - (SELECT oldest FROM requests
+           WHERE operation = 'provision' AND state = 'requested')), 0)::double precision
+           AS provision_requested_oldest_age,
+       coalesce((SELECT n FROM requests WHERE operation = 'provision' AND state = 'unresolved'), 0)
+           AS provision_unresolved,
+       coalesce(extract(epoch FROM observed.at - (SELECT oldest FROM requests
+           WHERE operation = 'provision' AND state = 'unresolved')), 0)::double precision
+           AS provision_unresolved_oldest_age,
+       coalesce((SELECT n FROM requests WHERE operation = 'deprovision' AND state = 'requested'), 0)
+           AS deprovision_requested,
+       coalesce(extract(epoch FROM observed.at - (SELECT oldest FROM requests
+           WHERE operation = 'deprovision' AND state = 'requested')), 0)::double precision
+           AS deprovision_requested_oldest_age,
+       coalesce((SELECT n FROM requests WHERE operation = 'deprovision' AND state = 'unresolved'), 0)
+           AS deprovision_unresolved,
+       coalesce(extract(epoch FROM observed.at - (SELECT oldest FROM requests
+           WHERE operation = 'deprovision' AND state = 'unresolved')), 0)::double precision
+           AS deprovision_unresolved_oldest_age
+  FROM observed, overdue, running;
+COMMENT ON VIEW operation.lifecycle_signals IS
+    'Counts and ages of offboarding and provisioning in progress, naming nothing. TDD-organization-control-004 §Operational Notes.';

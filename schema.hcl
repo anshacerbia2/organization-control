@@ -493,6 +493,61 @@ table "emergency_grant_use" {
   }
 }
 
+// Each decision to pause Tenant administrators' commands, or to lift the pause, while a restore to an
+// older point is reconciled (TDD-organization-control-001 1.22.0 §Pausing Tenant Administration,
+// SAD-004 §9.1.1). Append-only: the latest row is the state, and the rows before it are who paused
+// and lifted, when and why. Outside the RLS schemas because it is about every Tenant at once; read
+// by the provider role, on every Tenant administrator's command.
+table "tenant_administration_pause" {
+  schema  = schema.organization
+  comment = "Decisions to pause and lift Tenant administrators' commands. Append-only; the latest row is the state."
+
+  column "pause_id" {
+    null = false
+    type = uuid
+  }
+  column "paused" {
+    null = false
+    type = boolean
+  }
+  column "reason" {
+    null = false
+    type = text
+  }
+  // The provider who decided. Null only on a pause the restore procedure records before the service
+  // starts, which no person made through the API.
+  column "actor_id" {
+    null = true
+    type = uuid
+  }
+  column "correlation_id" {
+    null = true
+    type = uuid
+  }
+  column "recorded_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.pause_id]
+  }
+
+  check "tenant_administration_pause_reason_check" {
+    expr = "btrim(reason) <> ''"
+  }
+  // Only a person lifts a pause: the restore procedure may pause, and nothing but a provider's
+  // decision, named, ends one.
+  check "tenant_administration_pause_lift_check" {
+    expr = "paused OR (actor_id IS NOT NULL)"
+  }
+
+  index "tenant_administration_pause_recorded_idx" {
+    columns = [column.recorded_at, column.pause_id]
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // tenant — RLS. A tenant-scoped caller sees exactly one row: its own.
 // ---------------------------------------------------------------------------------------------
@@ -1914,6 +1969,13 @@ table "consumer" {
     type = bigint
   }
   column "last_reconciled_findings" {
+    null = true
+    type = integer
+  }
+  // How many of those findings were `extra`: access the consumer serves and authority does not
+  // grant. TDD-organization-control-002 §Operational Notes alerts on any; the gauge reads this, so
+  // the alert holds until a clean run clears it rather than for one scrape.
+  column "last_reconciled_extra_findings" {
     null = true
     type = integer
   }

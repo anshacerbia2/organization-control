@@ -29,6 +29,7 @@ BEGIN
               ('organization.provider_activation'),
               ('organization.provider_grant_event'),
               ('organization.emergency_grant_use'),
+              ('organization.tenant_administration_pause'),
               ('tenant.tenant'),
               ('tenant.provisioning_request'),
               ('tenant.tenant_event'),
@@ -42,6 +43,7 @@ BEGIN
               ('invitation.invitation'),
               ('operation.offboarding'),
               ('operation.offboarding_obligation'),
+              ('operation.lifecycle_signals'),
               ('audit.privileged_access'),
               ('audit.privileged_access_review'),
               ('audit.tenant_provider_access'),
@@ -228,6 +230,11 @@ GRANT USAGE ON SCHEMA operation TO organization_provider_rt;
 GRANT SELECT, INSERT, UPDATE ON operation.offboarding            TO organization_provider_rt;
 GRANT SELECT, INSERT, UPDATE ON operation.offboarding_obligation TO organization_provider_rt;
 
+-- operation.lifecycle_signals -- SELECT, provider only: the offboarding and provisioning gauges, read
+-- on the raw provider connections on each metric collection. A view of counts and ages that names no
+-- row; the migration role that owns it reads the tables through three SELECT policies (rls.sql).
+GRANT SELECT ON operation.lifecycle_signals TO organization_provider_rt;
+
 -- organization.organization -- provider only.
 --
 -- TDD-organization-control-001 classifies this schema outside the RLS set because an
@@ -267,6 +274,11 @@ GRANT UPDATE (decided_by, decision, decision_reason, decided_at, ends_at, ended_
 -- update adds to. Nothing deletes one: it is the evidence that the grant was validated.
 GRANT SELECT, INSERT ON organization.emergency_grant_use TO organization_provider_rt;
 GRANT UPDATE (last_used_at, uses) ON organization.emergency_grant_use TO organization_provider_rt;
+
+-- organization.tenant_administration_pause -- provider only, SELECT and INSERT: the pause is read on
+-- every Tenant administrator's command on the provider connections, and a provider records each
+-- decision. No UPDATE: a decision is never rewritten, the next one is appended.
+GRANT SELECT, INSERT ON organization.tenant_administration_pause TO organization_provider_rt;
 
 -- projection.consumer -- provider only: the consumer registry, progress reports, the snapshot
 -- mark, and the fresh check's metering. The resolver reads it through its own role, below.
