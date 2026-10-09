@@ -86,7 +86,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	service.now = func() time.Time { return fixed }
 
-	scope, err := db.ProviderScope(mustID(t), mustID(t))
+	scope, err := db.ProviderScope(mustID(t), mustID(t), db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("ProviderScope: %v", err)
 	}

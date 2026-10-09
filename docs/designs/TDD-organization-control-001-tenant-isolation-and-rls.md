@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.20.0
+  version: 1.21.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -105,6 +105,7 @@ compile error but two sources appearing in a consumer's stream for one system.
 | `organization` | No | An Organization sponsors Tenants and is not contained by one; access is provider-scoped or resolved through an explicit relationship |
 | `projection` | No | Consumer registry and cursors are operational state with no tenant column |
 | `platform` | No | Outbox, deduplication, idempotency, and migration state carry no tenant column |
+| `audit` | No | The privileged-access record and its reviews. A row records access *across* Tenants and names at most one, so a Tenant reads its own rows through a view instead (§Privileged Access Review, 1.21.0) |
 
 Every table carrying RLS has a non-nullable `tenant_id`. A tenant-scoped table without
 that column is a modelling error, and the migration test rejects it rather than
@@ -907,6 +908,197 @@ CREATE TABLE organization.emergency_grant_use (
 - **Only this scope.** The Identity Control API records and reports its own scope's grants, from
   its own projection and requests (`ADR-ORG-002 §5.3`). This service cannot see their use.
 
+### Privileged Access Review
+
+1.21.0, `ADR-ORG-002 §5.6`. Every provider-scoped transaction writes one row to
+`audit.privileged_access` before it runs (§The Single Binding Path). Until 1.21.0 no runtime role
+could read it, so the review in `docs/runbooks/provider-access-review.md` needed SQL on the migration
+credential. NIST asks the record to be reviewed: "Review and analyze system audit records
+[Assignment: frequency] for indications of [Assignment: inappropriate or unusual activity]" (AU-6
+a.) [R7].
+
+**What a row records.** Four columns join the actor, the correlation, the reason and the time:
+
+```sql
+ALTER TABLE audit.privileged_access
+    ADD COLUMN authority     TEXT NOT NULL,
+    ADD COLUMN activation_id UUID,
+    ADD COLUMN tenant_id     UUID,
+    ADD COLUMN operation     TEXT,
+    ADD CONSTRAINT privileged_access_authority_check
+        CHECK (authority IN ('emergency', 'activation', 'eligible', 'consumer')),
+    ADD CONSTRAINT privileged_access_activation_check
+        CHECK ((authority = 'activation') = (activation_id IS NOT NULL)),
+    ADD CONSTRAINT privileged_access_operation_check
+        CHECK (operation IS NULL OR btrim(operation) <> '');
+CREATE INDEX privileged_access_tenant_idx
+    ON audit.privileged_access (tenant_id, access_id) WHERE tenant_id IS NOT NULL;
+```
+
+- **`authority`** is what admitted the request. `emergency`: the caller's emergency grant.
+  `activation`: an approved activation in force, named by `activation_id`. `eligible`: a grant holder
+  with nothing in force, which reaches the activation routes alone. `consumer`: a registered
+  projection consumer. Authentication reads it with the standing (§Caller Authority), and the scope
+  carries it: `db.ProviderScope` takes it as an argument and refuses a scope without one, so a
+  provider transaction cannot record an access with no authority behind it.
+- **`tenant_id`** is the one Tenant the access named, or null. It is the Tenant
+  `db.WithProviderInTenant` binds, or else the `{tenant_id}` segment of the route's path. A list
+  across Tenants, or a record addressed by its own identifier such as an offboarding, names none.
+- **`operation`** is the route pattern, method included: `POST /v1/tenants/{tenant_id}/suspend`.
+  The API mux records it for every route it serves. It is null only for a transaction no route
+  opened, and the serving deployable has none.
+- **What it does not record is the outcome.** The row is written before the work, so an access that
+  fails still leaves evidence. The outcome is the request log's, joined by `correlation_id`.
+
+AU-3 asks a record to establish "What type of event occurred", "Where the event occurred", "Source
+of the event" and the "Identity of any individuals, subjects, or objects/entities associated with
+the event" [R7]. Before 1.21.0 a row named only the actor and a sentence.
+
+**The review record.** Insert-only, in the same schema:
+
+```sql
+CREATE TABLE audit.privileged_access_review (
+    review_id          UUID        PRIMARY KEY,
+    actor_id           UUID        NOT NULL,   -- the provider whose access is reviewed
+    period_from        TIMESTAMPTZ NOT NULL,
+    period_to          TIMESTAMPTZ NOT NULL,
+    outcome            TEXT        NOT NULL,
+    statement          TEXT        NOT NULL,
+    accesses           BIGINT      NOT NULL,
+    emergency_accesses BIGINT      NOT NULL,
+    reviewed_by        UUID        NOT NULL,
+    correlation_id     UUID        NOT NULL,
+    reviewed_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT privileged_access_review_outcome_check CHECK (outcome IN ('appropriate', 'escalated')),
+    CONSTRAINT privileged_access_review_statement_check CHECK (btrim(statement) <> ''),
+    CONSTRAINT privileged_access_review_count_check
+        CHECK (accesses >= 0 AND emergency_accesses >= 0 AND emergency_accesses <= accesses),
+    CONSTRAINT privileged_access_review_separation_check CHECK (reviewed_by <> actor_id),
+    CONSTRAINT privileged_access_review_period_check
+        CHECK (period_from < period_to AND period_to <= reviewed_at)
+);
+CREATE INDEX privileged_access_review_actor_idx
+    ON audit.privileged_access_review (actor_id, period_from, period_to);
+```
+
+`privileged_access_review_separation_check` is AC-5 in the database, as
+`provider_activation_separation_check` is for approval: no provider attests to its own access.
+NIST's reason: "Individuals or roles with privileged access to a system and who are also the subject
+of an audit by that system may affect the reliability of the audit information" (AU-9(4)
+discussion) [R7]. The counts are taken in the transaction that inserts the review, so the review
+says how many accesses the period held when it was recorded. A review covers an access when it is
+of the access's actor and `period_from <= occurred_at < period_to`. Consumer rows are never counted
+or due: a consumer is a workload, reviewed through its owner (`ADR-IAM-003 §5.8`).
+
+**Who reads what.**
+
+| Caller | Reads | Through |
+| :-- | :-- | :-- |
+| A provider in force | Every row, and every review | `organization_provider_rt`: `SELECT` on both tables, `INSERT` on the review |
+| A Tenant administrator | The provider rows that name its Tenant, consumer rows excluded | `organization_rt`: `SELECT` on the view `audit.tenant_provider_access` only |
+| An eligible holder, a consumer | Nothing | The routes refuse them before a transaction opens |
+| Any role | No `UPDATE`, `DELETE` or `TRUNCATE` on either table | AU-9 a.: "Protect audit information and audit logging tools from unauthorized access, modification, and deletion" [R7] |
+
+The Tenant's read is a view. `internal/controldb/rls.sql` creates it, because Atlas OSS models no
+views. It is owned by the migration credential that applied the schema, which owns the table, and
+declared `security_barrier`:
+
+```sql
+CREATE VIEW audit.tenant_provider_access WITH (security_barrier) AS
+SELECT access_id, actor_id, authority, activation_id, tenant_id, operation, correlation_id,
+       reason, occurred_at
+  FROM audit.privileged_access
+ WHERE tenant_id = current_setting('app.tenant_id', false)::uuid
+   AND authority <> 'consumer';
+```
+
+- **The view is the boundary,** not a `WHERE` in the handler. PostgreSQL checks the relations a view
+  reads "against the privileges of the rule owner, not the user invoking the rule" [R8], so
+  `organization_rt` reads the rows the predicate admits and holds nothing on the table.
+- **`security_barrier`,** because without it a view cannot "reliably conceal the data in unseen
+  rows" [R8]: a function in the caller's query could see rows before the predicate drops them.
+  PostgreSQL says the option "should be used if the view is intended to provide row-level security"
+  [R8].
+- **`missing_ok` is false,** as in every tenant policy. An unbound connection raises rather than
+  reading no Tenant's rows.
+- **Not row-level security on the table.** The recorder writes outside the transaction it describes
+  (§The Single Binding Path), so a policy on the table would need an insert policy for each writing
+  role, and the table would join the RLS set it is outside of by construction. The view leaves both
+  untouched.
+
+**The routes.** Each list is in the estate's form (`STD-GLB-001` 1.3.0): `after`, `limit` 1 to 100,
+named filters, `access_id` or `review_id` order, and `{"<items>": [...], "next": …}`. A time window
+is `from` inclusive and `to` exclusive, RFC 3339 instants with their offset (`STD-GLB-001` 1.6.0).
+An unknown or repeated parameter, a malformed one, and a `to` not after `from` are refused `400`.
+
+```text
+GET   /v1/privileged-access             provider  ?after&limit&actor_id&tenant_id&correlation_id&authority&from&to
+GET   /v1/privileged-access:unreviewed  provider  the Principals with unreviewed access, oldest first
+GET   /v1/privileged-access/reviews     provider  ?after&limit&actor_id&reviewed_by
+POST  /v1/privileged-access/reviews     provider  {"actor_id", "from", "to", "outcome"}
+GET   /v1/provider-access               tenant    ?after&limit&authority&from&to
+```
+
+- **An access** is `{"access_id", "actor_id", "authority", "activation_id", "tenant_id",
+  "operation", "correlation_id", "reason", "occurred_at"}`, nulls included. The provider list answers
+  `{"accesses": [...], "next"}`, and the Tenant's list the same.
+- **A provider read is itself an access.** It runs in the provider scope with the caller's
+  `X-Administrative-Reason`, so it leaves a row, as every provider read does.
+- **The Tenant's list** is a Tenant administrator's (§The Tenant Administration Grant). It names no
+  Tenant: the Tenant is the scope's, and a `tenant_id` in the query is refused as unknown. It runs in
+  a read-only transaction bound to that Tenant (`db.WithTenantRead`) and records nothing: a Tenant
+  reading its own record is not provider access. Its `authority` filter takes `emergency`,
+  `activation` and `eligible`.
+- **`POST /v1/privileged-access/reviews`** is a command. It requires an `Idempotency-Key`
+  (`TDD-organization-control-003` §The `Idempotency-Key` Is Required on Commands), and its
+  `X-Administrative-Reason` is recorded as the reviewer's statement. It answers `201` with the review:
+  `{"review_id", "actor_id", "from", "to", "outcome", "statement", "accesses", "emergency_accesses",
+  "reviewed_by", "reviewed_at"}`. A review of the caller's own access is refused `403`, by the service
+  and by the database. A period whose `from` is not before its `to`, a `to` in the future, a missing
+  `actor_id` and an `outcome` other than `appropriate` or `escalated` are refused `400`. A period with
+  no accesses may be reviewed: it states that nothing happened.
+- **`GET /v1/privileged-access:unreviewed`** answers `{"review_due_days": 7, "actors": [{"actor_id",
+  "unreviewed", "emergency", "oldest_at", "due_at", "overdue"}]}`: each Principal with a provider
+  access no review covers, the count, the emergency ones among them, the oldest, and the date it
+  falls due, oldest first. It is a report, not a list, and is not paginated: it has one row per
+  Principal that has acted as a provider, which the grants bound.
+- **The period's end is the database's.** A review whose `to` is ahead of the database's clock
+  records nothing and is refused `400`, so a client's skew is a refusal rather than a check
+  violation.
+
+**A review is due weekly.** An access is due seven days after it occurred, and overdue after. CIS:
+"Conduct reviews of audit logs to detect anomalies or abnormal events that could indicate a
+potential threat. Conduct reviews on a weekly, or more frequent, basis" (Safeguard 8.11) [R9]. The
+daily `maintenance` stage logs each Principal with an overdue access at `WARN`, from the statement
+the route reads, and does not fail on one, as it reports an overdue emergency grant
+(§Emergency Grant Validation).
+
+**Retention.** Neither table is purged. A row is needed until a review covers it, and an
+investigation may come later. CIS asks for "a minimum of 90 days" (Safeguard 8.10) [R9]; AU-11
+leaves the period to the organization [R7]. A retention standard that names a period would add a
+purge to the maintenance stage.
+
+**The tradeoffs.**
+
+- **Providers review providers.** The reviewers also administer access, which AC-5's discussion asks
+  to keep apart from administering audit [R7]. No one administers this record at runtime, the review
+  is held to a second person, and the Tenant's read is a check from outside the providers
+  (`ADR-ORG-002 §5.6`, Alternative G).
+- **A Tenant sees what names it.** A provider list across Tenants, or a read of an offboarding by its
+  identifier, names no Tenant and is shown to none.
+- **The unreviewed report scans the record.** It asks of every provider row whether a review covers
+  it, one probe of `privileged_access_review_actor_idx` each, so its cost grows with the record. A
+  record large enough for that to matter is one a retention standard would also bound.
+- **Reviewing is itself provider access.** Reading the record and recording a review each leave a
+  row under the reviewer, which another provider reviews in turn. Every week a provider who
+  reviewed is reviewed, which is the point: nobody's reads of the record go unexamined.
+
+| Ref | Source |
+| :-- | :-- |
+| R7 | NIST SP 800-53 Rev. 5, OSCAL catalog, <https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json>, accessed 2026-10-08. AU-3: "Ensure that audit records contain information that establishes the following:" "What type of event occurred;" "When the event occurred;" "Where the event occurred;" "Source of the event;" "Outcome of the event; and" "Identity of any individuals, subjects, or objects/entities associated with the event." AU-6 a.: "Review and analyze system audit records [Assignment: frequency] for indications of [Assignment: inappropriate or unusual activity] and the potential impact of the inappropriate or unusual activity;" AU-9 a.: "Protect audit information and audit logging tools from unauthorized access, modification, and deletion; and" AU-9(4) discussion: "Individuals or roles with privileged access to a system and who are also the subject of an audit by that system may affect the reliability of the audit information by inhibiting audit activities or modifying audit records." AU-11: "Retain audit records for [Assignment: time period] to provide support for after-the-fact investigations of incidents and to meet regulatory and organizational information retention requirements." AC-5 discussion: "Separation of duties includes dividing mission or business functions and support functions among different individuals or roles, conducting system support functions with different individuals, and ensuring that security personnel who administer access control functions do not also administer audit functions." |
+| R8 | PostgreSQL 17 Documentation, §39.5 *Rules and Privileges*, <https://www.postgresql.org/docs/17/rules-privileges.html>, and *CREATE VIEW*, <https://www.postgresql.org/docs/17/sql-createview.html>, accessed 2026-10-08: "all relations that are used due to rules get checked against the privileges of the rule owner, not the user invoking the rule"; views "cannot be used to reliably conceal the data in unseen rows unless the security_barrier flag has been set"; `security_barrier` "should be used if the view is intended to provide row-level security." |
+| R9 | Center for Internet Security, *CIS Controls Assessment Specification v8.1*, Controls 8, <https://cas.docs.cisecurity.org/en/latest/source/Controls8/>, accessed 2026-10-08. 8.10: "Retain audit logs across enterprise assets for a minimum of 90 days." 8.11: "Conduct reviews of audit logs to detect anomalies or abnormal events that could indicate a potential threat. Conduct reviews on a weekly, or more frequent, basis." |
+
 ### Provider Authority Projection
 
 `ADR-ORG-002 §5.3` has the Identity Control API read `provider:identity-control` grants and
@@ -1298,6 +1490,25 @@ administrative connection is explicitly not accepted as evidence.
 - The provider role cannot delete a recorded use; the consumer role cannot read one.
 - The report is a provider's.
 
+### Privileged Access Review
+
+- Every recorded row carries its authority: `emergency` for an emergency grant's request,
+  `activation` with the activation's identifier, `eligible` on the activation routes, `consumer` for
+  a consumer. A provider scope without an authority is refused before anything is written.
+- A provider act in one Tenant records that Tenant; a route with `{tenant_id}` in its path records
+  the path's; a list across Tenants records none. Every served route records its pattern.
+- The provider list filters by actor, Tenant, correlation, authority and window, pages by
+  `access_id`, and refuses an unknown filter, a malformed instant, an instant without an offset, and
+  a `to` not after `from`.
+- A review of the caller's own access is refused `403`; the database refuses one inserted directly.
+  A review counts the accesses and emergency accesses of its period, consumer rows excluded, and
+  covers them: they leave the unreviewed report, and an access outside the period stays.
+- An access is overdue seven days after it occurred.
+- A Tenant administrator reads its own Tenant's provider rows through the view, and no other
+  Tenant's, no consumer row, and no row that names no Tenant. `organization_rt` cannot read the
+  table, and an unbound tenant connection reading the view raises.
+- No runtime role can update or delete a row of either table.
+
 ### Provider Authority Projection
 
 - A grant of `provider:identity-control`, its activation, an early end and its revocation each
@@ -1405,6 +1616,7 @@ pool is held small, so the combined ceiling stays close to the single-pool figur
 | Provider transaction without a recorded reason | — | any occurrence |
 | RLS assertion failure in CI | — | any occurrence |
 | Readiness failing on the isolation posture, or a start refused on it (1.19.0) | — | any occurrence |
+| A provider's access unreviewed for more than seven days (1.21.0) | any occurrence | — |
 
 A `WITH CHECK` rejection means application code attempted to write a row into a Tenant
 it was not bound to. That is a defect or an attack, and it is treated as a security
@@ -1412,7 +1624,8 @@ finding rather than a validation error.
 
 Runbooks required before production: unset-binding investigation, `WITH CHECK`
 rejection triage, provider-access review, and suspected cross-tenant exposure.
-Written: `docs/runbooks/provider-access-review.md`. The other three are not written yet.
+Written: `docs/runbooks/provider-access-review.md`, which reads the record through the routes of
+§Privileged Access Review from 1.21.0. The other three are not written yet.
 
 ### Restore Evidence
 
@@ -1487,6 +1700,8 @@ runs after the restore, so `roles.sql`, `rls.sql`, `grants.sql` and the login ro
 | Governed by | ADR-ORG-001 — Separate Organization Authority and Keycloak Projection; §5.11 provider and consumer authority |
 | Governed by | ADR-ORG-003 — Tenant Administration Is a Recorded Grant, Checked with Current Membership |
 | Governed by | ADR-ORG-005 §5.1 — a self caller reads its own contexts, on one route, with no provider record (1.17.0) |
+| Governed by | ADR-ORG-002 §5.6 — the privileged-access record is read and reviewed (1.21.0) |
+| Conforms to | STD-GLB-001 1.6.0 §Pagination — the list form and its time window |
 | Conforms to | STD-IAM-002 §3.1.1, §3.2, §3.5 — the grant's holder checks its own record; `principal_id` is the persisted identifier |
 | Conforms to | STD-GLB-002 — `FORCE ROW LEVEL SECURITY`, non-owner runtime role, no `SUPERUSER`/`BYPASSRLS`, isolation proven as the runtime role |
 | Enterprise constraint | EAD-003 — private domain persistence; cross-domain database access is prohibited |

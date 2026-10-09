@@ -62,7 +62,7 @@ func (f *fixture) withCorrelation(t *testing.T) (context.Context, id.UUID) {
 	t.Helper()
 
 	correlation := mustID(t)
-	scope, err := db.ProviderScope(f.actor, correlation)
+	scope, err := db.ProviderScope(f.actor, correlation, db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("ProviderScope: %v", err)
 	}

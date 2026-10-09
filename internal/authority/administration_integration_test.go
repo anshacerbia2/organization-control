@@ -50,7 +50,7 @@ func administration(t *testing.T) (*Administration, *Reader, context.Context, id
 
 func actingAs(t *testing.T, ctx context.Context, actor id.UUID) context.Context {
 	t.Helper()
-	scope, err := db.ProviderScope(actor, newID(t))
+	scope, err := db.ProviderScope(actor, newID(t), db.EmergencyAuthority())
 	if err != nil {
 		t.Fatal(err)
 	}

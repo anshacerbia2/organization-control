@@ -120,7 +120,7 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatalf("NewV7: %v", err)
 	}
-	scope, err := db.ProviderScope(actor, correlation)
+	scope, err := db.ProviderScope(actor, correlation, db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("ProviderScope: %v", err)
 	}

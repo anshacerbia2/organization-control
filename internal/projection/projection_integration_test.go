@@ -106,7 +106,7 @@ func newFixture(t *testing.T) *fixture {
 	reconciler.now = func() time.Time { return fixed }
 
 	actor, correlation := mustID(t), mustID(t)
-	scope, err := db.ProviderScope(actor, correlation)
+	scope, err := db.ProviderScope(actor, correlation, db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("ProviderScope: %v", err)
 	}

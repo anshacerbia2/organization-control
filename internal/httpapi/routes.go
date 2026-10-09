@@ -69,6 +69,9 @@ type Services struct {
 	// TenantAdministrators grants, lists and revokes tenant administration grants (ADR-ORG-003).
 	TenantAdministrators *authority.TenantAdministration
 
+	// AccessReview reads the privileged-access record and records its review (ADR-ORG-002 §5.6).
+	AccessReview *authority.AccessReview
+
 	// Consumer serves a registered consumer acting as itself, as organization_consumer_rt. Nil only
 	// when consumer authority is not configured, in which case authentication admits no consumer
 	// caller for it to serve.
@@ -165,7 +168,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	anonymous := http.NewServeMux()
 	anonymous.HandleFunc("POST /v1/invitations/lookup", h.lookupInvitation)
 
-	api := http.NewServeMux()
+	// Each route records its pattern, and the Tenant its path names, for the privileged-access
+	// record (ADR-ORG-002 §5.6).
+	api := newRouteMux()
 
 	// Every POST is either a command, wrapped in `command` and refused without an Idempotency-Key,
 	// or named in keyOptional with the reason it is not (commands.go). TestEveryPostRouteIsClassified
@@ -261,6 +266,15 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/provider-grants/{grant_id}/revoke", command(h.revokeProvider))
 	api.HandleFunc("GET /v1/provider-grants:emergency-validation", h.emergencyValidation)
 
+	// The privileged-access record and its review (ADR-ORG-002 §5.6). Literal paths: the report and
+	// the reviews cannot collide with the list, and the Tenant's read is its own path.
+	api.HandleFunc("GET /v1/privileged-access", h.listPrivilegedAccess)
+	api.HandleFunc("GET /v1/privileged-access:unreviewed", h.unreviewedPrivilegedAccess)
+	api.HandleFunc("GET /v1/privileged-access/reviews", h.listPrivilegedAccessReviews)
+	api.HandleFunc("POST /v1/privileged-access/reviews", command(h.recordPrivilegedAccessReview))
+	// Tenant-scoped: the provider access that named the caller's own Tenant. It names no Tenant.
+	api.HandleFunc("GET /v1/provider-access", h.listTenantProviderAccess)
+
 	// The routes an eligible caller reaches, and the only ones (ADR-ORG-002).
 	api.HandleFunc("GET /v1/provider-activations", h.listProviderActivations)
 	api.HandleFunc("POST /v1/provider-activations", command(h.requestProviderActivation))
@@ -344,6 +358,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the provider grant administration is required")
 	case s.TenantAdministrators == nil:
 		return errors.New("httpapi: the tenant administration is required")
+	case s.AccessReview == nil:
+		return errors.New("httpapi: the privileged-access review is required")
 	case s.Consumer != nil && (s.Consumer.Access == nil || s.Consumer.Checks == nil || s.Consumer.Frontier == nil):
 		return errors.New("httpapi: the consumer services are incomplete")
 	}

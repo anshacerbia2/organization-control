@@ -153,6 +153,9 @@ var registry = map[string]error{
 	"authority.ErrActivationDecided":    authority.ErrActivationDecided,
 	"authority.ErrSelfApproval":         authority.ErrSelfApproval,
 	"authority.ErrActivationNotInForce": authority.ErrActivationNotInForce,
+	"authority.ErrAccessQueryInvalid":   authority.ErrAccessQueryInvalid,
+	"authority.ErrReviewInvalid":        authority.ErrReviewInvalid,
+	"authority.ErrSelfReview":           authority.ErrSelfReview,
 	"context.ErrNotRegistered":          context.ErrNotRegistered,
 	"context.ErrRequestRequired":        context.ErrRequestRequired,
 }

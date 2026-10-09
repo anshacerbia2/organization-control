@@ -351,12 +351,9 @@ func (r *Resolver) close(ctx context.Context, eventID id.UUID, consumer, kind st
 			// rolls back takes its own account of itself with it. An outcome row surviving a
 			// rolled-back closure would not be an over-record; it would be a false statement, and
 			// an investigation reading it has no way to tell it from a true one.
-			if err := db.RecordAccessInTx(ctx, tx, db.ProviderAccess{
-				Actor:       scope.Actor(),
-				Correlation: scope.Correlation(),
-				Reason: fmt.Sprintf("closed dead-lettered event %s at %s as %s on %s%s",
-					eventID, consumer, kind, reference, why),
-			}); err != nil {
+			outcome := fmt.Sprintf("closed dead-lettered event %s at %s as %s on %s%s",
+				eventID, consumer, kind, reference, why)
+			if err := db.RecordAccessInTx(ctx, tx, scope.Evidence(ctx, outcome)); err != nil {
 				return fmt.Errorf("projection: recording the resolution of %s: %w", eventID, err)
 			}
 

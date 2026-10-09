@@ -204,7 +204,7 @@ func TestWithProviderScopeReadsAcrossTenants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProviderPool: %v", err)
 	}
-	scope, err := db.ProviderScope(mustParse(t, tenantA), mustParse(t, tenantB))
+	scope, err := db.ProviderScope(mustParse(t, tenantA), mustParse(t, tenantB), db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("ProviderScope: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestTheProviderBindingAlsoReverts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProviderPool: %v", err)
 	}
-	scope, err := db.ProviderScope(mustParse(t, tenantA), mustParse(t, tenantB))
+	scope, err := db.ProviderScope(mustParse(t, tenantA), mustParse(t, tenantB), db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("ProviderScope: %v", err)
 	}

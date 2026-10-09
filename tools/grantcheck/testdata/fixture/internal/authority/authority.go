@@ -45,6 +45,13 @@ func (r *Reader) EmergencyValidation(ctx context.Context) error {
 	})
 }
 
+func (r *Reader) UnreviewedAccess(ctx context.Context) error {
+	return r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT actor_id FROM audit.privileged_access_review`)
+		return err
+	})
+}
+
 type Grants struct{ tx db.Transactor }
 
 func (g *Grants) Bootstrap(ctx context.Context) error {

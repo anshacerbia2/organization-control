@@ -83,6 +83,61 @@ type Scope struct {
 	// actingProvider is a tenant scope WithProviderInTenant made for a provider's act on one Tenant.
 	// No exported constructor sets it, so a tenant caller cannot claim it.
 	actingProvider bool
+
+	// authority is what admitted a provider or consumer scope, which its privileged-access record
+	// names (TDD-organization-control-001 §Privileged Access Review). The zero value on a tenant or
+	// self scope, which records nothing.
+	authority Authority
+}
+
+// The authorities a privileged-access record names (ADR-ORG-002 §5.6). The values are the
+// audit.privileged_access authority column's.
+const (
+	// AuthorityEmergency is a request an emergency grant authorized.
+	AuthorityEmergency = "emergency"
+	// AuthorityActivation is a request an approved activation in force authorized.
+	AuthorityActivation = "activation"
+	// AuthorityEligible is a grant holder with nothing in force, on the activation routes.
+	AuthorityEligible = "eligible"
+	// AuthorityConsumer is a registered projection consumer acting on its own records.
+	AuthorityConsumer = "consumer"
+)
+
+// Authority is what admitted a provider-scoped request: an emergency grant, an activation (named),
+// or an eligible grant with nothing in force. Its fields are unexported, so one is made only by the
+// three constructors below and a consumer's by ConsumerScope.
+type Authority struct {
+	kind       string
+	activation id.UUID
+}
+
+// EmergencyAuthority is a request the caller's emergency grant authorized.
+func EmergencyAuthority() Authority { return Authority{kind: AuthorityEmergency} }
+
+// ActivationAuthority is a request the named activation authorized.
+func ActivationAuthority(activation id.UUID) Authority {
+	return Authority{kind: AuthorityActivation, activation: activation}
+}
+
+// EligibleAuthority is a grant holder with no authority in force, which reaches the activation routes
+// alone.
+func EligibleAuthority() Authority { return Authority{kind: AuthorityEligible} }
+
+// Kind is the authority's name, as the record stores it, or "" for none.
+func (a Authority) Kind() string { return a.kind }
+
+// Activation is the activation an AuthorityActivation names, and the nil identifier otherwise.
+func (a Authority) Activation() id.UUID { return a.activation }
+
+// valid is whether the authority is one a provider scope may carry.
+func (a Authority) valid() bool {
+	switch a.kind {
+	case AuthorityEmergency, AuthorityEligible:
+		return a.activation.IsNil()
+	case AuthorityActivation:
+		return !a.activation.IsNil()
+	}
+	return false
 }
 
 // TenantScope resolves to exactly one Tenant.
@@ -96,8 +151,12 @@ func TenantScope(tenantID, actor, correlation id.UUID) (Scope, error) {
 	return Scope{tenantID: tenantID, actor: actor, correlation: correlation}, nil
 }
 
-// ProviderScope resolves to deliberately cross-Tenant provider authority.
-func ProviderScope(actor, correlation id.UUID) (Scope, error) {
+// ProviderScope resolves to deliberately cross-Tenant provider authority, admitted by authority.
+//
+// The authority is required. The record each provider transaction writes names it, so a review can
+// tell an emergency use from an activation (ADR-ORG-002 §5.6), and a scope with none would record an
+// access that nothing authorized.
+func ProviderScope(actor, correlation id.UUID, authority Authority) (Scope, error) {
 	if actor.IsNil() {
 		return Scope{}, errors.New("db: a provider scope requires an acting subject")
 	}
@@ -107,7 +166,10 @@ func ProviderScope(actor, correlation id.UUID) (Scope, error) {
 		// request that caused it has an actor and no trail.
 		return Scope{}, errors.New("db: a provider scope requires a correlation identifier")
 	}
-	return Scope{provider: true, actor: actor, correlation: correlation}, nil
+	if !authority.valid() {
+		return Scope{}, errors.New("db: a provider scope requires the authority that admitted it")
+	}
+	return Scope{provider: true, actor: actor, correlation: correlation, authority: authority}, nil
 }
 
 // ConsumerScope resolves a registered projection consumer acting on its own records.
@@ -123,7 +185,8 @@ func ConsumerScope(actor, correlation id.UUID) (Scope, error) {
 	if correlation.IsNil() {
 		return Scope{}, errors.New("db: a consumer scope requires a correlation identifier")
 	}
-	return Scope{consumer: true, actor: actor, correlation: correlation}, nil
+	return Scope{consumer: true, actor: actor, correlation: correlation,
+		authority: Authority{kind: AuthorityConsumer}}, nil
 }
 
 // SelfScope resolves a person reading their own records, and nothing else (ADR-ORG-005 §5.1).
@@ -163,6 +226,9 @@ func (s Scope) ActingProvider() bool { return s.actingProvider }
 // Correlation returns the correlation identifier.
 func (s Scope) Correlation() id.UUID { return s.correlation }
 
+// Authority returns what admitted a provider or consumer scope, and the zero Authority otherwise.
+func (s Scope) Authority() Authority { return s.authority }
+
 type scopeKey struct{}
 
 // WithScope places a resolved scope in the context. The authorization layer calls this after
@@ -182,6 +248,67 @@ type ProviderAccess struct {
 	Actor       id.UUID
 	Correlation id.UUID
 	Reason      string
+
+	// Authority is what admitted the access: one of the Authority* constants (ADR-ORG-002 §5.6).
+	Authority string
+
+	// Activation is the activation an AuthorityActivation access acted on, and nil otherwise.
+	Activation id.UUID
+
+	// Tenant is the one Tenant the access named, or nil: the Tenant a provider act is bound to, or
+	// else the {tenant_id} of the route's path.
+	Tenant id.UUID
+
+	// Operation is the route pattern that opened the transaction, method included, or "" for a
+	// transaction no route opened.
+	Operation string
+}
+
+// authorized is whether the access names an authority the record admits: a provider's, or a
+// consumer's, which names no activation.
+func (a ProviderAccess) authorized() bool {
+	if a.Authority == AuthorityConsumer {
+		return a.Activation.IsNil()
+	}
+	return Authority{kind: a.Authority, activation: a.Activation}.valid()
+}
+
+type routeKey struct{}
+
+// accessRoute is what the HTTP surface says about the request a transaction serves.
+type accessRoute struct {
+	operation string
+	tenant    id.UUID
+}
+
+// WithAccessRoute records the route pattern serving the request, and the Tenant its path names, for
+// the privileged-access record a transaction in this context writes. The HTTP surface calls it for
+// every route; nothing else should. It confers nothing: a Tenant named here narrows no scope and
+// binds no policy, and is only what the evidence says the request named.
+func WithAccessRoute(ctx context.Context, operation string, tenant id.UUID) context.Context {
+	return context.WithValue(ctx, routeKey{}, accessRoute{operation: operation, tenant: tenant})
+}
+
+// Evidence is the privileged-access record for an access in this scope, with the reason given.
+//
+// One construction for every writer, the attempt recorded before a transaction and the outcome
+// recorded inside one, so the two cannot drift into different shapes. The Tenant is the one the
+// scope is bound to when it is a provider's act in a Tenant, and the route's otherwise.
+func (s Scope) Evidence(ctx context.Context, reason string) ProviderAccess {
+	route, _ := ctx.Value(routeKey{}).(accessRoute)
+	access := ProviderAccess{
+		Actor:       s.actor,
+		Correlation: s.correlation,
+		Reason:      reason,
+		Authority:   s.authority.kind,
+		Activation:  s.authority.activation,
+		Tenant:      route.tenant,
+		Operation:   route.operation,
+	}
+	if s.actingProvider {
+		access.Tenant = s.tenantID
+	}
+	return access
 }
 
 // PrivilegedRecorder records provider access as evidence.
@@ -203,8 +330,8 @@ type PrivilegedRecorder interface {
 // outcome inside the transaction that performed it -- and the statement they share must not be
 // able to drift apart into two shapes of evidence.
 const insertPrivilegedAccess = `INSERT INTO audit.privileged_access
-    (access_id, actor_id, correlation_id, reason)
-VALUES ($1, $2, $3, $4)`
+    (access_id, actor_id, correlation_id, reason, authority, activation_id, tenant_id, operation)
+VALUES ($1, $2, $3, $4, $5, $6::uuid, $7::uuid, NULLIF($8, ''))`
 
 // RecordAccessInTx writes evidence inside the caller's transaction, so it commits or rolls back
 // with the work it describes.
@@ -222,6 +349,8 @@ func RecordAccessInTx(ctx context.Context, tx Tx, access ProviderAccess) error {
 		return errors.New("db: evidence requires a correlation identifier")
 	case access.Reason == "":
 		return ErrReasonRequired
+	case !access.authorized():
+		return errors.New("db: evidence requires the authority the access acted on")
 	}
 
 	accessID, err := id.NewV7()
@@ -229,7 +358,8 @@ func RecordAccessInTx(ctx context.Context, tx Tx, access ProviderAccess) error {
 		return fmt.Errorf("db: mint evidence identifier: %w", err)
 	}
 	if _, err := tx.Exec(ctx, insertPrivilegedAccess,
-		accessID.String(), access.Actor.String(), access.Correlation.String(), access.Reason); err != nil {
+		accessID.String(), access.Actor.String(), access.Correlation.String(), access.Reason,
+		access.Authority, Keyset(access.Activation), Keyset(access.Tenant), access.Operation); err != nil {
 		return fmt.Errorf("db: insert evidence: %w", err)
 	}
 	return nil
@@ -446,15 +576,12 @@ func WithProviderInTenant(ctx context.Context, provider *ProviderPool, tenants *
 	case reason == "":
 		return ErrReasonRequired
 	}
-	if err := provider.recorder.RecordProviderAccess(ctx, ProviderAccess{
-		Actor:       scope.actor,
-		Correlation: scope.correlation,
-		Reason:      reason,
-	}); err != nil {
+	acting := Scope{tenantID: tenantID, actor: scope.actor, correlation: scope.correlation,
+		actingProvider: true, authority: scope.authority}
+	if err := provider.recorder.RecordProviderAccess(ctx, acting.Evidence(ctx, reason)); err != nil {
 		return fmt.Errorf("db: record provider access: %w", err)
 	}
 
-	acting := Scope{tenantID: tenantID, actor: scope.actor, correlation: scope.correlation, actingProvider: true}
 	ctx = WithScope(ctx, acting)
 	return tenants.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
 		if err := bindTenant(ctx, tx, acting); err != nil {
@@ -626,11 +753,7 @@ func withRecordedScope(ctx context.Context, tx Transactor, recorder PrivilegedRe
 	// Recorded first, and a failure here stops the transaction. Proceeding without evidence
 	// would make the access unattributable, which is the one property PAD-PLT-002 §3.3
 	// invariant 22 does not treat as optional.
-	if err := recorder.RecordProviderAccess(ctx, ProviderAccess{
-		Actor:       scope.actor,
-		Correlation: scope.correlation,
-		Reason:      reason,
-	}); err != nil {
+	if err := recorder.RecordProviderAccess(ctx, scope.Evidence(ctx, reason)); err != nil {
 		return fmt.Errorf("db: record provider access: %w", err)
 	}
 

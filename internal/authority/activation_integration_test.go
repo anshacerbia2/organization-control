@@ -62,8 +62,10 @@ func TestAnEligibleGrantConfersAuthorityOnlyWhileAnApprovedActivationLasts(t *te
 	if err != nil || approved.Decision != DecisionApproved || approved.EndsAt == nil || approved.DecidedBy == nil || *approved.DecidedBy != first {
 		t.Fatalf("approve: %+v, %v", approved, err)
 	}
-	if standing, _ := records.ProviderStanding(asSecond, second); !standing.InForce || standing.Emergency {
-		t.Errorf("an approved activation reads as %+v; want in force, not emergency", standing)
+	if standing, _ := records.ProviderStanding(asSecond, second); !standing.InForce || standing.Emergency ||
+		standing.Activation != requested.ID {
+		t.Errorf("an approved activation reads as %+v; want in force by activation %s, not emergency",
+			standing, requested.ID)
 	}
 	if _, err := service.Request(asSecond, grant.ID, time.Hour, "more"); !errors.Is(err, ErrActivationInForce) {
 		t.Errorf("a request while in force answered %v, want ErrActivationInForce", err)

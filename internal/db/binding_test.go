@@ -130,11 +130,60 @@ func TestTenantScopeRejectsAnIncompleteScope(t *testing.T) {
 	if _, err := db.TenantScope(mustUUID(t), actor, id.UUID{}); err != nil {
 		t.Errorf("a tenant scope was refused for a missing correlation identifier: %v", err)
 	}
-	if _, err := db.ProviderScope(actor, id.UUID{}); err == nil {
+	if _, err := db.ProviderScope(actor, id.UUID{}, db.EmergencyAuthority()); err == nil {
 		t.Error("a provider scope was accepted with no correlation identifier")
 	}
-	if _, err := db.ProviderScope(id.UUID{}, mustUUID(t)); err == nil {
+	if _, err := db.ProviderScope(id.UUID{}, mustUUID(t), db.EmergencyAuthority()); err == nil {
 		t.Error("a provider scope was accepted with no acting subject")
+	}
+	// The authority is required, and an activation must be named: the record says what admitted the
+	// access (ADR-ORG-002 §5.6).
+	if _, err := db.ProviderScope(actor, mustUUID(t), db.Authority{}); err == nil {
+		t.Error("a provider scope was accepted with no authority")
+	}
+	if _, err := db.ProviderScope(actor, mustUUID(t), db.ActivationAuthority(id.UUID{})); err == nil {
+		t.Error("a provider scope was accepted with an activation naming none")
+	}
+}
+
+// TestEvidenceNamesTheAuthorityRouteAndTenant is the record's four columns, without a database: the
+// authority the scope carries, the route the request was served by, and the Tenant -- the one a
+// provider act is bound to over the one the path names, and the path's when nothing is bound.
+func TestEvidenceNamesTheAuthorityRouteAndTenant(t *testing.T) {
+	activation, pathTenant, boundTenant := mustUUID(t), mustUUID(t), mustUUID(t)
+	scope, err := db.ProviderScope(mustUUID(t), mustUUID(t), db.ActivationAuthority(activation))
+	if err != nil {
+		t.Fatalf("ProviderScope: %v", err)
+	}
+	const operation = "POST /v1/tenants/{tenant_id}/administrators"
+	ctx := db.WithAccessRoute(db.WithScope(context.Background(), scope), operation, pathTenant)
+
+	captured := &recorder{}
+	providerPool, err := db.NewProviderPool(&fakeTx{}, captured)
+	if err != nil {
+		t.Fatalf("NewProviderPool: %v", err)
+	}
+	tenantPool, err := db.NewTenantPool(&fakeTx{})
+	if err != nil {
+		t.Fatalf("NewTenantPool: %v", err)
+	}
+	noop := func(context.Context, db.Tx) error { return nil }
+
+	if err := db.WithProviderScope(ctx, providerPool, "read the Tenant", noop); err != nil {
+		t.Fatalf("WithProviderScope: %v", err)
+	}
+	if err := db.WithProviderInTenant(ctx, providerPool, tenantPool, boundTenant, "grant", noop); err != nil {
+		t.Fatalf("WithProviderInTenant: %v", err)
+	}
+	if len(captured.calls) != 2 {
+		t.Fatalf("recorded %d accesses, want 2", len(captured.calls))
+	}
+	for i, want := range []id.UUID{pathTenant, boundTenant} {
+		got := captured.calls[i]
+		if got.Authority != db.AuthorityActivation || got.Activation != activation ||
+			got.Operation != operation || got.Tenant != want {
+			t.Errorf("access %d recorded %+v; want the activation, the route and Tenant %v", i, got, want)
+		}
 	}
 }
 
@@ -246,7 +295,7 @@ func (r *recorder) RecordProviderAccess(_ context.Context, access db.ProviderAcc
 // unrecorded.
 func TestProviderAccessIsRecordedBeforeTheTransaction(t *testing.T) {
 	actor, correlation := mustUUID(t), mustUUID(t)
-	scope, err := db.ProviderScope(actor, correlation)
+	scope, err := db.ProviderScope(actor, correlation, db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("ProviderScope: %v", err)
 	}
@@ -281,7 +330,7 @@ func TestProviderAccessIsRecordedBeforeTheTransaction(t *testing.T) {
 // evidence would make the access unattributable, and unattributable cross-tenant access is the
 // one outcome PAD-PLT-002 §3.3 invariant 22 does not treat as acceptable.
 func TestProviderTransactionDoesNotRunWhenRecordingFails(t *testing.T) {
-	scope, err := db.ProviderScope(mustUUID(t), mustUUID(t))
+	scope, err := db.ProviderScope(mustUUID(t), mustUUID(t), db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("ProviderScope: %v", err)
 	}
@@ -320,7 +369,7 @@ func TestScopeAndPoolMustAgree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TenantScope: %v", err)
 	}
-	providerScope, err := db.ProviderScope(mustUUID(t), mustUUID(t))
+	providerScope, err := db.ProviderScope(mustUUID(t), mustUUID(t), db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("ProviderScope: %v", err)
 	}
@@ -356,7 +405,7 @@ func TestTheConsumerScopeOpensOnlyTheConsumerPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConsumerScope: %v", err)
 	}
-	providerScope, err := db.ProviderScope(mustUUID(t), mustUUID(t))
+	providerScope, err := db.ProviderScope(mustUUID(t), mustUUID(t), db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("ProviderScope: %v", err)
 	}
@@ -427,7 +476,7 @@ func TestEachPoolBindsOnlyItsOwnSetting(t *testing.T) {
 	})
 
 	t.Run("provider", func(t *testing.T) {
-		scope, err := db.ProviderScope(mustUUID(t), mustUUID(t))
+		scope, err := db.ProviderScope(mustUUID(t), mustUUID(t), db.EmergencyAuthority())
 		if err != nil {
 			t.Fatalf("ProviderScope: %v", err)
 		}
@@ -494,7 +543,7 @@ func TestTheBoundValueIsAParameterNotConcatenatedSQL(t *testing.T) {
 // named Tenant with the provider as the acting provider, and fn given a tenant scope for that Tenant.
 func TestAProviderActsInOneTenantOnTheTenantPool(t *testing.T) {
 	actor, correlation, tenant := mustUUID(t), mustUUID(t), mustUUID(t)
-	scope, err := db.ProviderScope(actor, correlation)
+	scope, err := db.ProviderScope(actor, correlation, db.EmergencyAuthority())
 	if err != nil {
 		t.Fatalf("ProviderScope: %v", err)
 	}
@@ -541,7 +590,7 @@ func TestAProviderActsInOneTenantOnTheTenantPool(t *testing.T) {
 func TestOnlyAProviderActsInANamedTenant(t *testing.T) {
 	tenantScope, _ := db.TenantScope(mustUUID(t), mustUUID(t), mustUUID(t))
 	consumerScope, _ := db.ConsumerScope(mustUUID(t), mustUUID(t))
-	providerScope, _ := db.ProviderScope(mustUUID(t), mustUUID(t))
+	providerScope, _ := db.ProviderScope(mustUUID(t), mustUUID(t), db.EmergencyAuthority())
 	cases := map[string]struct {
 		scope  db.Scope
 		tenant id.UUID
@@ -586,7 +635,7 @@ func TestATenantReadBindsTheTenantAlone(t *testing.T) {
 		t.Errorf("first statement %v, want the transaction made read-only first", calls)
 	}
 
-	providerScope, _ := db.ProviderScope(mustUUID(t), mustUUID(t))
+	providerScope, _ := db.ProviderScope(mustUUID(t), mustUUID(t), db.EmergencyAuthority())
 	if err := db.WithTenantRead(db.WithScope(context.Background(), providerScope), pool,
 		func(context.Context, db.Tx) error { return nil }); !errors.Is(err, db.ErrWrongScope) {
 		t.Errorf("a provider scope: %v, want ErrWrongScope", err)
@@ -646,7 +695,7 @@ func TestASelfReadBindsThePrincipalAlone(t *testing.T) {
 	}
 
 	tenantScope, _ := db.TenantScope(mustUUID(t), mustUUID(t), mustUUID(t))
-	providerScope, _ := db.ProviderScope(mustUUID(t), mustUUID(t))
+	providerScope, _ := db.ProviderScope(mustUUID(t), mustUUID(t), db.EmergencyAuthority())
 	for _, other := range []db.Scope{tenantScope, providerScope} {
 		if err := db.WithSelfRead(db.WithScope(context.Background(), other), pool, body); !errors.Is(err, db.ErrWrongScope) {
 			t.Errorf("WithSelfRead with %+v: error = %v, want ErrWrongScope", other, err)

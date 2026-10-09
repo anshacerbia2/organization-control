@@ -67,7 +67,7 @@ func ok201(w http.ResponseWriter, _ *http.Request) {
 
 func providerCallerValue(t *testing.T) Caller {
 	t.Helper()
-	return Caller{Subject: mustID(t), Provider: true}
+	return Caller{Subject: mustID(t), Provider: true, Emergency: true}
 }
 
 func TestIdempotentRefusesToBeBuiltWithoutAStore(t *testing.T) {

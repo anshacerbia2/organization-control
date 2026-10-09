@@ -140,12 +140,9 @@ func (r *Resolver) Waive(ctx context.Context, eventID id.UUID, consumer, reason 
 
 			// The outcome, in the transaction that made it, so a rolled-back waiver leaves no
 			// account of one. The word is "waived", never "closed": the incident is still open.
-			if err := db.RecordAccessInTx(ctx, tx, db.ProviderAccess{
-				Actor:       scope.Actor(),
-				Correlation: scope.Correlation(),
-				Reason: fmt.Sprintf("waived dead-lettered event %s refused by %q until %s: %s",
-					eventID, consumer, until.UTC().Format(time.RFC3339), reason),
-			}); err != nil {
+			outcome := fmt.Sprintf("waived dead-lettered event %s refused by %q until %s: %s",
+				eventID, consumer, until.UTC().Format(time.RFC3339), reason)
+			if err := db.RecordAccessInTx(ctx, tx, scope.Evidence(ctx, outcome)); err != nil {
 				return fmt.Errorf("projection: recording the waiver of %s: %w", eventID, err)
 			}
 
