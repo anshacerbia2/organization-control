@@ -929,7 +929,9 @@ every role, so three `SELECT` policies give it exactly the rows the counts need:
 `freeze`, `obligations` or `release`; an open obligation past `due_at`; a provisioning request
 `requested` or `unresolved`. They are declared in `posture.AdditionalPolicies`, so the startup and
 readiness check refuses a database with a policy missing or one more. `organization_provider_rt`
-holds `SELECT` on the view and nothing new on the tables.
+holds `SELECT` on the view and nothing new on the tables. From 1.12.0 the view is handed to `organization_migrator`
+by name: CI and `deploy/dev` run the stages as a superuser, and a superuser-owned view applies none of
+these policies (`TDD-organization-control-003` §Scheduled Sweeps).
 
 The alternatives were weighed and refused. A `SECURITY DEFINER` function would do the same with a
 second object to own and grant, and its safety rests on a pinned `search_path`: "search_path should

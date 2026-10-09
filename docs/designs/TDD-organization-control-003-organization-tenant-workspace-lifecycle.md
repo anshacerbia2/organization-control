@@ -900,6 +900,15 @@ owner to `organization_migrator`, which is `NOSUPERUSER NOBYPASSRLS` and bound b
 grants that role the columns the views name, which it already holds where it owns the tables. The
 policies are then the whole of what the views can do, whoever runs the stage.
 
+`operation.lifecycle_signals` had the same flaw and is fixed the same way. `TDD-organization-control-004`
+§Operational Notes describes its three `SELECT` policies as what bounds it, and with a superuser
+owner they bounded nothing: the view's own `WHERE` clauses were doing that work. It is now owned by
+`organization_migrator` as well, which is granted the columns it reads on `operation.offboarding`,
+`operation.offboarding_obligation` and `tenant.provisioning_request`. An integration test reads
+through a view that has no `WHERE` clause but is owned the same way, and confirms a row no policy
+admits is absent. It also checks that each of the three views has an owner that is neither a
+superuser nor `BYPASSRLS`.
+
 The two routes remain for an operator. They run the same statements through the same views under a
 provider scope, which records the operator's access as before.
 

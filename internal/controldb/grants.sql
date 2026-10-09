@@ -246,11 +246,13 @@ GRANT SELECT ON operation.lifecycle_signals TO organization_provider_rt;
 GRANT SELECT, UPDATE (state, resolved_at, detail) ON operation.provisioning_sweep TO organization_provider_rt;
 GRANT SELECT, UPDATE (state)                      ON operation.invitation_expiry  TO organization_provider_rt;
 
--- The views' owner, organization_migrator (rls.sql), reads and writes the tables with its own
--- privileges: these columns and no others. Where it owns the tables it holds them already; where a
--- superuser ran Atlas, as in CI and deploy/dev, this is what lets the views work at all. Its policies
--- still decide which rows.
-GRANT SELECT (request_id, requested_at, state, resolved_at, detail),
+-- The three views' owner, organization_migrator (rls.sql): operation.lifecycle_signals and the two
+-- sweep views read and write the tables with its privileges, these columns and no others. Where it
+-- owns the tables it holds them already; where a superuser ran Atlas, as in CI and deploy/dev, this
+-- is what lets the views work at all. Its policies still decide which rows.
+GRANT SELECT (stage, started_at) ON operation.offboarding            TO organization_migrator;
+GRANT SELECT (state, due_at)     ON operation.offboarding_obligation TO organization_migrator;
+GRANT SELECT (request_id, desired_profile, requested_at, state, resolved_at, detail),
       UPDATE (state, resolved_at, detail)
    ON tenant.provisioning_request TO organization_migrator;
 GRANT SELECT (invitation_id, tenant_id, workspace_id, subject_type, state, correlation_id, principal_id,

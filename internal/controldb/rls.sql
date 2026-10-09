@@ -418,6 +418,11 @@ SELECT overdue.n AS obligations_overdue,
            WHERE operation = 'deprovision' AND state = 'unresolved')), 0)::double precision
            AS deprovision_unresolved_oldest_age
   FROM observed, overdue, running;
+-- Handed to organization_migrator by name, as the two sweep views below are, and for their reason: a
+-- view belongs to whoever ran this stage, and a superuser-owned view -- CI and deploy/dev run the
+-- stages as one -- applies none of the three policies above. Until it was owned by name, the view's
+-- WHERE clauses were what limited it, not the policies this comment describes.
+ALTER VIEW operation.lifecycle_signals OWNER TO organization_migrator;
 COMMENT ON VIEW operation.lifecycle_signals IS
     'Counts and ages of offboarding and provisioning in progress, naming nothing. TDD-organization-control-004 §Operational Notes.';
 
