@@ -75,11 +75,22 @@ var (
 	// (TDD-organization-control-004 §Operational Notes).
 	IsolationRefusals = Instrument{Name: "organization.isolation.refusals", Unit: "{refusal}", Counter: true}
 	InvitationLookups = Instrument{Name: "organization.invitation.lookups", Unit: "{lookup}", Counter: true}
-	Instruments       = []Instrument{OutboxUnpublished, OutboxOldestUnpublished, SecurityDebt, SecurityDebtOldest,
+
+	// The scheduled sweeps (TDD-organization-control-003 §Scheduled Sweeps), labelled sweep, which
+	// internal/sweep records. Timestamps rather than ages, so `time() - x` needs no update logic and
+	// a stuck process cannot hold an age still.
+	SweepLastSuccess = Instrument{Name: "organization.sweep.last_success_timestamp", Unit: "s"}
+	SweepLastRun     = Instrument{Name: "organization.sweep.last_run_timestamp", Unit: "s"}
+	SweepInterval    = Instrument{Name: "organization.sweep.interval", Unit: "s"}
+	SweepRuns        = Instrument{Name: "organization.sweep.runs", Unit: "{run}", Counter: true}
+	SweepAffected    = Instrument{Name: "organization.sweep.affected", Unit: "{row}", Counter: true}
+
+	Instruments = []Instrument{OutboxUnpublished, OutboxOldestUnpublished, SecurityDebt, SecurityDebtOldest,
 		StaleDeadLetters, StaleDeadLettersOldest, ConsumerReportAge, ConsumerMaxAcceptedAge, ConsumerVerifyRatio,
 		ConsumerExtraFindings, OldestUnapplied, ObligationsOverdue, OldestOverdueObligation,
 		OffboardingsInProgress, OldestOffboarding, ProvisioningRequests, OldestProvisioning,
-		IsolationRefusals, InvitationLookups}
+		IsolationRefusals, InvitationLookups,
+		SweepLastSuccess, SweepLastRun, SweepInterval, SweepRuns, SweepAffected}
 	instrumentationName      = "github.com/anshacerbia2/organization-control/internal/telemetry"
 	errReaderRequired        = errors.New("telemetry: a signals reader is required")
 	errMeterProviderRequired = errors.New("telemetry: a meter provider is required")

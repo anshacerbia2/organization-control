@@ -88,6 +88,11 @@ type Config struct {
 	ProvisioningReconcileInterval time.Duration
 	TenantNameMax                 int
 
+	// InvitationSweepInterval is the cadence of the scheduled invitation expiry
+	// (TDD-organization-control-004 §Expiry Sweep). It and ProvisioningReconcileInterval are the
+	// two schedules this process runs (TDD-organization-control-003 §Scheduled Sweeps).
+	InvitationSweepInterval time.Duration
+
 	LogLevel string
 
 	// Production is ORGANIZATION_ENVIRONMENT=production, the default.
@@ -275,6 +280,23 @@ func Load() (Config, error) {
 	cfg.ProvisioningReconcileInterval = durationOr(
 		"ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL", 15*time.Minute, &problems)
 	cfg.TenantNameMax = intOr("ORGANIZATION_TENANT_NAME_MAX", 120, &problems)
+	cfg.InvitationSweepInterval = durationOr("ORGANIZATION_INVITATION_SWEEP_INTERVAL", time.Hour, &problems)
+
+	// Each schedule is a transaction per replica per interval. A sub-minute cadence buys nothing --
+	// the timeout and an invitation's lifetime are measured in minutes and days -- and a unit
+	// forgotten in the other direction, `1ms` for `1m`, would hold the database in a loop.
+	for _, schedule := range []struct {
+		name     string
+		interval time.Duration
+	}{
+		{"ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL", cfg.ProvisioningReconcileInterval},
+		{"ORGANIZATION_INVITATION_SWEEP_INTERVAL", cfg.InvitationSweepInterval},
+	} {
+		if schedule.interval < MinimumSweepInterval {
+			problems = append(problems, fmt.Errorf("%s (%s) is shorter than %s, the shortest schedule a sweep runs on",
+				schedule.name, schedule.interval, MinimumSweepInterval))
+		}
+	}
 
 	// A sweep that runs less often than the timeout is the normal configuration; one that runs more
 	// often than the timeout is wasteful but harmless. The relationship worth refusing is neither:
@@ -368,6 +390,9 @@ func stringOr(key, fallback string) string {
 // A present but unparseable value is an error rather than the fallback. Falling back silently would
 // let `HTTP_REQUEST_TIMEOUT=5` — seconds intended, unit forgotten — start a process with a timeout
 // nobody chose, and the operator would have no way to tell it had been ignored.
+// MinimumSweepInterval is the shortest cadence either scheduled sweep accepts.
+const MinimumSweepInterval = time.Minute
+
 func durationOr(key string, fallback time.Duration, problems *[]error) time.Duration {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {

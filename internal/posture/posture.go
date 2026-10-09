@@ -94,6 +94,12 @@ var RuntimeRoles = []string{"organization_rt", "organization_provider_rt", "orga
 // operation.offboarding, operation.offboarding_obligation and tenant.provisioning_request are read
 // by operation.lifecycle_signals, a view owned by the migration role, for the offboarding and
 // provisioning gauges: one SELECT policy each admits the rows still in progress, and no write.
+//
+// tenant.provisioning_request and invitation.invitation are written by the two scheduled sweeps
+// through operation.provisioning_sweep and operation.invitation_expiry, views the migration role
+// owns (TDD-organization-control-003 §Scheduled Sweeps): one UPDATE policy each admits one
+// transition, `requested` to `unresolved` and a lapsed invitation to `expired`, and the expiry has a
+// SELECT policy of its own for the rows it reads and writes.
 var AdditionalPolicies = map[string][]string{
 	"membership.membership_event": {"membership_event_resolution_read"},
 	"membership.tenant_admin_grant": {"tenant_admin_grant_granted_by_provider",
@@ -105,7 +111,8 @@ var AdditionalPolicies = map[string][]string{
 	"tenant.tenant":                    {"tenant_consumer_read", "tenant_self_read"},
 	"operation.offboarding":            {"offboarding_signals_read"},
 	"operation.offboarding_obligation": {"offboarding_obligation_signals_read"},
-	"tenant.provisioning_request":      {"provisioning_request_signals_read"},
+	"tenant.provisioning_request":      {"provisioning_request_signals_read", "provisioning_request_sweep"},
+	"invitation.invitation":            {"invitation_expiry_read", "invitation_expiry"},
 }
 
 // TableProtection is the posture of one table.

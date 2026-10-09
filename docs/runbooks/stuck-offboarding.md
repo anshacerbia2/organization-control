@@ -1,6 +1,6 @@
 # Runbook: stuck offboarding
 
-Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
+Version 1.2.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
 
 An offboarding moves `freeze -> obligations -> release -> retired`, or ends `cancelled`. Each stage
 is persisted, so a stopped offboarding resumes from where it is. This runbook finds why one has not
@@ -68,7 +68,7 @@ The gauges name no offboarding and no Tenant. Find them with diagnosis step 1.
 | `obligations` | A `failed` obligation | It holds release like an open one. The domain fixes and reports again, or an accountable person waives it (B) |
 | `obligations` | None outstanding, `legal_hold` true | Release is refused while the hold is set (C) |
 | `obligations` | None outstanding, no hold | Release (D) |
-| `release` | `deprovisioning.state` `requested` | In flight. Wait for the provisioning system. Past `ORGANIZATION_PROVISIONING_TIMEOUT` (default 30m), the sweep marks it `unresolved` (E) |
+| `release` | `deprovisioning.state` `requested` | In flight. Wait for the provisioning system. Past `ORGANIZATION_PROVISIONING_TIMEOUT` (default 30m), the scheduled sweep marks it `unresolved` (E) |
 | `release` | `unresolved` | Ambiguous: the infrastructure may or may not be released (E) |
 | `release` | `failed` | Refused by the provisioning system. Once its cause is fixed, send it again (H) |
 | `release` | `realized` | Retire (F) |
@@ -117,7 +117,8 @@ All are provider commands: `X-Administrative-Reason` and an `Idempotency-Key` ar
 
 - **E. Deprovisioning outcome.** Do not retire on a guess. A timeout is not proof the target did
   nothing (SAD-004 §7.5).
-  1. Age unanswered requests: `POST /v1/provisioning/sweep-unresolved` with `{"size": 100}`.
+  1. The scheduled sweep ages an unanswered request within one reconcile interval of the timeout. To
+     do it now: `POST /v1/provisioning/sweep-unresolved` with `{"size": 100}`.
   2. Ask the infrastructure owner what happened, giving the offboarding's `correlation_id`, the
      Tenant, and `deprovisioning.requested_at`.
   3. The provisioning system reports, or you report on its behalf with its confirmation:
@@ -172,9 +173,6 @@ All are provider commands: `X-Administrative-Reason` and an `Idempotency-Key` ar
 
 - TDD-004's critical for an obligation "past the contract deadline" is not alerted: no contract
   deadline is recorded, only `due_at`.
-- The sweep that ages a `requested` deprovisioning into `unresolved` runs only when called
-  (`POST /v1/provisioning/sweep-unresolved`); nothing schedules it ([provisioning](provisioning.md),
-  Gaps). Until it runs, a deprovisioning with no answer reads `requested`, not ambiguous.
 
 ## References
 

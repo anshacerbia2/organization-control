@@ -44,6 +44,8 @@ BEGIN
               ('operation.offboarding'),
               ('operation.offboarding_obligation'),
               ('operation.lifecycle_signals'),
+              ('operation.provisioning_sweep'),
+              ('operation.invitation_expiry'),
               ('audit.privileged_access'),
               ('audit.privileged_access_review'),
               ('audit.tenant_provider_access'),
@@ -218,7 +220,9 @@ GRANT SELECT ON membership.offboarding_freeze TO organization_provider_rt;
 
 -- invitation.invitation
 --   organization_rt          SELECT, INSERT, UPDATE   issue, accept, revoke
---   organization_provider_rt SELECT, UPDATE           expiry sweep across Tenants
+--   organization_provider_rt SELECT, UPDATE           identity verification across Tenants; the
+--                                                     expiry sweep writes through
+--                                                     operation.invitation_expiry instead
 GRANT USAGE ON SCHEMA invitation TO organization_rt, organization_provider_rt;
 GRANT SELECT, INSERT, UPDATE ON invitation.invitation TO organization_rt;
 GRANT SELECT, UPDATE         ON invitation.invitation TO organization_provider_rt;
@@ -234,6 +238,13 @@ GRANT SELECT, INSERT, UPDATE ON operation.offboarding_obligation TO organization
 -- on the raw provider connections on each metric collection. A view of counts and ages that names no
 -- row; the migration role that owns it reads the tables through three SELECT policies (rls.sql).
 GRANT SELECT ON operation.lifecycle_signals TO organization_provider_rt;
+
+-- operation.provisioning_sweep, operation.invitation_expiry -- provider only: the two scheduled
+-- sweeps, on the raw provider connections, and the two routes that run the same statements under a
+-- provider scope (TDD-organization-control-003 §Scheduled Sweeps). UPDATE on the columns each sweep
+-- writes and no other; the owner's policies (rls.sql) admit one transition each.
+GRANT SELECT, UPDATE (state, resolved_at, detail) ON operation.provisioning_sweep TO organization_provider_rt;
+GRANT SELECT, UPDATE (state)                      ON operation.invitation_expiry  TO organization_provider_rt;
 
 -- organization.organization -- provider only.
 --

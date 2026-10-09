@@ -342,8 +342,9 @@ COMMENT ON VIEW audit.tenant_provider_access IS
 -- FORCE ROW LEVEL SECURITY binds like everyone else, so the three SELECT policies below give it
 -- exactly the rows the counts need: an offboarding still in progress, an open obligation past its
 -- due date, a provisioning request in flight or ambiguous. They are permissive, and the migration
--- role has no other policy on these tables, so they are the whole of what it reads here. SELECT only:
--- the migration role writes none of these rows.
+-- role has no other SELECT policy on these tables, so they are the whole of what it reads here. Its
+-- one write is the provisioning sweep's, through operation.provisioning_sweep below, which ages a
+-- request from `requested` to `unresolved` and does nothing else.
 --
 -- security_barrier for the reason the Tenant's provider-access view carries it: a function in the
 -- caller's query is not evaluated against a row before the view's own predicates.
@@ -419,3 +420,60 @@ SELECT overdue.n AS obligations_overdue,
   FROM observed, overdue, running;
 COMMENT ON VIEW operation.lifecycle_signals IS
     'Counts and ages of offboarding and provisioning in progress, naming nothing. TDD-organization-control-004 §Operational Notes.';
+
+-- operation.provisioning_sweep and operation.invitation_expiry, the two scheduled sweeps
+-- (TDD-organization-control-003 §Scheduled Sweeps, TDD-organization-control-004 §Expiry Sweep).
+--
+-- The sweeps run in the serving process on a schedule, on the raw provider connections, and bind no
+-- scope, for the reason the gauges above bind none: a provider scope would file a privileged-access
+-- record per run, and the review of that record would be a review of a timer. So they write through
+-- these views, which the migration role owns. An UPDATE on an automatically updatable view is
+-- converted into one on its table, and the view owner's policies apply (PostgreSQL 17, CREATE VIEW).
+--
+-- Each UPDATE policy names the one state the row leaves in USING and the one it enters in WITH
+-- CHECK, so a defect in either sweep can make no other transition. The SELECT policies are needed as
+-- well: an UPDATE that reads the row is checked against the owner's SELECT policies on the existing
+-- and the new row (PostgreSQL 17, CREATE POLICY). The provisioning sweep reuses the gauges' SELECT
+-- policy, which already admits `requested` and `unresolved`; the expiry's admits `expired` because
+-- that is the new row.
+--
+-- The routes POST /v1/provisioning/sweep-unresolved and POST /v1/invitations/expire-lapsed run the
+-- same statements through the same views under a provider scope.
+DROP POLICY IF EXISTS provisioning_request_sweep ON tenant.provisioning_request;
+CREATE POLICY provisioning_request_sweep ON tenant.provisioning_request
+    FOR UPDATE
+    TO organization_migrator
+    USING (state = 'requested')
+    WITH CHECK (state = 'unresolved' AND resolved_at IS NOT NULL);
+
+DROP VIEW IF EXISTS operation.provisioning_sweep;
+CREATE VIEW operation.provisioning_sweep WITH (security_barrier) AS
+SELECT request_id, requested_at, state, resolved_at, detail
+  FROM tenant.provisioning_request
+ WHERE state = 'requested';
+COMMENT ON VIEW operation.provisioning_sweep IS
+    'Provisioning requests still requested, which the scheduled sweep ages to unresolved. TDD-organization-control-003 §Scheduled Sweeps.';
+
+DROP POLICY IF EXISTS invitation_expiry_read ON invitation.invitation;
+CREATE POLICY invitation_expiry_read ON invitation.invitation
+    FOR SELECT
+    TO organization_migrator
+    USING (expires_at <= now() AND state IN ('pending', 'identity_verified', 'expired'));
+
+DROP POLICY IF EXISTS invitation_expiry ON invitation.invitation;
+CREATE POLICY invitation_expiry ON invitation.invitation
+    FOR UPDATE
+    TO organization_migrator
+    USING (expires_at <= now() AND state IN ('pending', 'identity_verified'))
+    WITH CHECK (state = 'expired');
+
+-- No target identifier or hash: the event the sweep publishes carries neither, so the view does not.
+DROP VIEW IF EXISTS operation.invitation_expiry;
+CREATE VIEW operation.invitation_expiry WITH (security_barrier) AS
+SELECT invitation_id, tenant_id, workspace_id, subject_type, state, correlation_id, principal_id,
+       expires_at
+  FROM invitation.invitation
+ WHERE state IN ('pending', 'identity_verified')
+   AND expires_at <= now();
+COMMENT ON VIEW operation.invitation_expiry IS
+    'Invitations past their expiry and not yet expired, which the scheduled sweep expires. TDD-organization-control-004 §Expiry Sweep.';

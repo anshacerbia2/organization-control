@@ -285,6 +285,68 @@ tests:
         alertname: LifecycleTelemetryAbsent
         exp_alerts: []
 
+  - name: unresolved provisioning past two reconcile intervals
+    interval: 30s
+    input_series:
+      - series: 'organization_provisioning_oldest_request_age_seconds{operation="provision",state="unresolved"}'
+        values: '600 1700 1900'
+      - series: 'organization_provisioning_oldest_request_age_seconds{operation="deprovision",state="unresolved"}'
+        values: '5000 5000 5000'
+      - series: 'organization_sweep_interval_seconds{sweep="provisioning_unresolved"}'
+        values: '900 900 900'
+      - series: 'organization_sweep_interval_seconds{sweep="invitation_expiry"}'
+        values: '60 60 60'
+    alert_rule_test:
+      # 1700s is under two 15-minute intervals; the invitation sweep's 60s interval must not be read.
+      - eval_time: 30s
+        alertname: ProvisioningUnresolvedCritical
+        exp_alerts: []
+      - eval_time: 60s
+        alertname: ProvisioningUnresolvedCritical
+        exp_alerts:
+          - exp_labels: { severity: critical, operation: provision, state: unresolved }
+            exp_annotations:
+              summary: A provisioning request has been unresolved for longer than two reconcile intervals.
+              description: Ask the provisioning system whether the boundary exists, then report realized or failed (docs/runbooks/provisioning.md). Never retried automatically.
+
+  - name: the critical follows the configured interval
+    interval: 30s
+    input_series:
+      - series: 'organization_provisioning_oldest_request_age_seconds{operation="provision",state="unresolved"}'
+        values: '1900 1900'
+      - series: 'organization_sweep_interval_seconds{sweep="provisioning_unresolved"}'
+        values: '1800 1800'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: ProvisioningUnresolvedCritical
+        exp_alerts: []
+
+  - name: a stopped sweep, and one that keeps succeeding
+    interval: 1m
+    input_series:
+      # Last succeeded at the start and never again, on a 15-minute interval.
+      - series: 'organization_sweep_last_success_timestamp_seconds{sweep="provisioning_unresolved"}'
+        values: '0x60'
+      - series: 'organization_sweep_interval_seconds{sweep="provisioning_unresolved"}'
+        values: '900x60'
+      # Succeeds every minute on a 15-minute interval.
+      - series: 'organization_sweep_last_success_timestamp_seconds{sweep="invitation_expiry"}'
+        values: '0+60x60'
+      - series: 'organization_sweep_interval_seconds{sweep="invitation_expiry"}'
+        values: '900x60'
+    alert_rule_test:
+      # Two intervals is 30 minutes; the alert holds 5 more before it fires.
+      - eval_time: 33m
+        alertname: ScheduledSweepStopped
+        exp_alerts: []
+      - eval_time: 37m
+        alertname: ScheduledSweepStopped
+        exp_alerts:
+          - exp_labels: { severity: warning, sweep: provisioning_unresolved }
+            exp_annotations:
+              summary: A scheduled sweep has not succeeded for two of its intervals.
+              description: Unanswered provisioning requests are not aged to unresolved, or lapsed invitations are not expired, while it lasts. The process logs each failure as "scheduled sweep failed" with the sweep's name (docs/runbooks/provisioning.md).
+
   - name: no lifecycle telemetry
     interval: 1m
     input_series:

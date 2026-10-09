@@ -40,6 +40,9 @@ type fixture struct {
 	scopeFor    func(id.UUID) context.Context
 	fixed       time.Time
 	actor       id.UUID
+
+	// raw is the provider connections with no scope wrapper, as the scheduled expiry holds them.
+	raw *fdb.Pool
 }
 
 func hostFrom(t *testing.T) string {
@@ -136,6 +139,7 @@ func newFixture(t *testing.T) *fixture {
 			return db.WithScope(ctx, scope)
 		},
 		fixed: fixed, actor: actor,
+		raw: providerPool,
 	}
 }
 

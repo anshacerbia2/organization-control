@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -54,6 +55,7 @@ import (
 	"github.com/anshacerbia2/organization-control/internal/organization"
 	"github.com/anshacerbia2/organization-control/internal/posture"
 	"github.com/anshacerbia2/organization-control/internal/projection"
+	"github.com/anshacerbia2/organization-control/internal/sweep"
 	enforcement "github.com/anshacerbia2/organization-control/internal/telemetry"
 	"github.com/anshacerbia2/organization-control/internal/tenant"
 	"github.com/anshacerbia2/organization-control/internal/workspace"
@@ -586,6 +588,55 @@ func run() error {
 		}
 	}()
 
+	// The scheduled sweeps (TDD-organization-control-003 §Scheduled Sweeps): unanswered provisioning
+	// requests aged to `unresolved` every ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL, lapsed
+	// invitations expired every ORGANIZATION_INVITATION_SWEEP_INTERVAL. On the raw provider
+	// connections, through views whose policies admit one transition each, so a run files no
+	// privileged-access record. Every replica schedules both; each is safe to run twice at once.
+	scheduledProvisioning, err := provisioning.Scheduled(providerConns)
+	if err != nil {
+		return fmt.Errorf("scheduled provisioning sweep: %w", err)
+	}
+	scheduledExpiry, err := invitations.Scheduled(providerConns)
+	if err != nil {
+		return fmt.Errorf("scheduled invitation expiry: %w", err)
+	}
+	sweeps, err := sweep.New(meter, cfg.Deployable, cfg.System, logger,
+		sweep.Job{Name: sweep.ProvisioningUnresolved, Interval: cfg.ProvisioningReconcileInterval,
+			Batch: scheduledProvisioning.SweepUnresolved},
+		sweep.Job{Name: sweep.InvitationExpiry, Interval: cfg.InvitationSweepInterval,
+			Batch: func(ctx context.Context, size int) (int64, error) {
+				expired, err := scheduledExpiry.ExpireLapsed(ctx, size)
+				return int64(expired), err
+			}})
+	if err != nil {
+		return fmt.Errorf("scheduled sweeps: %w", err)
+	}
+	// Their own context, so a return before the signal -- a port already bound -- stops them too.
+	sweepCtx, stopSweeps := context.WithCancel(ctx)
+	var sweepsRunning sync.WaitGroup
+	for _, job := range sweeps.Jobs() {
+		sweepsRunning.Add(1)
+		go func() {
+			defer sweepsRunning.Done()
+			schedule(sweepCtx, sweeps, job)
+		}()
+	}
+	logger.Info("scheduled sweeps started",
+		slog.Duration("provisioning_unresolved", cfg.ProvisioningReconcileInterval),
+		slog.Duration("invitation_expiry", cfg.InvitationSweepInterval))
+	// A sweep cut off by the signal rolls its batch back; the next start takes it again.
+	defer func() {
+		stopSweeps()
+		stopped := make(chan struct{})
+		go func() { sweepsRunning.Wait(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(cfg.HTTPShutdownGrace):
+			logger.Warn("the scheduled sweeps did not stop within the shutdown grace")
+		}
+	}()
+
 	// Bind here rather than inside the goroutine, so "listening" is logged after the port is
 	// actually held. ListenAndServe binds and serves in one call, so the log line preceded the bind
 	// and a port already in use produced "listening on 127.0.0.1:8099" followed by the bind failure
@@ -625,6 +676,22 @@ func run() error {
 	}
 	logger.Info("stopped")
 	return nil
+}
+
+// schedule runs job once now and then once per interval until ctx ends. A failed run is logged and
+// counted by the runner, and the next tick tries again: a sweep is safe to repeat, and an alert, not
+// this loop, is what tells an operator one has stopped succeeding.
+func schedule(ctx context.Context, sweeps *sweep.Runner, job sweep.Job) {
+	ticker := time.NewTicker(job.Interval)
+	defer ticker.Stop()
+	for {
+		_, _ = sweeps.Run(ctx, job.Name)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // startupPostureTimeout bounds the isolation check at startup. Two catalog queries take

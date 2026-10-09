@@ -1,13 +1,14 @@
 # Runbook: stuck, unresolved and refused provisioning
 
-Version 1.0.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
+Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
 
 A Tenant is not `active` until the external system that owns its isolation boundary confirms the
 boundary exists (SAD-004 §5.1). This service records the desired state as a provisioning request,
 publishes it, and correlates the realized status back by the request's correlation identifier
 (TDD-organization-control-003 §Provisioning Correlation). This runbook covers the three runbooks
 TDD-003 §Operational Notes requires: stuck provisioning, unresolved provisioning resolution, and
-Tenant activation refused.
+Tenant activation refused. From 1.1.0 it also answers a scheduled sweep that has stopped
+(TDD-003 §Scheduled Sweeps).
 
 ## Trigger
 
@@ -16,6 +17,11 @@ Tenant activation refused.
   `organization_provisioning_oldest_request_age_seconds{operation="provision",state="requested"}`.
 - `ProvisioningUnresolved` (warning): a request timed out with no outcome,
   `organization_provisioning_requests{operation="provision",state="unresolved"} > 0`.
+- `ProvisioningUnresolvedCritical` (critical): the oldest has been `unresolved` for longer than two
+  reconcile intervals (`ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL`, default 15m, so 30 minutes).
+- `ScheduledSweepStopped` (warning): a scheduled sweep, labelled `sweep`, has not succeeded for two
+  of its intervals. `provisioning_unresolved` ages unanswered requests; `invitation_expiry` expires
+  lapsed invitations (Remediation F).
 - `LifecycleTelemetryAbsent` (warning): none of these gauges for 10 minutes; the alerts above are
   blind.
 - An operator's `POST /v1/tenants/{tenant_id}/activate` answers `412`.
@@ -61,12 +67,13 @@ The gauges count requests and name no Tenant. The Tenant is found in diagnosis.
 | Finding | Act |
 | :-- | :-- |
 | `requested` Tenant, `requested` request | Dispatch (A) |
-| `provisioning`, `requested`, the provisioning system still working | Wait. Past `ORGANIZATION_PROVISIONING_TIMEOUT` (default 30m) the sweep marks it `unresolved` (B) |
+| `provisioning`, `requested`, the provisioning system still working | Wait. Past `ORGANIZATION_PROVISIONING_TIMEOUT` (default 30m) the scheduled sweep marks it `unresolved` within one reconcile interval; (B) does it now |
 | `provisioning`, `requested`, the provisioning system has no record of it | Report `failed` on its confirmation (C), then retry (D) |
 | `unresolved` | Establish the outcome with the provisioning system's owner, then report it (C) |
 | `failed` | Fix the cause the `detail` names, then retry (D) |
 | `realized` | Activate (E) |
 | Activation answers `412` | Read the message (E) |
+| `ScheduledSweepStopped` | Find why the runs fail (F) |
 
 ## Remediation
 
@@ -77,7 +84,8 @@ and do not require it.
 - **A. Dispatch.** `POST /v1/tenants/{tenant_id}/provisioning` `{"expected_version": <version>}`.
   It records that the desired state has left and moves the Tenant to `provisioning`. `412` means no
   provisioning command is outstanding for this Tenant.
-- **B. Age unanswered requests.** `POST /v1/provisioning/sweep-unresolved` `{"size": 100}` answers
+- **B. Age unanswered requests now.** The service does this itself every reconcile interval. To do it
+  before the next run: `POST /v1/provisioning/sweep-unresolved` `{"size": 100}` answers
   `{"affected": n}`. It sets requests older than the timeout to `unresolved`, in both directions
   (provisioning and offboarding's deprovisioning), and starts no retry.
 - **C. Report the outcome** on the provisioning system's behalf, with its confirmation in the reason:
@@ -111,11 +119,29 @@ and do not require it.
   - `409`: the version changed since you read it, or the transition is not allowed from the Tenant's
     status. Read the Tenant again.
 
+- **F. A scheduled sweep stopped.** Each replica runs both sweeps, once at start and then once per
+  interval, on the provider connections.
+  1. Read the replica's log for `scheduled sweep failed` with `"sweep":"<name>"`. The `error` names
+     the cause.
+  2. `permission denied` or a policy violation on `operation.provisioning_sweep` or
+     `operation.invitation_expiry`: the post stage did not apply the views, grants or policies. Run
+     `organization-migrate -stage=post`. Readiness also fails on a missing or extra policy.
+  3. A timeout or a connection error: the database or the provider connections. Check
+     `DB_MAX_CONNS` and the database's health.
+  4. No `scheduled sweeps started` line at start: the process is not running this version.
+  5. Until it recovers, run the route by hand: B for `provisioning_unresolved`, and
+     `POST /v1/invitations/expire-lapsed` `{"size": 100}` for `invitation_expiry`. A stopped expiry
+     never lets a lapsed invitation be accepted, because acceptance checks expiry against the clock.
+  `organization_sweep_runs_total{outcome="failure"}` counts the failed runs, and
+  `organization_sweep_last_run_timestamp_seconds` says when the last one finished.
+
 ## Verification
 
 - `GET /v1/tenants/{tenant_id}` reads `status: active` with `provisioning.state: realized`.
 - The gauges fall: no `requested` request older than an hour, no `unresolved` one, and the alerts
   clear.
+- After F: `organization_sweep_last_success_timestamp_seconds` for the sweep is within one interval
+  of now, and `ScheduledSweepStopped` clears.
 
 ## Escalation
 
@@ -126,10 +152,6 @@ and do not require it.
 
 ## Gaps
 
-- Nothing runs the sweep on a schedule. `ORGANIZATION_PROVISIONING_RECONCILE_INTERVAL` is read and
-  validated, and no process acts on it, so a request becomes `unresolved` only when someone calls
-  `POST /v1/provisioning/sweep-unresolved`. TDD-003's critical "older than two reconcile intervals"
-  is therefore not alerted.
 - The stuck alerts read the age of a request in flight. A Tenant in `requested` whose dispatch was
   never sent shows as an old `requested` request as well; diagnosis tells the two apart.
 
@@ -137,6 +159,6 @@ and do not require it.
 
 | # | Source |
 | :-- | :-- |
-| R1 | TDD-organization-control-003 §Tenant State Machine, §Tenant Activation, §Provisioning Correlation, §Operational Notes |
+| R1 | TDD-organization-control-003 §Tenant State Machine, §Tenant Activation, §Provisioning Correlation, §Scheduled Sweeps, §Operational Notes |
 | R2 | SAD-004 §5.1, §7.5 |
 | R3 | NIST SP 800-61r3, §2.3, <https://doi.org/10.6028/NIST.SP.800-61r3>: "Playbooks provide actionable steps or tasks for people to perform during various scenarios or situations." |
