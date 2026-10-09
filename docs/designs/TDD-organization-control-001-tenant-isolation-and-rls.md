@@ -1137,6 +1137,18 @@ the request's `X-Administrative-Reason`; the latest row is the state. The provid
 `SELECT` and `INSERT` and no `UPDATE`, so a decision is never rewritten. No row means not paused.
 Each read and each decision is also a privileged access, recorded with the reason.
 
+**What the pause leaves to the owner.** A Membership withdrawal lost by the restore is a Tenant
+administrator's command to re-apply, and the pause refuses it; no provider route transitions one
+Membership. Meanwhile the consumer, holding the withdrawal at a higher version, keeps refusing, but
+authority and the fresh check answer granted. The containment available is a Tenant suspension, a
+provider act. The options: (a) a provider route that suspends or revokes one Membership inside a
+Tenant, through `db.WithProviderInTenant` with its reason recorded, as the offboarding freeze already
+suspends a Tenant's Memberships; (b) a pause that exempts named Tenants, so their administrators
+re-apply while the rest stay paused; (c) the Tenant suspension alone, as now. Recommendation: (a),
+because it keeps the repair with the operator who knows what was lost and leaves the Tenant
+administrator out of an incident it did not cause, and it is the act the freeze already performs.
+It widens what a provider does inside a Tenant, so it is the owner's decision (ADR-ORG-003).
+
 **From before the service starts.** A pause made through the API after a restore leaves the time
 between the service starting and the call in which a Tenant administrator can still change authority.
 `deploy/dev/restore.sh` with `PAUSE_REASON` records the pause in the restored database before anything

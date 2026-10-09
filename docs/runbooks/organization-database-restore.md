@@ -96,11 +96,16 @@ Run under the pause, in this order. Every call is a provider call with the incid
    - a `missing` may be a lost revocation or suspension the consumer holds at a higher version. The
      report cannot say, because it lists active Memberships only.
    Keep each report and response in the incident.
-2. **Re-apply lost revocations and suspensions first,** through their routes. Then lost provider-grant
-   revocations ([provider-access review](provider-access-review.md)), then offboardings
-   ([stuck offboarding](stuck-offboarding.md)). Grants come last, and only when their requester
-   confirms them again. Their sources are the incident record, the consumers' own logs and the
-   requesters.
+2. **Re-apply lost withdrawals first.** Tenant suspensions (`POST /v1/tenants/{tenant_id}/suspend`),
+   provider-grant revocations ([provider-access review](provider-access-review.md)) and offboardings
+   ([stuck offboarding](stuck-offboarding.md)) are provider acts and run under the pause. A lost
+   **Membership** revocation or suspension is a Tenant administrator's command, which the pause
+   refuses, and no provider route transitions a single Membership (see "Gaps"). The consumer already
+   holds it withdrawn at a higher version, so it keeps refusing; but authority, and so
+   `POST /v1/context/verify`, answers granted meanwhile. Where that matters, suspend the Tenant until
+   its administrator re-applies the withdrawal after step 6. Grants come last, and only when their
+   requester confirms them again. The sources are the incident record, the consumers' own logs and
+   the requesters.
 3. **Advance the versions** for each consumer, with the same report:
 
    ```sh
@@ -160,6 +165,12 @@ Run under the pause, in this order. Every call is a provider call with the incid
 - **A Membership the consumer holds withdrawn at a higher version is not advanced.** It is not in
   the report. The consumer keeps the narrower state, a denial, until authority's version passes its
   own; re-applying the withdrawal (step 2) makes the two agree.
+- **No provider route re-applies a lost Membership withdrawal under the pause.** Membership
+  transitions are a Tenant administrator's, and the pause refuses them. Until the pause is lifted,
+  authority and the fresh check answer the lost withdrawal's Membership as granted while the
+  consumer refuses it; the containment is a Tenant suspension. Whether a provider may transition one
+  Membership inside a Tenant, as the offboarding freeze does in bulk, is a decision for the owner
+  (TDD-organization-control-001 §Pausing Tenant Administration).
 - **The same version, two states, is not detected.** A report gives versions only. The pause stops
   Tenant administrators changing authority meanwhile; a provider's change in that window is the
   remaining exposure.
