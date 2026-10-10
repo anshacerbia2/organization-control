@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.23.0
+  version: 1.24.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-09
+  last_reviewed: 2026-10-10
   parent_sad: SAD-004
 ---
 
@@ -1773,6 +1773,170 @@ runs after the restore, so `roles.sql`, `rls.sql`, `grants.sql` and the login ro
 - **Erasure.** This service has no right-to-erasure path, so it keeps no tombstones for a restore
   to re-apply (`STD-GLB-007` §GDPR Right-to-Erasure). When one is built, the drill proves it.
 
+### The Migrate Image and Its Exceptions
+
+1.24.0. The migrate image (Dockerfile target `migrate`) runs the Control Database pipeline,
+`deploy/dev/migrate.sh`, and the one-off tasks. Its findings are governed by `STD-GLB-009` 1.8.0
+§Container Images, rules 4, 5, 7, 8 and 10, which land with scnehaux-architecture #86. On 2026-10-10
+the daily `image-scan` failed on it, on Go advisories in a binary this repository copies and does not
+build. This section records what each finding is, the evidence for it, and what keeps that evidence
+true. `.grype.yaml` holds the statements, and each one's reason points here.
+
+**What the image runs.** The entrypoint is `organization-dev-migrate`. It runs `psql`, this repository's
+`organization-migrate`, and Atlas once, as `atlas migrate apply --env local`. Both of that environment's
+URLs are `postgres://` with `sslmode=disable`, and `atlas.hcl` has only `file://` sources: it has no
+`data` block, no `atlas://` directory, and no Atlas Cloud token. The `bootstrap-provider`
+and `maintenance` tasks run `organization-control bootstrap-provider` and
+`organization-migrate -stage=maintenance` on the same image, and neither of them runs Atlas.
+
+**Atlas calls out unless it is told not to.** `/usr/local/bin/atlas` comes from `arigaio/atlas:1.3.3`,
+pinned by digest. On 2026-10-10 that is the newest numbered tag, and the newer `latest` tags are
+`v1.3.4-…-canary` builds. Its build information names go1.26.6, `golang.org/x/net` v0.58.0 and
+`google.golang.org/grpc` v1.83.1. Atlas serves nothing. It does make two kinds of outbound call:
+
+- **A release check.** It checks for a newer release around every command. Atlas v1.3.0's source
+  defines `envNoUpdate = "ATLAS_NO_UPDATE_NOTIFIER"`, with the comment "envNoUpdate when enabled it
+  cancels checking for update", and `vercheckURL = "https://vercheck.ariga.io"`. The check returns
+  early `if v := os.Getenv(envNoUpdate); v != ""` [R10].
+- **Anonymous telemetry.** Ariga: "If you wish to opt-out of telemetry data collection, you can do
+  so by setting the ATLAS_NO_ANON_TELEMETRY environment variable to true. This will disable all
+  anonymous telemetry collection" [R11].
+
+1.24.0 sets `ATLAS_NO_UPDATE_NOTIFIER=true` and `ATLAS_NO_ANON_TELEMETRY=true` in the image, with
+`ENV`. They are image settings, not compose settings, because the statements below must hold
+wherever the image runs: the pipeline, the one-off tasks, CI, and an operator's `docker compose run`.
+
+**Evidence.** Rule 7 asks for two kinds.
+
+1. **Symbols.** `govulncheck` v1.8.0 ran with `-mode binary` on the file (sha256
+   `a41ea66b5aaad1e363fd829613a6725c3934378792d0be5591269c041c112b96`), against the Go vulnerability
+   database of 2026-10-08. It reports every advisory below at the symbol level, so
+   `vulnerable_code_not_present` is open to none of them. The symbols cannot separate client code
+   from server code either. The database lists `net/http.Client.Do` among the symbols of
+   GO-2026-6613, a server bug, because exported functions on both sides reach the shared code. And
+   govulncheck "may also report false positives for code that is in the binary but unreachable"
+   [R12]. Each advisory's own text therefore decides which side its bug is on.
+2. **What the image runs.** On 2026-10-10 the binary ran under `strace -f -e
+   trace=socket,connect,bind,listen,accept,accept4` as uid 70, on a Docker network with no egress.
+   identity-control took the trace first with its own `atlas.hcl`. It was repeated here in this
+   repository's migrate image, with this `atlas.hcl`, and the results were the same:
+
+   | Command | `ATLAS_NO_UPDATE_NOTIFIER` | `ATLAS_NO_ANON_TELEMETRY` | Connections | `listen`, `accept`, inet `bind` |
+   | :-- | :-- | :-- | :-- | :-- |
+   | `migrate apply --env local`, database refused | unset | unset | the database; 8 to the resolver, querying `vercheck.ariga.io` | none |
+   | the same | unset | `true` | the database; 8 to the resolver, querying `vercheck.ariga.io` | none |
+   | the same | `true` | unset | the database only | none |
+   | the same | `true` | `true` | the database only | none |
+   | `migrate hash`, which needs no database | unset | unset | 8 to the resolver | none |
+   | the same | `true` | `true` | none | none |
+
+   No database could run where these traces were taken, so the apply in them fails at its first
+   query. `scripts/atlas-execute-path.sh` takes the same trace on the whole pipeline, and
+   `image-scan` runs it on every change and daily. It starts the pinned Control Database on a Docker
+   network with no egress. It then runs the image's own entrypoint with Atlas, and only Atlas,
+   wrapped in `strace`, and names the database by address, so any DNS query is a connection to the
+   resolver. It fails on a `listen`, an `accept`, an inet `bind`, or an inet connection to anything
+   but the database's address and port. A control run with `ATLAS_NO_UPDATE_NOTIFIER` emptied must
+   show the release check, or the trace is blind, and the run fails too.
+
+**Per advisory.** Every finding the gate fails on in the binary is in this table, with GO-2026-6609,
+which govulncheck reports and Grype does not. The side of each comes from the advisory [R13].
+
+| Advisory | CVE | Packages in atlas | Side, in the advisory's words | Statement |
+| :-- | :-- | :-- | :-- | :-- |
+| GO-2026-6603 | CVE-2026-78659 | stdlib go1.26.6, x/net v0.58.0 | HTTP/2 server: "For HTTP/2 servers, a malicious client can exploit this" | not in execute path: Atlas never listens |
+| GO-2026-6605 | CVE-2026-56866 | stdlib | HTTP/1 client: "When http.Transport sends an HTTP/1 CONNECT request with a non-empty Request.Body" | not in execute path: no HTTP request with the release check off |
+| GO-2026-6607 | CVE-2026-97031 | stdlib | TLS server: a client "could trigger memory exhaustion in the server process" | not in execute path: Atlas never listens, and its one connection is plaintext |
+| GO-2026-6608 | CVE-2026-94440 | stdlib | MIME parsing of a peer's message: "Parsing a multipart form can bypass memory limits" | not in execute path: Atlas reads no HTTP message, as server or client |
+| GO-2026-6609 | CVE-2026-78667 | stdlib | HTTP server: "FileServer(FS), ServeContent, and ServeFile(FS) can consume an excessive amount of CPU" | Grype does not report it, so no rule; it would be not in execute path |
+| GO-2026-6610 | CVE-2026-78660 | stdlib, x/net v0.58.0 | HTTP/2 client: the transport accepts malformed framing-related headers, a risk "when acting as a reverse proxy" | not in execute path: no HTTP request with the release check off |
+| GO-2026-6611 | CVE-2026-78669 | stdlib, x/net v0.58.0 | both: "A malicious HTTP/2 peer can cause excessive CPU consumption in the client or server" | not in execute path: neither side runs |
+| GO-2026-6612 | CVE-2026-78663 | stdlib, x/net v0.58.0 | HTTP/2 server: "The HTTP/2 server can refund connection-level flow control twice" | not in execute path: Atlas never listens |
+| GO-2026-6613 | CVE-2026-94439 | stdlib | HTTP/1 server: "When an HTTP server handler sends a 2xx response to an HTTP/1 CONNECT request" | not in execute path: Atlas never listens |
+| GHSA-2v4p-qf9q-27wj (GO-2026-6443) | CVE-2026-84445 | grpc v1.83.1 | gRPC server: "servers configured with xDS routing can panic" | not in execute path: Atlas never listens |
+
+Every gated finding in the binary is therefore `not_affected/vulnerable_code_not_in_execute_path`,
+and none is `affected`. A `not_affected` statement has no remediation time, only rule 5's 90-day
+review. Each is due on 2026-12-09 all the same. That is the date rule 8 would set if a reviewer
+rejected the statement: not publicly exposed, not in the KEV, and, in CISA's Vulnrichment of
+2026-10-09, Automatable yes, with Technical Impact partial (total for CVE-2026-78663). That gives
+60 days from detection on 2026-10-10 [R14] [R15]. The statements rest on a setting, and a release ends
+them, so Ariga is to be asked for one built with go1.26.9, x/net v0.60.0 and grpc v1.83.2. The
+request is drafted in the pull request that brought 1.24.0, for the owner to file. On 2026-10-10
+even Atlas's canary builds carried go1.26.6 and x/net v0.58.0.
+
+**What was rejected.**
+
+- **`affected` until an Ariga release.** The trace shows no path to any of this code. An `affected`
+  statement would claim a reachable path that the evidence says is absent.
+- **Building Atlas from source with go1.26.9.** Rule 9 asks for a source build in a publicly exposed
+  image, and this image is not exposed. The open-source build is not the binary Ariga ships either:
+  "You're running the community build of Atlas, which differs from the official version" [R10].
+- **An egress-less compose network instead of the variables.** That would be a property of one
+  compose file, not of the image, and the statements must hold wherever the image runs. It would add
+  depth, and it is left for the production platform's network policy.
+
+**zlib.** CVE-2026-85091 is in zlib 1.3.2-r0. `postgres:17.11-alpine` carries that version, and it
+is both the migrate image's base and the Control Database. Alpine 3.24 ships the fix as 1.3.2-r1,
+and on 2026-10-10 the tag still resolves to the pinned digest. In rule 8 terms the finding is not
+publicly exposed and not in the KEV, with Automatable no and Technical Impact total [R14] [R15], so it
+is fixed on system upgrade.
+
+- **The migrate image** upgrades zlib where it is built, under rule 10:
+  `RUN apk add --no-cache 'zlib>=1.3.2-r1'`, before `USER postgres`, with a comment that names the
+  CVE. On the pinned base the line upgrades 1.3.2-r0 to 1.3.2-r1, and a constraint no repository
+  can meet fails the build, which was checked with `zlib>=9`. The line goes when the base pin moves
+  to an image that has the fix.
+- **The Control Database** runs the official image without building it. It keeps an `affected`
+  rule for zlib 1.3.2-r0 at `/lib/apk/db/installed`, due on 2026-11-16. The rule waits for the
+  official image to be rebuilt with the fix. PostgreSQL's next minor release, 17.12, is scheduled
+  for "November 12th, 2026" [R16], and the official images rebuild on their maintainers' schedule.
+  Now that the migrate image holds 1.3.2-r1, and the service image has no package database, the rule
+  matches the Control Database image alone. That satisfies rule 5's "one image at a time".
+
+**The Go toolchain.** The build stage is `golang:1.26.9-alpine`, pinned by digest, and `go version`
+in the pinned image reads go1.26.9. Every binary this repository builds therefore carries the
+standard library fixes above. The tag has since been rebuilt under a new digest, and the pin
+stays: it already carries go1.26.9.
+
+**What the scan enforces.** This is `STD-GLB-009` §5 Enforcement item 4. `scripts/image-scan.sh`
+reads `.grype.yaml` before it scans, and it fails on any rule:
+
+- whose review date has passed;
+- whose `reason` lacks rule 5's parts in order: `review-by`, `affected` or `not_affected/` with a
+  justification rule 7 accepts, `detected`, the images, and the statement;
+- whose `review-by` is more than 90 days ahead, or, for `affected`, more than 90 days after
+  `detected`, which is rule 8's longest time;
+- whose `detected` is after today or after its `review-by`;
+- that lacks `vulnerability`, `package.name` or `package.version`;
+- that lacks `package.location`, or gives one that is relative or uses a wildcard.
+
+Every package Grype reports is found in a file: a Go module in the binary that holds it, an operating
+system package in its package database. Every rule therefore names a file. Whether a statement is
+true is left to review.
+
+**Residual risk.**
+
+- The `not_affected` statements rest on how the image runs Atlas. Each of these changes voids them:
+  a change to `migrate.sh`'s Atlas command, to the entrypoint, to `atlas.hcl`'s URLs or sources, or
+  to the two `ENV` lines. `scripts/atlas-execute-path.sh` catches the network side of such a change,
+  and the review of any such change rereads `.grype.yaml`.
+- The trace covers the paths the pipeline takes. A path Atlas would take only on input this image
+  never gives it, such as a cloud directory or a login, is not traced. The statements name the
+  configuration they hold for.
+- The zlib line lets the build take any zlib at or above 1.3.2-r1 from Alpine's index on the day it
+  runs. The base is still named by digest.
+
+| Ref | Source |
+| :-- | :-- |
+| R10 | Ariga, Atlas v1.3.0 source, `cmd/atlas/main.go`, <https://github.com/ariga/atlas/blob/v1.3.0/cmd/atlas/main.go>, accessed 2026-10-10: "// envNoUpdate when enabled it cancels checking for update"; `envNoUpdate = "ATLAS_NO_UPDATE_NOTIFIER"`; `vercheckURL = "https://vercheck.ariga.io"`; `if v := os.Getenv(envNoUpdate); v != "" { return noText }`; "You're running the community build of Atlas, which differs from the official version." |
+| R11 | Ariga, *Atlas: Data Privacy and the CLI*, <https://atlasgo.io/cli/data-privacy>, accessed 2026-10-10: "When you run the Atlas CLI, we may collect anonymous telemetry data"; "If you wish to opt-out of telemetry data collection, you can do so by setting the ATLAS_NO_ANON_TELEMETRY environment variable to true. This will disable all anonymous telemetry collection." |
+| R12 | The Go Project, *govulncheck* command documentation, <https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck>, accessed 2026-10-10: "Govulncheck uses the binary's symbol information to find mentions of vulnerable functions"; "It may also report false positives for code that is in the binary but unreachable." |
+| R13 | The Go Project, Go vulnerability database entries GO-2026-6603, GO-2026-6605, GO-2026-6607 to GO-2026-6613 (published 2026-10-08) and GO-2026-6443 (GHSA-2v4p-qf9q-27wj), <https://vuln.go.dev/ID/GO-2026-6603.json> and siblings, accessed 2026-10-10. The quotations in the table above are from their details. Fixed in go1.26.9, golang.org/x/net v0.60.0 and google.golang.org/grpc v1.83.2. |
+| R14 | CISA, *Vulnrichment*, <https://github.com/cisagov/vulnrichment>, accessed 2026-10-10: CVE-2026-78659, CVE-2026-56866, CVE-2026-97031, CVE-2026-94440, CVE-2026-78660, CVE-2026-78669, CVE-2026-94439 and CVE-2026-84445 with Exploitation none, Automatable yes, Technical Impact partial; CVE-2026-78663 with Exploitation none, Automatable yes, Technical Impact total; CVE-2026-85091 with Exploitation poc, Automatable no, Technical Impact total. |
+| R15 | CISA, *Known Exploited Vulnerabilities Catalog*, catalog version 2026.10.08, <https://www.cisa.gov/known-exploited-vulnerabilities-catalog>, accessed 2026-10-10. None of the CVEs in R14 is listed. |
+| R16 | The PostgreSQL Global Development Group, *Roadmap*, <https://www.postgresql.org/developer/roadmap/>, accessed 2026-10-10: "The PostgreSQL project aims to make at least one minor release every quarter, on a predefined schedule"; "The current schedule for upcoming releases is: November 12th, 2026". |
+
 ## Traceability
 
 | Relationship | Target |
@@ -1787,6 +1951,7 @@ runs after the restore, so `roles.sql`, `rls.sql`, `grants.sql` and the login ro
 | Conforms to | STD-GLB-001 1.6.0 §Pagination — the list form and its time window |
 | Conforms to | STD-IAM-002 §3.1.1, §3.2, §3.5 — the grant's holder checks its own record; `principal_id` is the persisted identifier |
 | Conforms to | STD-GLB-002 — `FORCE ROW LEVEL SECURITY`, non-owner runtime role, no `SUPERUSER`/`BYPASSRLS`, isolation proven as the runtime role |
+| Conforms to | STD-GLB-009 1.8.0 §Container Images rules 4, 5, 7, 8 and 10 — the migrate image's exceptions as VEX statements, and the zlib upgrade; 1.8.0 lands with scnehaux-architecture #86 (1.24.0, §The Migrate Image and Its Exceptions) |
 | Enterprise constraint | EAD-003 — private domain persistence; cross-domain database access is prohibited |
 | Enterprise constraint | EAD-006 — tenant isolation, privileged access attribution, and default deny |
 | Related design | TDD-foundation-platform-001 — outbox and event envelope |
