@@ -2,9 +2,9 @@
 # with scnehaux-architecture #86).
 #
 # Each ignore rule is a VEX statement about one file in one image (rule 5). It matches on the
-# vulnerability, the package's name and version, and the full path of the file the package was found
-# in: a Go module in the binary that holds it, an Alpine package in /lib/apk/db/installed. A new
-# version or a moved file stops the match, and the finding comes back to be decided again. The
+# vulnerability, the package's name, version and type, and the full path of the file the package was
+# found in: a Go module in the binary that holds it, an Alpine package in /lib/apk/db/installed. A
+# new version or a moved file stops the match, and the finding comes back to be decided again. The
 # reason has five parts, in order:
 #
 #   review-by YYYY-MM-DD: <status>: detected YYYY-MM-DD: <images>: <statement>
@@ -22,6 +22,7 @@ ignore:
     package:
       name: stdlib
       version: go1.26.6
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
@@ -35,6 +36,7 @@ ignore:
     package:
       name: stdlib
       version: go1.26.6
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
@@ -50,6 +52,7 @@ ignore:
     package:
       name: stdlib
       version: go1.26.6
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
@@ -64,6 +67,7 @@ ignore:
     package:
       name: stdlib
       version: go1.26.6
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
@@ -82,6 +86,7 @@ ignore:
     package:
       name: stdlib
       version: go1.26.6
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
@@ -97,6 +102,7 @@ ignore:
     package:
       name: stdlib
       version: go1.26.6
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
@@ -115,6 +121,7 @@ ignore:
     package:
       name: stdlib
       version: go1.26.6
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
@@ -128,6 +135,7 @@ ignore:
     package:
       name: stdlib
       version: go1.26.6
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
@@ -142,6 +150,7 @@ ignore:
     package:
       name: golang.org/x/net
       version: v0.58.0
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
@@ -156,6 +165,7 @@ ignore:
     package:
       name: golang.org/x/net
       version: v0.58.0
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
@@ -172,6 +182,7 @@ ignore:
     package:
       name: golang.org/x/net
       version: v0.58.0
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
@@ -190,6 +201,7 @@ ignore:
     package:
       name: golang.org/x/net
       version: v0.58.0
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
@@ -204,6 +216,7 @@ ignore:
     package:
       name: google.golang.org/grpc
       version: v1.83.1
+      type: go-module
       location: /usr/local/bin/atlas
     reason: >-
       review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-07:
@@ -219,6 +232,7 @@ ignore:
     package:
       name: zlib
       version: 1.3.2-r0
+      type: apk
       location: /lib/apk/db/installed
     reason: >-
       review-by 2026-11-16: affected: detected 2026-10-07: postgres:17.11-alpine
