@@ -42,6 +42,10 @@ services:
     # Named, so every one-off task below runs this image and `up --build` rebuilds them with the
     # release.
     image: scnehaux-organization-control-dev-migrate
+    # Built here, never pulled. Without this, Compose first tries to pull the name from a registry,
+    # and a published image of that name would run instead (TDD-organization-control-001
+    # §The Migrate Image and Its Exceptions).
+    pull_policy: build
     restart: "no"
     environment:
       POSTGRES_SUPER_URL: postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432
@@ -60,6 +64,9 @@ services:
   # Principal. It writes as the provider role, never the migration one.
   bootstrap-provider:
     image: scnehaux-organization-control-dev-migrate
+    # The image the migrate service builds; never pulled from a registry, so a task run before
+    # the build fails instead of running a published image of the same name.
+    pull_policy: never
     profiles: ["bootstrap-provider"]
     entrypoint: ["organization-control", "bootstrap-provider"]
     environment:
@@ -74,6 +81,9 @@ services:
   # (deploy/dev/README.md §One-off tasks); it exits 3 on an incident open past 24 hours.
   maintenance:
     image: scnehaux-organization-control-dev-migrate
+    # The image the migrate service builds; never pulled from a registry, so a task run before
+    # the build fails instead of running a published image of the same name.
+    pull_policy: never
     profiles: ["maintenance"]
     entrypoint: ["organization-migrate", "-stage=maintenance"]
     environment:

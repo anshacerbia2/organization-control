@@ -1,21 +1,248 @@
-# Grype configuration for scripts/image-scan.sh (STD-GLB-009 1.4.0 §Container Images).
+# Grype configuration for scripts/image-scan.sh (STD-GLB-009 1.8.0 §Container Images, which lands
+# with scnehaux-architecture #86).
 #
-# An ignore rule names the vulnerability and the package. Its reason begins "review-by YYYY-MM-DD:",
-# at most 90 days ahead, and says why the finding does not apply or what it waits for. The scan
-# fails once a rule's date has passed.
+# Each ignore rule is a VEX statement about one file in one image (rule 5). It matches on the
+# vulnerability, the package's name, version and type, and the full path of the file the package was
+# found in: a Go module in the binary that holds it, an Alpine package in /lib/apk/db/installed. A
+# new version or a moved file stops the match, and the finding comes back to be decided again. The
+# reason has five parts, in order:
+#
+#   review-by YYYY-MM-DD: <status>: detected YYYY-MM-DD: <images>: <statement>
+#
+# <status> is `affected`, or `not_affected/<justification>` with a justification rule 7 accepts.
+# The scan checks the form and the dates and fails once a review date has passed; whether a
+# statement is true is left to review. The evidence and the decisions are in
+# TDD-organization-control-001 §The Migrate Image and Its Exceptions.
 check-for-app-update: false
 ignore:
+  # /usr/local/bin/atlas in the migrate image: arigaio/atlas 1.3.3, built with go1.26.6,
+  # golang.org/x/net v0.58.0 and google.golang.org/grpc v1.83.1. Due on 2026-12-09, the date BOD 26-04
+  # would set if a statement were rejected.
+  - vulnerability: GO-2026-6603
+    package:
+      name: stdlib
+      version: go1.26.6
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
+      the migrate image (Dockerfile target migrate): HTTP/2 server code: "For HTTP/2 servers, a
+      malicious client can exploit this". Atlas never listens. It runs once, as `atlas migrate apply
+      --env local` from deploy/dev/migrate.sh, and scripts/atlas-execute-path.sh, run by image-scan
+      on every change and daily, traces it and finds no listen(), no accept() and no inet bind().
+      govulncheck v1.8.0 -mode binary finds the advisory's symbols, which it cannot tell reachable.
+      TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: GO-2026-6605
+    package:
+      name: stdlib
+      version: go1.26.6
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
+      the migrate image (Dockerfile target migrate): HTTP/1 client code: "When http.Transport sends
+      an HTTP/1 CONNECT request with a non-empty Request.Body". Atlas's only HTTP client call is its
+      release check, which ATLAS_NO_UPDATE_NOTIFIER=true in the Dockerfile turns off, with
+      ATLAS_NO_ANON_TELEMETRY=true beside it. With both set its one connection is the database's,
+      plaintext postgres: scripts/atlas-execute-path.sh, run by image-scan on every change and
+      daily, fails on any other. Removing either ENV line voids this. govulncheck v1.8.0 -mode
+      binary finds the advisory's symbols, which it cannot tell reachable.
+      TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: GO-2026-6607
+    package:
+      name: stdlib
+      version: go1.26.6
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
+      the migrate image (Dockerfile target migrate): TLS server code: a client "could trigger memory
+      exhaustion in the server process"; Atlas is never a TLS server, and its one connection is
+      plaintext. Atlas never listens. It runs once, as `atlas migrate apply --env local` from
+      deploy/dev/migrate.sh, and scripts/atlas-execute-path.sh, run by image-scan on every change
+      and daily, traces it and finds no listen(), no accept() and no inet bind(). govulncheck v1.8.0
+      -mode binary finds the advisory's symbols, which it cannot tell reachable.
+      TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: GO-2026-6608
+    package:
+      name: stdlib
+      version: go1.26.6
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
+      the migrate image (Dockerfile target migrate): MIME parsing of a peer's HTTP message: "Parsing
+      a multipart form can bypass memory limits". Atlas never listens. It runs once, as `atlas
+      migrate apply --env local` from deploy/dev/migrate.sh, and scripts/atlas-execute-path.sh, run
+      by image-scan on every change and daily, traces it and finds no listen(), no accept() and no
+      inet bind(). Atlas's only HTTP client call is its release check, which
+      ATLAS_NO_UPDATE_NOTIFIER=true in the Dockerfile turns off, with ATLAS_NO_ANON_TELEMETRY=true
+      beside it. With both set its one connection is the database's, plaintext postgres:
+      scripts/atlas-execute-path.sh, run by image-scan on every change and daily, fails on any
+      other. Removing either ENV line voids this. govulncheck v1.8.0 -mode binary finds the
+      advisory's symbols, which it cannot tell reachable. TDD-organization-control-001 §The Migrate
+      Image and Its Exceptions.
+  - vulnerability: GO-2026-6610
+    package:
+      name: stdlib
+      version: go1.26.6
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
+      the migrate image (Dockerfile target migrate): HTTP/2 client code: the transport accepts
+      malformed framing-related headers, a risk "when acting as a reverse proxy". Atlas's only HTTP
+      client call is its release check, which ATLAS_NO_UPDATE_NOTIFIER=true in the Dockerfile turns
+      off, with ATLAS_NO_ANON_TELEMETRY=true beside it. With both set its one connection is the
+      database's, plaintext postgres: scripts/atlas-execute-path.sh, run by image-scan on every
+      change and daily, fails on any other. Removing either ENV line voids this. govulncheck v1.8.0
+      -mode binary finds the advisory's symbols, which it cannot tell reachable.
+      TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: GO-2026-6611
+    package:
+      name: stdlib
+      version: go1.26.6
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
+      the migrate image (Dockerfile target migrate): HTTP/2 client and server code: "A malicious
+      HTTP/2 peer can cause excessive CPU consumption in the client or server". Atlas never listens.
+      It runs once, as `atlas migrate apply --env local` from deploy/dev/migrate.sh, and
+      scripts/atlas-execute-path.sh, run by image-scan on every change and daily, traces it and
+      finds no listen(), no accept() and no inet bind(). Atlas's only HTTP client call is its
+      release check, which ATLAS_NO_UPDATE_NOTIFIER=true in the Dockerfile turns off, with
+      ATLAS_NO_ANON_TELEMETRY=true beside it. With both set its one connection is the database's,
+      plaintext postgres: scripts/atlas-execute-path.sh, run by image-scan on every change and
+      daily, fails on any other. Removing either ENV line voids this. govulncheck v1.8.0 -mode
+      binary finds the advisory's symbols, which it cannot tell reachable.
+      TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: GO-2026-6612
+    package:
+      name: stdlib
+      version: go1.26.6
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
+      the migrate image (Dockerfile target migrate): HTTP/2 server code: "The HTTP/2 server can
+      refund connection-level flow control twice". Atlas never listens. It runs once, as `atlas
+      migrate apply --env local` from deploy/dev/migrate.sh, and scripts/atlas-execute-path.sh, run
+      by image-scan on every change and daily, traces it and finds no listen(), no accept() and no
+      inet bind(). govulncheck v1.8.0 -mode binary finds the advisory's symbols, which it cannot
+      tell reachable. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: GO-2026-6613
+    package:
+      name: stdlib
+      version: go1.26.6
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
+      the migrate image (Dockerfile target migrate): HTTP/1 server code: "When an HTTP server
+      handler sends a 2xx response to an HTTP/1 CONNECT request". Atlas never listens. It runs once,
+      as `atlas migrate apply --env local` from deploy/dev/migrate.sh, and
+      scripts/atlas-execute-path.sh, run by image-scan on every change and daily, traces it and
+      finds no listen(), no accept() and no inet bind(). govulncheck v1.8.0 -mode binary finds the
+      advisory's symbols, which it cannot tell reachable. TDD-organization-control-001 §The Migrate
+      Image and Its Exceptions.
+  - vulnerability: GO-2026-6603
+    package:
+      name: golang.org/x/net
+      version: v0.58.0
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
+      the migrate image (Dockerfile target migrate): HTTP/2 server code in golang.org/x/net/http2:
+      "For HTTP/2 servers, a malicious client can exploit this". Atlas never listens. It runs once,
+      as `atlas migrate apply --env local` from deploy/dev/migrate.sh, and
+      scripts/atlas-execute-path.sh, run by image-scan on every change and daily, traces it and
+      finds no listen(), no accept() and no inet bind(). govulncheck v1.8.0 -mode binary finds the
+      advisory's symbols, which it cannot tell reachable. TDD-organization-control-001 §The Migrate
+      Image and Its Exceptions.
+  - vulnerability: GO-2026-6610
+    package:
+      name: golang.org/x/net
+      version: v0.58.0
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
+      the migrate image (Dockerfile target migrate): HTTP/2 client code in golang.org/x/net/http2:
+      the transport accepts malformed framing-related headers, a risk "when acting as a reverse
+      proxy". Atlas's only HTTP client call is its release check, which
+      ATLAS_NO_UPDATE_NOTIFIER=true in the Dockerfile turns off, with ATLAS_NO_ANON_TELEMETRY=true
+      beside it. With both set its one connection is the database's, plaintext postgres:
+      scripts/atlas-execute-path.sh, run by image-scan on every change and daily, fails on any
+      other. Removing either ENV line voids this. govulncheck v1.8.0 -mode binary finds the
+      advisory's symbols, which it cannot tell reachable. TDD-organization-control-001 §The Migrate
+      Image and Its Exceptions.
+  - vulnerability: GO-2026-6611
+    package:
+      name: golang.org/x/net
+      version: v0.58.0
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
+      the migrate image (Dockerfile target migrate): HTTP/2 client and server code in
+      golang.org/x/net/http2: "A malicious HTTP/2 peer can cause excessive CPU consumption in the
+      client or server". Atlas never listens. It runs once, as `atlas migrate apply --env local`
+      from deploy/dev/migrate.sh, and scripts/atlas-execute-path.sh, run by image-scan on every
+      change and daily, traces it and finds no listen(), no accept() and no inet bind(). Atlas's
+      only HTTP client call is its release check, which ATLAS_NO_UPDATE_NOTIFIER=true in the
+      Dockerfile turns off, with ATLAS_NO_ANON_TELEMETRY=true beside it. With both set its one
+      connection is the database's, plaintext postgres: scripts/atlas-execute-path.sh, run by
+      image-scan on every change and daily, fails on any other. Removing either ENV line voids this.
+      govulncheck v1.8.0 -mode binary finds the advisory's symbols, which it cannot tell reachable.
+      TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: GO-2026-6612
+    package:
+      name: golang.org/x/net
+      version: v0.58.0
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-10:
+      the migrate image (Dockerfile target migrate): HTTP/2 server code in golang.org/x/net/http2:
+      "The HTTP/2 server can refund connection-level flow control twice". Atlas never listens. It
+      runs once, as `atlas migrate apply --env local` from deploy/dev/migrate.sh, and
+      scripts/atlas-execute-path.sh, run by image-scan on every change and daily, traces it and
+      finds no listen(), no accept() and no inet bind(). govulncheck v1.8.0 -mode binary finds the
+      advisory's symbols, which it cannot tell reachable. TDD-organization-control-001 §The Migrate
+      Image and Its Exceptions.
   - vulnerability: GHSA-2v4p-qf9q-27wj
     package:
       name: google.golang.org/grpc
+      version: v1.83.1
+      type: go-module
+      location: /usr/local/bin/atlas
     reason: >-
-      review-by 2026-11-06: in the atlas binary of the migrate image (arigaio/atlas 1.3.3, the latest
-      release, embeds grpc 1.83.1). The advisory is a panic in servers built with xds.NewGRPCServer;
-      atlas runs here as a one-shot CLI with no listener. Waits for an atlas release with grpc >= 1.83.2.
+      review-by 2026-12-09: not_affected/vulnerable_code_not_in_execute_path: detected 2026-10-07:
+      the migrate image (Dockerfile target migrate): gRPC server code (GO-2026-6443): "servers
+      configured with xDS routing can panic". Atlas never listens. It runs once, as `atlas migrate
+      apply --env local` from deploy/dev/migrate.sh, and scripts/atlas-execute-path.sh, run by
+      image-scan on every change and daily, traces it and finds no listen(), no accept() and no inet
+      bind(). govulncheck v1.8.0 -mode binary finds internal/transport.http2Server.HandleStreams and
+      internal/xds/server.RouteAndProcess, which it cannot tell reachable.
+      TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  # The Control Database, which runs the official image without building it.
   - vulnerability: CVE-2026-85091
     package:
       name: zlib
+      version: 1.3.2-r0
+      type: apk
+      location: /lib/apk/db/installed
     reason: >-
-      review-by 2026-10-21: in postgres:17.11-alpine, the database image and the migrate image's base.
-      Alpine ships the fix as zlib 1.3.2-r1, and the official image has not been rebuilt with it: on
-      2026-10-07 the tag still resolves to the pinned digest. Waits for that rebuild, then the pin moves.
+      review-by 2026-11-16: affected: detected 2026-10-07: postgres:17.11-alpine
+      (postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24), the
+      Control Database in deploy/dev/compose.yaml: action: wait for the Docker Official Image
+      rebuild that carries zlib 1.3.2-r1, expected with PostgreSQL 17.12, scheduled for 2026-11-12,
+      then move the pin in compose and in the migrate image's base. Alpine 3.24 ships the fix; on
+      2026-10-10 the tag still resolved to the pinned digest. BOD 26-04: not publicly exposed, not
+      in the KEV, and in CISA's Vulnrichment Automatable no, Technical Impact total, so fix on
+      system upgrade, the next pin move, within 90 days of detection. Not asked of the upstream: the
+      official images rebuild on their maintainers' schedule. The migrate image upgrades zlib in its
+      Dockerfile (rule 10) and the service image has no package database, so this rule matches the
+      Control Database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.

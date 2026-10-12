@@ -142,6 +142,38 @@ jobs:
             sleep 2
           done
 
+      # No image this stack names without a digest is pulled from a registry (TDD-organization-control-001
+      # §The Migrate Image and Its Exceptions). Compose pulls a service's image name before building
+      # unless pull_policy says otherwise, and a published image of that name would run instead. Every
+      # undigested name must be pull_policy build where the service builds it and never elsewhere, and
+      # the migrate image in use must carry no registry digest: it was built here, not pulled.
+      - name: no image named here is pulled from a registry
+        working-directory: deploy/dev
+        run: |
+          docker compose --profile '*' config --format json > "$RUNNER_TEMP/compose-config.json"
+          python3 - "$RUNNER_TEMP/compose-config.json" <<'PY'
+          import json, sys
+          services = json.load(open(sys.argv[1]))["services"]
+          bad = []
+          for name, service in sorted(services.items()):
+              image = service.get("image")
+              if image and "@sha256:" not in image:
+                  want = "build" if "build" in service else "never"
+                  if service.get("pull_policy") != want:
+                      bad.append(f"{name}: {image} has pull_policy {service.get('pull_policy')!r}, want {want!r}")
+                  else:
+                      print(f"{name}: {image}, pull_policy {want}")
+          for message in bad:
+              print(f"::error::{message}")
+          sys.exit(1 if bad else 0)
+          PY
+          digests="$(docker image inspect -f '{{len .RepoDigests}}' scnehaux-organization-control-dev-migrate)"
+          if [ "$digests" != 0 ]; then
+            echo "::error::scnehaux-organization-control-dev-migrate carries a registry digest: it was pulled, not built"
+            exit 1
+          fi
+          echo "scnehaux-organization-control-dev-migrate has no registry digest: built here"
+
       - name: wire the two services (README §Wiring to other services, steps 1 to 6)
         run: |
           # The caller's two secrets alone: the rest of identity-control's .env would override this

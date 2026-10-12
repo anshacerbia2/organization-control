@@ -1,6 +1,6 @@
 name: image-scan
 
-# STD-GLB-009 1.4.0 §Container Images: every image this repository ships or runs is scanned on every
+# STD-GLB-009 §Container Images: every image this repository ships or runs is scanned on every
 # change and daily, because a new advisory changes an unchanged image's findings. The gate fails on
 # a High or Critical vulnerability with a fix; scripts/image-scan.sh says how.
 
@@ -30,3 +30,14 @@ jobs:
 
       - name: scan
         run: scripts/image-scan.sh scan/organization-control-service scan/organization-control-migrate
+
+      # The not_affected statements for /usr/local/bin/atlas in .grype.yaml rest on how the migrate
+      # image runs Atlas (STD-GLB-009 1.8.0 §Container Images rule 7). This runs the whole pipeline
+      # against the pinned Control Database with Atlas traced, and fails if Atlas listens or connects to
+      # anything but the database (TDD-organization-control-001 §The Migrate Image and Its Exceptions).
+      - name: atlas in the migrate image listens on nothing and calls only the database
+        if: ${{ !cancelled() }}
+        run: >-
+          scripts/atlas-execute-path.sh scan/organization-control-migrate ORGANIZATION_RUNTIME_PASSWORD
+          ORGANIZATION_PROVIDER_PASSWORD ORGANIZATION_DISPATCH_PASSWORD ORGANIZATION_RESOLUTION_PASSWORD
+          ORGANIZATION_CONSUMER_PASSWORD

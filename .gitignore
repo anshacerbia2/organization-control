@@ -41,3 +41,7 @@ deploy/dev/.env
 deploy/dev/keys/
 # A server's own Compose overrides (deploy/dev/compose.override.example.yaml is the template).
 deploy/dev/compose.override.yaml
+
+# scripts/image-scan.sh and scripts/atlas-execute-path.sh work here outside CI: the vulnerability
+# database, saved images and traces.
+.image-scan/
