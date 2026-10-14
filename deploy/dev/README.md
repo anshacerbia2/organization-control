@@ -119,7 +119,7 @@ procedure that was tested:
 ```sh
 export IDENTITY_CALLER_PASSWORD=...            # the bootstrap operator's, from identity-control's .env
 export IDENTITY_CALLER_KEY_FILE=...            # identity-control-caller.pem, from the same .env
-export IDENTITY_OPERATOR_TOTP_FILE=...         # the operator's TOTP file, if dev-token.ps1 keeps one
+export KEYCLOAK_ISSUER=...                     # the kernel's issuer, as in this stack's .env
 pwsh ./scripts/dev-wire.ps1 -IdentityRepo /srv/identity-control -KernelDeployDir /srv/identity-kernel/deploy/dev \
     -Operator "<you>" -State ~/scnehaux-wiring/state.json
 export KC_BOOTSTRAP_ADMIN_PASSWORD=...         # the kernel's console administrator, for step 7's relink
@@ -129,7 +129,12 @@ pwsh ./scripts/dev-wiring-proof.ps1 -IdentityRepo /srv/identity-control -KernelD
 ```
 
 Export those three alone. Sourcing identity-control's `.env` would also export its `POSTGRES_PASSWORD`,
-which overrides this stack's when the script runs `docker compose` here. The state file's directory
+which overrides this stack's when the script runs `docker compose` here. identity-control's
+`dev-token.ps1` derives the rest (its `deploy/dev/README.md`, §Where the scripts call): the kernel's
+origin from `KEYCLOAK_ISSUER`, identity-control's API from `IDENTITY_CONTROL_PORT` (8082 when unset),
+and the operator's TOTP file from `deploy/dev/keys/operator-totp.json` in the identity-control
+checkout once it exists. `KC_BASE_URL`, `IDENTITY_API_URL` and `IDENTITY_OPERATOR_TOTP_FILE` still
+override them. The state file's directory
 receives the operator caller's private key, so keep it outside every directory a container mounts.
 The steps below say what each part does.
 

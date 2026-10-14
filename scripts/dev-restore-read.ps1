@@ -29,7 +29,14 @@ $run = [Guid]::NewGuid().ToString("N").Substring(0, 8)
 
 Add-Type -AssemblyName System.Net.Http
 . (Join-Path $IdentityRepo "scripts/dev-token.ps1")
-$operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+# identity-control's dev-env.ps1, loaded by dev-token.ps1, derives the operator's TOTP file and its API
+# from its own checkout and KEYCLOAK_ISSUER/IDENTITY_CONTROL_PORT; an older checkout without it falls
+# back to the variables alone.
+if (Get-Command Get-DevOperatorTotp -ErrorAction SilentlyContinue) {
+    $operatorTotp = Get-DevOperatorTotp
+} else {
+    $operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+}
 $token = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
     -ClientId $s.caller_client_id -KeyFile $s.caller_key_file @operatorTotp
 $client = New-Object System.Net.Http.HttpClient

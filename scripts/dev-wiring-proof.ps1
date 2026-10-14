@@ -55,7 +55,15 @@ $run = [Guid]::NewGuid().ToString("N").Substring(0, 8)
 
 Add-Type -AssemblyName System.Net.Http
 . (Join-Path $IdentityRepo "scripts/dev-token.ps1")
-$operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+# identity-control's dev-env.ps1, loaded by dev-token.ps1, derives the operator's TOTP file and its API
+# from its own checkout and KEYCLOAK_ISSUER/IDENTITY_CONTROL_PORT; an older checkout without it falls
+# back to the variables alone.
+if (Get-Command Get-DevOperatorTotp -ErrorAction SilentlyContinue) {
+    $operatorTotp = Get-DevOperatorTotp
+} else {
+    $operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+}
+if (Get-Command Get-DevApiUrl -ErrorAction SilentlyContinue) { $identityApi = Get-DevApiUrl }
 $client = New-Object System.Net.Http.HttpClient
 
 # A token naming organization-control-api lives 240 seconds (L0), and steps 4 to 6 take longer, so
