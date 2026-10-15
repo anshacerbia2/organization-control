@@ -234,6 +234,7 @@ misconfigured process start and fail later.
 | `ORGANIZATION_DISPATCH_DATABASE_URL` | with targets | Connects as `organization_dispatch_app` → `organization_dispatch_rt` |
 | `ORGANIZATION_WORKLOAD_CLIENT_ID`, `ORGANIZATION_WORKLOAD_KEY_FILE`, `ORGANIZATION_WORKLOAD_TOKEN_URL` | with targets | This service's workload client, its RSA key (at least 3072 bits), and the kernel token endpoint. Deliveries carry its access token, never a shared secret |
 | `ORGANIZATION_DELIVERY_TIMEOUT`, `ORGANIZATION_DELIVERY_RETRY_INTERVAL` | no | `5s` and `1m`: one publication's bound, and how long a target waits before checking its registration again |
+| `ORGANIZATION_DELIVERY_INTERVAL`, `ORGANIZATION_DELIVERY_IDLE_INTERVAL` | no | `500ms` and `1s`: each dispatcher's poll period and its backoff ceiling after empty polls. The idle interval is at least the interval and at most `1s`, the commit-to-claim budget (TDD-002 §Enforcement Budget); anything else is refused at startup |
 | `ORGANIZATION_LISTEN_ADDRESS` | no | Defaults to `:8080` |
 | `ORGANIZATION_TOKEN_MAX_SKEW` | no | 30s; capped at 60s by STD-IAM-002 §3.5 |
 | `ORGANIZATION_TOKEN_TYPE` | no | `report` (default) accepts a token whose header `typ` is not `at+jwt` and logs it with its `azp`; `enforce` refuses it with 401 (STD-IAM-002 §3.5 step 5, RFC 9068 §4). The dev issuer types its tokens `at+jwt` |
@@ -474,6 +475,27 @@ make token ROLE=stranger       # a person holding no provider grant, refused 403
 A provider token names the dev provider, whose grant `scripts/ci-fixture.sql` seeds. On a database
 without the fixture, run `organization-control bootstrap-provider` for a Principal and ask the issuer
 for `role=provider&principal_id=<it>`.
+
+**This service's workload token, by client credentials.** The issuer also serves
+`POST /token` with `grant_type=client_credentials` and a signed client assertion (RFC 6749 §4.4,
+RFC 7523), which is what `clientauth` sends when `ORGANIZATION_DELIVERY_TARGETS` names a consumer.
+It admits one client, configured in the issuer's environment:
+
+| Variable | Purpose |
+| :-- | :-- |
+| `ORGANIZATION_DEVISSUER_CLIENT_ID` | The client it admits, equal to `ORGANIZATION_WORKLOAD_CLIENT_ID` |
+| `ORGANIZATION_DEVISSUER_CLIENT_PUBLIC_KEY_FILE` | The public half of `ORGANIZATION_WORKLOAD_KEY_FILE`, PEM, RSA of at least 3072 bits |
+| `ORGANIZATION_DEVISSUER_CLIENT_PRINCIPAL_ID` | The workload `principal_id` the token names. Default `55555555-5555-4555-8555-55555555550b`; foundation-reference's `REFERENCE_DELIVERY_PRINCIPAL_ID` must equal it |
+
+It refuses an assertion that is not signed by that key, does not name the client as issuer and
+subject, does not name `http://127.0.0.1:8098` (or its token URL) as audience, has expired, or was
+presented before. The token is for `foundation-reference` with scope
+`foundation-reference.deliver`: the issuer has no other delivery target (ROADMAP item 44). With
+the issuer unconfigured, `POST /token` answers `401 invalid_client`. Set
+`ORGANIZATION_WORKLOAD_TOKEN_URL=http://127.0.0.1:8098/token` and
+`ORGANIZATION_DELIVERY_TARGETS=foundation-reference=http://127.0.0.1:8096/v1/deliveries` to deliver
+to a foundation-reference running beside this service, which is how its `make` targets and its
+system proof deliver.
 
 `make api` sends `X-Administrative-Reason` because every provider-scoped call writes a row to
 `audit.privileged_access` and the service answers 400 rather than recording an unexplained one.

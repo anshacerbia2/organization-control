@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 2.5.0
+  version: 2.6.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-09-17
-  last_reviewed: 2026-10-09
+  last_reviewed: 2026-10-15
   parent_sad: SAD-004
 ---
 
@@ -106,8 +106,27 @@ secret authenticates the delivery (`STD-IAM-001 §3`).
   kernel's token endpoint for the workload token. The `net/http` denial in `arch.json` and
   `internal/httpapi`'s outbound walk still hold for every package of this repository: the clients
   are foundation-platform's, built in `internal/delivery`.
-- **foundation-reference's dispatcher** still runs in `foundation-reference`, for the reference
-  consumer and its system proof, until it moves here (`ADR-GLB-018` Alternative G).
+- **Every consumer is delivered from here** (2.6.0). foundation-reference's own dispatcher
+  (`cmd/foundation-reference-dispatcher`, with a static bearer token and its own copy of the
+  publisher) is deleted, as `ADR-GLB-018` Alternative G anticipated and its 2026-10-15 amendment
+  records. Its system proof starts this service with `foundation-reference` as a delivery target,
+  and its acceptance API admits this service's workload `principal_id` alone
+  (`REFERENCE_DELIVERY_PRINCIPAL_ID`), as identity-control's does.
+- **The poll interval is part of the enforcement budget.** `ORGANIZATION_DELIVERY_INTERVAL` and
+  `ORGANIZATION_DELIVERY_IDLE_INTERVAL` are passed to foundation-platform's dispatcher as its
+  `Interval` and `IdleInterval`. After a run of empty polls the dispatcher waits up to the idle
+  interval before it polls again, so a security event committed in that wait is claimed up to one
+  idle interval later. TDD-organization-control-002 §Enforcement Budget gives outbox commit to
+  dispatch claim 1 s, so the idle interval defaults to `1s` and startup refuses more.
+  foundation-platform's own defaults (`500ms`, `5s`) are unchanged; this service does not rely on
+  them.
+- **One workload token serves every target (open).** This process obtains one access token for
+  its workload client and presents it to every consumer's acceptance API, so the token's audience
+  has to cover each of them. A token leaked by one consumer is then also accepted by another.
+  `ADR-GLB-018 §5.4` configures each dispatcher with its consumer's credential. A token per
+  target, requested for that consumer's audience with an RFC 8707 resource indicator, is the
+  likely direction. It is not built: `clientauth` sends no `resource` parameter, and the kernel's
+  audience mapping would change with it (ROADMAP item 44).
 
 Security events travel in the priority lane. The dispatcher dead-letters one only when the
 consumer refuses it permanently (`400`, `409`, `422`), which makes it poison. An unreachable
@@ -130,7 +149,7 @@ repository applies that schema and owns the grants on it, which is why the privi
 | :-- | :-- |
 | `outbox.Dispatcher` (foundation-platform) | Claims, delivers, decides retry, release, or dead-letter, and writes the delivery receipt. Verifies its database contract before starting any worker and refuses to start when it is unmet. |
 | `internal/delivery` | Runs one dispatcher per configured consumer in this process, once that consumer is registered, with `outbox/httpdelivery` as its publisher and a `clientauth` workload token as its credential. |
-| `dispatch.HTTPPublisher` (foundation-reference) | Delivers one envelope. Classifies `400`/`409`/`422` as poison and everything else as unavailable. Takes the evidence class from the consumer's reply rather than from its own judgement. |
+| `outbox/httpdelivery.Publisher` (foundation-platform) | Delivers one envelope with this service's workload token, and drops the token on a `401`. Classifies `400`/`409`/`422` as poison and everything else as unavailable. Takes the evidence class from the consumer's reply rather than from its own judgement. |
 | Delivery intake (foundation-reference) | Applies the event, then emits the application receipt on exactly the paths where the assertion holds. |
 | `projection.FrontierReader` | Reports publication facts and unresolved security debt. Computes no verdict. |
 | `projection.Registry` | Registers projection consumers with their subscriptions, and retires them. Retiring abandons the deliveries a consumer was still owed (`ADR-GLB-018 §5.5`). |
@@ -362,7 +381,8 @@ included, for no property gained.
 
 The `412` for missing evidence names the dead letter's consumer and lists the receipts it did find as
 `consumer (evidence)`. A receipt under another consumer name therefore reads as a
-`DISPATCH_CONSUMER_NAME` mismatch rather than as an absence, and a `transport_accepted` receipt
+delivery target whose name disagrees with the registration (`ORGANIZATION_DELIVERY_TARGETS`)
+rather than as an absence, and a `transport_accepted` receipt
 reads as a delivery that was never confirmed applied.
 
 `X-Application-Receipt: applied` is returned by the delivery intake, and it is the only thing
@@ -558,11 +578,10 @@ identity has no debt, no applied position, and nothing inherited.
 1. retire the consumer:           POST /v1/projections/consumers/{old}/retire
                                   (its subscription is retired and what it was owed abandoned)
 2. register the new identity:     POST /v1/projections/consumers        {consumer_id: new, event_types, ...}
-3. point delivery at it:          for a consumer this service delivers to, its entry in
-                                  ORGANIZATION_DELIVERY_TARGETS (new=https://acceptance-url),
-                                  then restart; for one foundation-reference's dispatcher
-                                  delivers to, DISPATCH_CONSUMER_NAME and
-                                  REFERENCE_CONSUMER_NAME. Each name must match the
+3. point delivery at it:          its entry in ORGANIZATION_DELIVERY_TARGETS
+                                  (new=https://acceptance-url), then restart this service,
+                                  and the consumer's own name (REFERENCE_CONSUMER_NAME for
+                                  foundation-reference). Each name must match the
                                   registration (§Configuration)
 4. bootstrap from a snapshot:     POST /v1/projections/consumers/{new}/bootstrap, then the
                                   snapshot pages; the consumer rebuilds its projection empty,
@@ -669,14 +688,23 @@ to declare authority delivered without evidence, the one thing this design refus
 | `ORGANIZATION_DISPATCH_DATABASE_URL` | Required with targets. A login role inheriting `organization_dispatch_rt`, as its own pool. Refused when it equals another pool's DSN. |
 | `ORGANIZATION_WORKLOAD_CLIENT_ID`, `ORGANIZATION_WORKLOAD_KEY_FILE`, `ORGANIZATION_WORKLOAD_TOKEN_URL` | Required with targets. This service's workload client in the kernel, its private key file (RSA, at least 3072 bits), and the token endpoint at the address this process reaches. The assertion's audience is `ORGANIZATION_TOKEN_ISSUER`. |
 | `ORGANIZATION_DELIVERY_TIMEOUT`, `ORGANIZATION_DELIVERY_RETRY_INTERVAL` | One publication's bound (default `5s`), and how long a target waits before checking its registration again or restarting its dispatcher (default `1m`). |
+| `ORGANIZATION_DELIVERY_INTERVAL`, `ORGANIZATION_DELIVERY_IDLE_INTERVAL` | Each dispatcher's poll period (default `500ms`) and the ceiling of its backoff after empty polls (default `1s`), passed to foundation-platform's dispatcher. The idle interval is at least the interval and at most `1s`, the commit-to-claim budget of TDD-organization-control-002 §Enforcement Budget; startup refuses anything else (§Technical Context). |
 | `ORGANIZATION_RESOLUTION_DATABASE_URL` | Required, with no fallback. The credential of a login role that inherits `organization_resolution_rt`, opened as its own pool of two connections. Refused at startup when it equals the provider or tenant DSN: a resolution credential shared with another pool would give that pool the power to close incidents. |
-| `DISPATCH_CONSUMER_NAME` (foundation-reference) | The consumer's name, not its endpoint. Each consumer runs its own dispatcher under its own name, and that dispatcher claims only the deliveries owed to that name. Delivery receipts are keyed by it, and the resolution predicate asks whether a specific consumer holds a specific event. An endpoint cannot answer that, because an endpoint moves and the identity does not. The dispatch role may read `consumer_id` and `retired_at` of `projection.consumer`, so the dispatcher can refuse to start when this name is not an active registered consumer. Without that check, a mismatch produced receipts no resolution reads, found only when an incident could not be closed. |
-| `REFERENCE_CONSUMER_NAME` (foundation-reference) | The consumer's own identity for its inbox guard. It must equal the above and the name registered with this service. |
+| `REFERENCE_CONSUMER_NAME` (foundation-reference) | The consumer's own identity for its inbox guard. It must equal its name in `ORGANIZATION_DELIVERY_TARGETS` and the name registered with this service. |
 
-Nothing validates that the three names agree. They are configured separately, and the
-dispatcher holds no provider credential with which to check. A mismatch produces receipts no
-resolution reads, which is why the resolver's refusal names what it found rather than reporting
-an absence of evidence.
+A target's name, not its endpoint, keys every delivery: its dispatcher claims only the deliveries
+owed to that name, receipts are keyed by it, and the resolution predicate asks whether a specific
+consumer holds a specific event. An endpoint cannot answer that, because an endpoint moves and the
+identity does not. The dispatch role reads `consumer_id` and `retired_at` of `projection.consumer`,
+so a target whose name is not an active registered consumer runs no dispatcher and waits
+(§Technical Context). The consumer's own name is configured in the consumer and nothing here checks
+it. A mismatch there is a consumer whose inbox records events under another name, which the
+resolver does not read. That is why the resolver's refusal names what it found rather than
+reporting an absence of evidence.
+
+`DISPATCH_CONSUMER_NAME`, `DISPATCH_DELIVERY_TOKEN`, `DISPATCH_INTERVAL` and
+`DISPATCH_IDLE_INTERVAL` were foundation-reference's dispatcher's settings and are gone with it
+(2.6.0).
 
 ## Testing Strategy
 
@@ -720,6 +748,8 @@ test red, not assumed to.
 | Applied evidence cannot be claimed without the consumer's marker | `foundation-platform/outbox/receipt_integration_test.go`; CI mutation |
 | A dispatcher whose database contract is unmet refuses to start | `foundation-platform/outbox/preflight_integration_test.go` |
 | The in-process dispatcher waits for its consumer's registration, never starts on a failed check, restarts after it stops, and one target's failure stops no other | `internal/delivery/delivery_test.go` |
+| Each dispatcher is built with the configured interval and idle interval, never foundation-platform's defaults; an idle interval above the 1 s commit-to-claim budget, or below the interval, is refused at startup | `internal/delivery/delivery_test.go` `TestTheDispatcherIsBuiltWithTheConfiguredIntervals`; `internal/config/config_test.go` `TestTheDeliveryIntervalsDefaultInsideTheBudget`, `TestADeliveryIntervalOutsideTheBudgetIsRefused` |
+| The dev issuer issues a workload token by client credentials only for an assertion signed by the configured key, naming the client as issuer and subject and the issuer as audience, unexpired and not replayed | `cmd/organization-devissuer/clientcredentials_test.go` (`-tags devissuer`) |
 | A delivery target needs the dispatch credential and the workload client, a malformed target is refused, and a dispatch DSN shared with another pool is refused | `internal/config/config_test.go` |
 | The dispatch role can run the registration check the dispatcher makes | `internal/controldb/dispatch_role_integration_test.go` `TestTheDispatchRoleCanCheckItsOwnRegistration` |
 | A delivery authenticates with the workload token, a 401 drops it, and a delivery is never sent without one | `foundation-platform/outbox/httpdelivery/publisher_test.go` |
@@ -733,7 +763,10 @@ test red, not assumed to.
   principal and an active one. Both are refused while the debt stands. After resolution the
   active one is restored and the revoked one is still refused.
 - **System.** `foundation-reference`'s `TestProofAAcrossTheProcessBoundary` runs this service,
-  the consumer, and the dispatcher as real processes. It dead-letters the revocation itself
+  its dev issuer and the consumer as real processes. This service delivers to the consumer from
+  its in-process dispatcher, through a proxy, with a workload token the dev issuer issues by
+  client credentials against a key the proof generates (2.6.0; until then the proof ran
+  foundation-reference's own dispatcher). It dead-letters the revocation itself
   through a proxy answering `422`, replays and resolves it through this API, and asserts that
   the revoked principal's refusal reason changes from debt to withdrawal. That change is the
   evidence the revocation landed. A test asserting only that both stay refused would pass even
@@ -778,7 +811,10 @@ handler-level tests cover only refusals that must land before the database is re
 | Delivery profile and evidence rules | ADR-GLB-016 §5.4 |
 | Membership authority, revocation and the projection contract | TDD-organization-control-002 |
 | Tenant isolation and the role model the grants extend | TDD-organization-control-001 |
-| No outbound HTTP from this service, which places the dispatcher in foundation-reference | ADR-ORG-001 §5.4 |
+| This service runs every consumer's dispatcher, with foundation-platform's outbound clients; foundation-reference's dispatcher is deleted | ADR-GLB-018 §5.4, Alternative G (amended 2026-10-15); ADR-ORG-001 §5.4 |
+| The commit-to-claim budget the delivery intervals are held to | TDD-organization-control-002 §Enforcement Budget |
+| The dev issuer's client credentials grant and assertion checks | RFC 6749 §4.4, RFC 7523 §2.2 and §3 (ADR-GLB-018 [R12], [R13]) |
+| One workload token for every target, and resource indicators as the likely direction | ADR-GLB-018 §5.4, RFC 8707 §2 ([R14]); ROADMAP item 44 |
 | Migration integrity and schema drift gates | ADR-GLB-004 |
 | Review record of these decisions | `RESPONSE-7` through `RESPONSE-26` in the architecture-description workspace |
 
@@ -787,7 +823,8 @@ handler-level tests cover only refusals that must land before the database is re
 The step-by-step procedure is `docs/runbooks/dead-letter-resolution.md` (2.4.0; from 2.5.0 it reads
 the incidents through §Listing a consumer's dead letters rather than SQL). §Rebuilding a
 consumer step 3 names `ORGANIZATION_DELIVERY_TARGETS` from 2.4.0: since item 25 of the ROADMAP
-backlog, this service delivers to its consumers itself.
+backlog, this service delivers to its consumers itself, and from 2.6.0 to every consumer
+(item 43).
 
 While an authority-bearing dead letter is unresolved, every projection-backed check refuses.
 That is the designed behaviour and not an incident in itself: the alternative is serving
