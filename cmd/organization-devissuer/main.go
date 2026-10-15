@@ -30,6 +30,9 @@
 //	Terminal 2:  make run
 //	Terminal 3:  make token  &&  make api P=/v1/tenants/<id>
 //
+// POST /token serves this service's own workload token by the client credentials grant, for the
+// dispatchers that deliver to foundation-reference (clientcredentials.go).
+//
 // The service's environment lives in .env, loaded by the Makefile. This tool no longer prints an
 // environment block: printing one meant it had to be typed or pasted, in whichever shell syntax the
 // block happened to be written in.
@@ -65,9 +68,10 @@ const (
 	// audience is this service's resource registration, never a client (STD-IAM-002 §3.1).
 	audience = "organization-control-api"
 
-	// referenceAudience is foundation-reference's own registered identifier. A delivery token is
-	// audience-bound to the consumer, not to this service: a token the consumer accepts must not
-	// also open this service's routes, or one leaked credential would reach both.
+	// referenceAudience is foundation-reference's own registered identifier. A delivery token, the
+	// client credentials grant's, is audience-bound to the consumer, not to this service: a token the
+	// consumer accepts must not also open this service's routes, or one leaked credential would
+	// reach both.
 	referenceAudience = "foundation-reference"
 
 	deliveryScope = "foundation-reference.deliver"
@@ -113,7 +117,17 @@ func main() {
 	}
 	kid := thumbprint(&key.PublicKey)
 
+	// Before the listener, so a half-configured client stops the issuer with the reason rather than
+	// answering every delivery's token request 401.
+	client, err := loadWorkloadClient()
+	if err != nil {
+		log.Fatalf("workload client: %v", err)
+	}
+
 	mux := http.NewServeMux()
+	mux.Handle("POST /token", newClientCredentials(client, func(claims map[string]any) (string, error) {
+		return sign(key, kid, claims)
+	}))
 
 	// The JWKS document, in the shape verify.NewJWKS parses: RSA public keys by identifier, with
 	// the modulus and exponent base64url-encoded without padding.
@@ -161,12 +175,12 @@ func main() {
 			subject = minted.String()
 		}
 
-		// The audience depends on the role: a delivery or operate token is for the consumer, and
-		// everything else is for this service. Minting one token good for both would defeat the
-		// separation the two audiences exist to create.
+		// The audience depends on the role: an operate token is for the consumer, and everything
+		// else is for this service. Minting one token good for both would defeat the separation the
+		// two audiences exist to create. A delivery token is not minted here: it is this service's
+		// workload token, issued by POST /token against the client's key.
 		tokenAudience := audience
-		switch role {
-		case "delivery", "operate":
+		if role == "operate" {
 			tokenAudience = referenceAudience
 		}
 
@@ -237,16 +251,12 @@ func main() {
 			claims["principal_id"] = principal
 			claims["subject_type"] = "workload"
 			claims["workload_owner"] = devWorkloadOwner
-		case "delivery":
-			// For the dispatcher. Audience-bound to the consumer, and carrying only the scope that
-			// admits a delivery: this token cannot invoke an operation.
-			claims["scope"] = deliveryScope
 		case "operate":
 			// For a caller of the consumer's protected operations. Cannot deliver.
 			claims["scope"] = operateScope
 		default:
-			http.Error(w, "role must be provider, tenant, stranger, consumer, delivery, or operate",
-				http.StatusBadRequest)
+			http.Error(w, "role must be provider, tenant, stranger, consumer, or operate; a delivery token "+
+				"is this service's workload token, from POST /token by client credentials", http.StatusBadRequest)
 			return
 		}
 
@@ -267,7 +277,7 @@ func main() {
 			"nothing to start -- just fetch a token from http://%s/token?role=provider", listen, err, listen)
 	}
 
-	banner(kid)
+	banner(kid, client)
 
 	server := &http.Server{
 		Handler:           mux,
@@ -330,7 +340,7 @@ func thumbprint(pub *rsa.PublicKey) string {
 // nobody types it; and the PowerShell was unusable in cmder, which is cmd.exe, so the reader
 // got "The filename, directory name, or volume label syntax is incorrect" -- a message about
 // paths for what was a shell mismatch, which sends them to look at the DSN.
-func banner(kid string) {
+func banner(kid string, client *workloadClient) {
 	out := os.Stdout
 	line := strings.Repeat("=", 78)
 
@@ -344,8 +354,13 @@ func banner(kid string) {
 	fmt.Fprint(out, "    make api M=POST P=/v1/organizations B=body.json\n\n")
 	fmt.Fprintf(out, "Tokens: http://%s/token?role=provider   (also tenant, stranger, consumer)\n", listen)
 	fmt.Fprintf(out, "        role=consumer   aud=%s, for the authoritative fresh check\n", audience)
-	fmt.Fprintf(out, "        role=delivery   aud=%s, for the dispatcher\n", referenceAudience)
 	fmt.Fprintf(out, "        role=operate    aud=%s, for a caller of its operations\n", referenceAudience)
+	if client != nil {
+		fmt.Fprintf(out, "POST http://%s/token  client_credentials for %s: aud=%s, principal_id %s\n",
+			listen, client.id, referenceAudience, client.principal)
+	} else {
+		fmt.Fprint(out, "POST /token  no workload client configured (ORGANIZATION_DEVISSUER_CLIENT_ID)\n")
+	}
 	fmt.Fprint(out, "The walkthrough -- provisioning, idempotent retries, and the refusals worth\n")
 	fmt.Fprint(out, "seeing for yourself -- is README.md, \"Driving the service by hand\".\n")
 	fmt.Fprintf(out, "%s\n", line)

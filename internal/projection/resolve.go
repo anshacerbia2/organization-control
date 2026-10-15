@@ -58,10 +58,10 @@ var (
 	// ErrNoAppliedEvidence refuses a closure that nothing justifies.
 	//
 	// The message names what was looked for and what was found, because the commonest cause is
-	// not a missing delivery. DISPATCH_CONSUMER_NAME and the registered consumer are configured
-	// in different repositories with nothing linking them, so a mismatch of one character
-	// produces receipts under a name no resolution reads — and a refusal saying only "no
-	// evidence" sends an operator to look at the delivery path, which is working.
+	// not a missing delivery. A delivery target's name in ORGANIZATION_DELIVERY_TARGETS and the
+	// registered consumer are configured apart, so a mismatch of one character produces receipts
+	// under a name no resolution reads — and a refusal saying only "no evidence" sends an
+	// operator to look at the delivery path, which is working.
 	ErrNoAppliedEvidence = errors.New("projection: no applied-evidence receipt justifies closing this dead letter")
 
 	// ErrNotSuperseded refuses a SUPERSEDED closure that no newer applied event justifies.
@@ -232,7 +232,7 @@ func replayedEvidence(ctx context.Context, tx db.Tx, eventID id.UUID, consumer s
 		}
 		return "", "", fmt.Errorf("%w: the dead letter's consumer is %q and %s carries receipts from %s; "+
 			"a receipt under another name resolves nothing, and the commonest cause is "+
-			"DISPATCH_CONSUMER_NAME disagreeing with the registered consumer",
+			"the delivery target's name in ORGANIZATION_DELIVERY_TARGETS disagreeing with the registered consumer",
 			ErrNoAppliedEvidence, consumer, eventID, others)
 	}
 
