@@ -94,7 +94,7 @@ function OperatorGrant($report) {
 }
 
 function Logs([string] $dir, [string] $service, [string] $since) {
-    $arguments = @("compose", "--project-directory", $dir, "-f", (Join-Path $dir "compose.yaml"), "logs", "--no-color")
+    $arguments = @("compose", "--project-directory", $dir, "logs", "--no-color")
     if ($since) { $arguments += @("--since", $since) }
     return (& docker @arguments $service 2>&1) -join "`n"
 }
@@ -447,7 +447,7 @@ try {
 Write-Host ""
 Write-Host "7. an Organization outage: stale, and the emergency grant still honored"
 $stoppedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-& docker compose --project-directory $organizationDeploy -f (Join-Path $organizationDeploy "compose.yaml") stop organization-control | Out-Null
+& docker compose --project-directory $organizationDeploy stop organization-control | Out-Null
 try {
     $null = Wait-For "identity-control logs the provider projection stale" 120 {
         (Logs $identityDeploy "identity-control" $stoppedAt) -match "the provider projection is stale"
@@ -456,7 +456,7 @@ try {
     Expect "the emergency grant still authorizes" $r.code 200
 } finally {
     $startedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-    & docker compose --project-directory $organizationDeploy -f (Join-Path $organizationDeploy "compose.yaml") start organization-control | Out-Null
+    & docker compose --project-directory $organizationDeploy start organization-control | Out-Null
 }
 $null = Wait-For "started again, the projection reads fresh" 90 {
     (Logs $identityDeploy "identity-control" $startedAt) -match "the provider projection is fresh"
