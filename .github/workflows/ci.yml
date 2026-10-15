@@ -117,6 +117,14 @@ jobs:
       - name: build
         run: go build ./...
 
+      # The dev issuer is behind its build tag, so the three steps above never compile it. Its client
+      # credentials grant is what foundation-reference's system proof obtains this service's
+      # delivery token from, and its refusals (RFC 7523 §3) are tested here, under the tag.
+      - name: the dev issuer, under its build tag
+        run: |
+          go vet -tags devissuer ./cmd/organization-devissuer
+          go test -tags devissuer -race -count=1 ./cmd/organization-devissuer
+
       # Integrity of the migration directory. atlas.sum is a checksum over every file, so this
       # fails when a committed migration was edited after generation — which is how a reviewed
       # plan and an applied plan quietly stop being the same thing.

@@ -571,6 +571,7 @@ func run() error {
 			_ = delivery.Run(ctx, delivery.Config{
 				Targets: deliveryTargets, Pool: dispatchConns, Tokens: tokens,
 				Timeout: cfg.Delivery.Timeout, RetryInterval: cfg.Delivery.RetryInterval,
+				Interval: cfg.Delivery.Interval, IdleInterval: cfg.Delivery.IdleInterval,
 				Telemetry: telemetry, Logger: logger,
 			})
 		}()
