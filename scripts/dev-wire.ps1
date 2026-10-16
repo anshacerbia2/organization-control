@@ -105,9 +105,10 @@ function Set-EnvLine([string] $file, [string] $key, [string] $value) {
 }
 
 # Invoke-Compose takes the compose arguments as one array: passed loose, "up -d" would bind -d to a
-# parameter of this function.
+# parameter of this function. No -f: the project directory alone reads compose.yaml and the host's
+# compose.override.yaml, whose subnet pins and ports an `up` without it would drop.
 function Invoke-Compose([string] $Directory, [string[]] $Arguments) {
-    & docker compose --project-directory $Directory -f (Join-Path $Directory "compose.yaml") @Arguments
+    & docker compose --project-directory $Directory @Arguments
     if ($LASTEXITCODE -ne 0) { throw "docker compose $($Arguments -join ' ') in $Directory failed" }
 }
 
@@ -193,7 +194,7 @@ Set-EnvLine (Join-Path $identityDeploy ".env") "IDENTITY_DELIVERY_PRINCIPAL_ID" 
 Set-EnvLine (Join-Path $identityDeploy ".env") "IDENTITY_ORGANIZATION_BASE_URL" "http://organization-control:8080"
 Invoke-Compose $identityDeploy @("up", "-d", "identity-control")
 Wait-Ready $identityApi
-$bootstrap = & docker compose --project-directory $identityDeploy -f (Join-Path $identityDeploy "compose.yaml") run --rm provider-bootstrap 2>&1
+$bootstrap = & docker compose --project-directory $identityDeploy run --rm provider-bootstrap 2>&1
 $bootstrap | ForEach-Object { Write-Host "        $_" }
 if ($LASTEXITCODE -ne 0) { throw "provider-bootstrap failed" }
 if (-not ($bootstrap -match "memberships\s+\d+")) { throw "provider-bootstrap did not bootstrap the Tenant context" }
