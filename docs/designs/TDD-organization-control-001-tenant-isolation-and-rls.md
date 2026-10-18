@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.24.0
+  version: 1.25.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-10
+  last_reviewed: 2026-10-18
   parent_sad: SAD-004
 ---
 
@@ -1782,6 +1782,12 @@ the daily `image-scan` failed on it, on Go advisories in a binary this repositor
 build. This section records what each finding is, the evidence for it, and what keeps that evidence
 true. `.grype.yaml` holds the statements, and each one's reason points here.
 
+1.25.0. On 2026-10-17 the daily scan failed on the image again, on a new advisory in the same binary,
+GO-2026-6617. By then Ariga had published Atlas 1.3.4, built with the fixed toolchain and modules.
+1.25.0 moves the pin to it and removes every statement about the binary (§1.25.0: The Pin Moves).
+The 1.24.0 analysis below stays as the record of why the statements held, and as the method for the
+next advisory in the binary.
+
 **What the image runs.** The entrypoint is `organization-dev-migrate`. It runs `psql`, this repository's
 `organization-migrate`, and Atlas once, as `atlas migrate apply --env local`. Both of that environment's
 URLs are `postgres://` with `sslmode=disable`, and `atlas.hcl` has only `file://` sources: it has no
@@ -1789,8 +1795,8 @@ URLs are `postgres://` with `sslmode=disable`, and `atlas.hcl` has only `file://
 and `maintenance` tasks run `organization-control bootstrap-provider` and
 `organization-migrate -stage=maintenance` on the same image, and neither of them runs Atlas.
 
-**Atlas calls out unless it is told not to.** `/usr/local/bin/atlas` comes from `arigaio/atlas:1.3.3`,
-pinned by digest. On 2026-10-10 that is the newest numbered tag, and the newer `latest` tags are
+**Atlas calls out unless it is told not to.** Until 1.25.0, `/usr/local/bin/atlas` came from
+`arigaio/atlas:1.3.3`, pinned by digest. On 2026-10-10 that is the newest numbered tag, and the newer `latest` tags are
 `v1.3.4-…-canary` builds. Its build information names go1.26.6, `golang.org/x/net` v0.58.0 and
 `google.golang.org/grpc` v1.83.1. Atlas serves nothing. It does make two kinds of outbound call:
 
@@ -1839,8 +1845,10 @@ wherever the image runs: the pipeline, the one-off tasks, CI, and an operator's 
    but the database's address and port. A control run with `ATLAS_NO_UPDATE_NOTIFIER` emptied must
    show the release check, or the trace is blind, and the run fails too.
 
-**Per advisory.** Every finding the gate fails on in the binary is in this table, with GO-2026-6609,
-which govulncheck reports and Grype does not. The side of each comes from the advisory [R13].
+**Per advisory.** Every finding the gate fails on in the 1.3.3 binary is in this table, with
+GO-2026-6609, which govulncheck reports and Grype does not. The side of each comes from the advisory
+[R13]. GO-2026-6617 is the 1.25.0 finding; the pin move made its statement unnecessary, and the row
+gives the statement it would have had.
 
 | Advisory | CVE | Packages in atlas | Side, in the advisory's words | Statement |
 | :-- | :-- | :-- | :-- | :-- |
@@ -1854,6 +1862,7 @@ which govulncheck reports and Grype does not. The side of each comes from the ad
 | GO-2026-6612 | CVE-2026-78663 | stdlib, x/net v0.58.0 | HTTP/2 server: "The HTTP/2 server can refund connection-level flow control twice" | not in execute path: Atlas never listens |
 | GO-2026-6613 | CVE-2026-94439 | stdlib | HTTP/1 server: "When an HTTP server handler sends a 2xx response to an HTTP/1 CONNECT request" | not in execute path: Atlas never listens |
 | GHSA-2v4p-qf9q-27wj (GO-2026-6443) | CVE-2026-84445 | grpc v1.83.1 | gRPC server: "servers configured with xDS routing can panic" | not in execute path: Atlas never listens |
+| GO-2026-6617 (1.25.0) | CVE-2026-97032 | stdlib, x/net v0.58.0 | HTTP/2 server: "A malicious client can repeatedly send a request while changing the header table size to crash the server" | would be not in execute path: Atlas never listens; moot, the pin moved |
 
 Every gated finding in the binary is therefore `not_affected/vulnerable_code_not_in_execute_path`,
 and none is `affected`. A `not_affected` statement has no remediation time, only rule 5's 90-day
@@ -1865,8 +1874,43 @@ them, so Ariga is to be asked for one built with go1.26.9, x/net v0.60.0 and grp
 request is drafted in the pull request that brought 1.24.0, for the owner to file. On 2026-10-10
 even Atlas's canary builds carried go1.26.6 and x/net v0.58.0.
 
+**1.25.0: The Pin Moves.** The scan of 2026-10-17 failed on GO-2026-6617 in the 1.3.3 binary,
+reported in `stdlib` go1.26.6 (fixed 1.26.9) and `golang.org/x/net` v0.58.0 (fixed 0.60.0), High.
+The advisory is "HTTP/2 server crash due to HPACK encoder race in net/http": "the server modifies the
+HPACK encoder from two goroutines without synchronization", and "A malicious client can repeatedly
+send a request while changing the header table size to crash the server" [R19]. It is server code,
+like GO-2026-6603 and GO-2026-6612. `govulncheck` v1.8.0 `-mode binary`, with the database of
+2026-10-08, finds it at the symbol level in the 1.3.3 file, in both modules, among them
+`golang.org/x/net/http2.Server.ServeConn` and `serverConn.processSetting`, so
+`vulnerable_code_not_present` was not open. With the trace above, it would have been
+`not_affected/vulnerable_code_not_in_execute_path`: Atlas never listens.
+
+No statement was needed. Ariga pushed `arigaio/atlas:1.3.4` on 2026-10-14, the newest numbered tag
+on 2026-10-18 [R20]. `go version -m` on its `/atlas` (sha256
+`aec7e73a561889836b5fb7d8ba8cc55969c593e53188048d83cdf087f23bc476`, `atlas version v1.3.4`) names
+go1.26.9, `golang.org/x/net` v0.60.0 and `google.golang.org/grpc` v1.83.2: the fixed version of
+every advisory in the table, and the release the request drafted with 1.24.0 named. Rule 4 says a
+finding in an upstream image "is fixed by moving the pin to a release that fixes it", so 1.25.0:
+
+- pins `arigaio/atlas:1.3.4` by digest, the same distroless flavour as before;
+- removes all thirteen statements about `/usr/local/bin/atlas` from `.grype.yaml`;
+- keeps the two `ENV` lines and `scripts/atlas-execute-path.sh`. Atlas 1.3.4 still holds
+  `ATLAS_NO_UPDATE_NOTIFIER`, `ATLAS_NO_ANON_TELEMETRY` and `vercheck.ariga.io`, and the trace's
+  control run fails if the release check no longer shows. With them, a new advisory in the binary is
+  decided against evidence taken that day.
+
+`govulncheck -mode binary` on the 1.3.4 file finds one advisory, GO-2026-5932, the unmaintained
+`golang.org/x/crypto/openpgp` package, which has no fixed version, so the gate does not fail on it,
+and Grype does not report it. The gate passes on the migrate image with no rule about the binary;
+the zlib rule is the only one left.
+
+identity-control made the same move the same day, in its TDD-001 1.20.0.
+
 **What was rejected.**
 
+- **A `not_affected` statement for GO-2026-6617 on 1.3.3.** The evidence above would support it, but
+  a release with the fix exists. A statement keeps vulnerable code in the image for up to 90 days
+  where a pin move removes it now.
 - **`affected` until an Ariga release.** The trace shows no path to any of this code. An `affected`
   statement would claim a reachable path that the evidence says is absent.
 - **Building Atlas from source with go1.26.9.** Rule 9 asks for a source build in a publicly exposed
@@ -1914,8 +1958,8 @@ in identity-kernel, identity-control and organization-control. The checker fails
 - for `affected`, whose `review-by` is more than 90 days after `detected`, which is rule 8's longest
   time.
 
-Every rule here gives a location. The Go modules name `/usr/local/bin/atlas`. The zlib rule, whose
-type does not require one, names `/lib/apk/db/installed` as well. Whether a statement is true is
+Every rule here gives a location. Until 1.25.0 the Go modules named `/usr/local/bin/atlas`. The
+zlib rule, whose type does not require one, names `/lib/apk/db/installed` as well. Whether a statement is true is
 left to review. Outside CI, the scan's database and image archives go under `./.image-scan`, which
 git ignores, and never under `/tmp`.
 
@@ -1938,10 +1982,11 @@ not pulled.
 
 **Residual risk.**
 
-- The `not_affected` statements rest on how the image runs Atlas. Each of these changes voids them:
-  a change to `migrate.sh`'s Atlas command, to the entrypoint, to `atlas.hcl`'s URLs or sources, or
-  to the two `ENV` lines. `scripts/atlas-execute-path.sh` catches the network side of such a change,
-  and the review of any such change rereads `.grype.yaml`.
+- Since 1.25.0 no statement rests on how the image runs Atlas. The next statement about the binary
+  would, and each of these changes would void it: a change to `migrate.sh`'s Atlas command, to the
+  entrypoint, to `atlas.hcl`'s URLs or sources, or to the two `ENV` lines.
+  `scripts/atlas-execute-path.sh` catches the network side of such a change, and the review of any
+  such change rereads `.grype.yaml`.
 - The trace covers the paths the pipeline takes. A path Atlas would take only on input this image
   never gives it, such as a cloud directory or a login, is not traced. The statements name the
   configuration they hold for.
@@ -1959,6 +2004,8 @@ not pulled.
 | R16 | The PostgreSQL Global Development Group, *Roadmap*, <https://www.postgresql.org/developer/roadmap/>, accessed 2026-10-10: "The PostgreSQL project aims to make at least one minor release every quarter, on a predefined schedule"; "The current schedule for upcoming releases is: November 12th, 2026". |
 | R17 | Docker, *Compose Build Specification*, §Using build and image, <https://docs.docker.com/reference/compose-file/build/>, accessed 2026-10-10: "When Compose is confronted with both a build subsection for a service and an image attribute, it follows the rules defined by the pull_policy attribute. If pull_policy is missing from the service definition, Compose attempts to pull the image first and then builds from source if the image isn't found in the registry or platform cache." |
 | R18 | Docker, *Compose file reference: Services*, `pull_policy`, <https://docs.docker.com/reference/compose-file/services/#pull_policy>, accessed 2026-10-10: "never: Compose doesn't pull the image from a registry and relies on the platform cached image. If there is no cached image, a failure is reported"; "missing: Compose pulls the image only if it's not available in the platform cache. This is the default option if you are not also using the Compose Build Specification"; "build: Compose builds the image. Compose rebuilds the image if it's already present." |
+| R19 | The Go Project, Go vulnerability database entry GO-2026-6617 (CVE-2026-97032, published 2026-10-08), <https://vuln.go.dev/ID/GO-2026-6617.json>, accessed 2026-10-18: "HTTP/2 server crash due to HPACK encoder race in net/http"; "the server modifies the HPACK encoder from two goroutines without synchronization: one uses the encoder to encode a HEADERS frame as part of a response sent to a client and the other modifies the encoder's table size when handling a SETTINGS frame containing SETTINGS_HEADER_TABLE_SIZE that a client sends. A malicious client can repeatedly send a request while changing the header table size to crash the server." Fixed in go1.26.9 and golang.org/x/net v0.60.0. |
+| R20 | Ariga, `arigaio/atlas` on Docker Hub, tag `1.3.4` (pushed 2026-10-14, `sha256:3cd6883d5ec2703741f750fd5f9efed3a61f8e164b9dcea93ab7a7be429a1b5b`), <https://hub.docker.com/r/arigaio/atlas/tags>, accessed 2026-10-18. Its `/atlas` reports `atlas version v1.3.4`, and `go version -m` on it reads `go1.26.9`, `golang.org/x/net v0.60.0` and `google.golang.org/grpc v1.83.2`. |
 
 ## Traceability
 
@@ -1975,6 +2022,7 @@ not pulled.
 | Conforms to | STD-IAM-002 §3.1.1, §3.2, §3.5 — the grant's holder checks its own record; `principal_id` is the persisted identifier |
 | Conforms to | STD-GLB-002 — `FORCE ROW LEVEL SECURITY`, non-owner runtime role, no `SUPERUSER`/`BYPASSRLS`, isolation proven as the runtime role |
 | Conforms to | STD-GLB-009 1.8.0 §Container Images rules 4, 5, 7, 8 and 10 — the migrate image's exceptions as VEX statements, and the zlib upgrade; 1.8.0 lands with scnehaux-architecture #86 (1.24.0, §The Migrate Image and Its Exceptions) |
+| Conforms to | STD-GLB-009 1.8.0 §Container Images rules 1 and 4 — the Atlas pin moves to 1.3.4, which fixes GO-2026-6617 and every earlier advisory in the binary, and its statements go (1.25.0, §The Migrate Image and Its Exceptions) |
 | Enterprise constraint | EAD-003 — private domain persistence; cross-domain database access is prohibited |
 | Enterprise constraint | EAD-006 — tenant isolation, privileged access attribution, and default deny |
 | Related design | TDD-foundation-platform-001 — outbox and event envelope |
