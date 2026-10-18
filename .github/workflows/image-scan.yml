@@ -31,10 +31,11 @@ jobs:
       - name: scan
         run: scripts/image-scan.sh scan/organization-control-service scan/organization-control-migrate
 
-      # The not_affected statements for /usr/local/bin/atlas in .grype.yaml rest on how the migrate
-      # image runs Atlas (STD-GLB-009 1.8.0 §Container Images rule 7). This runs the whole pipeline
-      # against the pinned Control Database with Atlas traced, and fails if Atlas listens or connects to
-      # anything but the database (TDD-organization-control-001 §The Migrate Image and Its Exceptions).
+      # How the migrate image runs Atlas is the evidence a statement about /usr/local/bin/atlas would
+      # rest on (STD-GLB-009 1.8.0 §Container Images rule 7), so it is kept current for the next
+      # advisory. This runs the whole pipeline against the pinned Control Database with Atlas traced,
+      # and fails if Atlas listens or connects to anything but the database
+      # (TDD-organization-control-001 §The Migrate Image and Its Exceptions).
       - name: atlas in the migrate image listens on nothing and calls only the database
         if: ${{ !cancelled() }}
         run: >-

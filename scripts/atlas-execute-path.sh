@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Proves what the not_affected statements for /usr/local/bin/atlas in .grype.yaml rest on
-# (STD-GLB-009 1.8.0 §Container Images rule 7): as the migrate image runs it, Atlas listens on
-# nothing and connects to nothing but the database. image-scan runs it on every change and daily.
+# Proves how the migrate image runs /usr/local/bin/atlas, the evidence a not_affected statement about
+# that file rests on (STD-GLB-009 1.8.0 §Container Images rule 7): Atlas listens on nothing and
+# connects to nothing but the database. image-scan runs it on every change and daily, so the evidence
+# is current the day a new advisory in the binary lands.
 #
 #   scripts/atlas-execute-path.sh <migrate-image> [VARIABLE ...]
 #
