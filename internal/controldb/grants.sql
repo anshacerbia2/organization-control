@@ -578,10 +578,10 @@ REVOKE DELETE ON platform.outbox, platform.outbox_delivery FROM organization_dis
 
 -- Whether its own consumer name is registered and active, read once at startup.
 --
--- DISPATCH_CONSUMER_NAME keys every receipt this worker writes, and the resolver reads receipts by
--- the registered consumer_id. A one-character mismatch produces receipts no resolution will ever
--- find, and nothing failed until an incident could not be closed. The dispatcher now refuses to
--- start when its name is not an active consumer (ROADMAP.md item 13).
+-- A delivery target's name keys every receipt this worker writes, and the resolver reads receipts
+-- by the registered consumer_id. A one-character mismatch produces receipts no resolution will ever
+-- find, and nothing failed until an incident could not be closed. A target's dispatcher does not
+-- start while its name is not an active consumer (ROADMAP.md items 13 and 25).
 --
 -- Two columns, not the row. The registration's terms and the fresh-check meter are nothing a
 -- delivery worker needs to read, and it writes nothing here.

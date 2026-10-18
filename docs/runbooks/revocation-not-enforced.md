@@ -1,6 +1,6 @@
 # Runbook: revocation not enforced within budget
 
-Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
+Version 1.2.0. Owner: Core Platform Team. Last reviewed 2026-10-15.
 
 A Membership revocation, suspension, or Tenant suspension was accepted here and has not reached
 every subscribed consumer within the propagation budget. Access that authority has withdrawn may
@@ -78,8 +78,9 @@ Any of:
    - `the consumer's registration could not be checked; the dispatcher waits`.
    - `the consumer's dispatcher stopped; it starts again after the retry interval`.
 
-   A consumer that is not in `ORGANIZATION_DELIVERY_TARGETS` (today foundation-reference) is
-   delivered by its own dispatcher. Check that process instead.
+   Every consumer is delivered from this process (TDD-005 2.6.0). A subscribed consumer that is not
+   in `ORGANIZATION_DELIVERY_TARGETS` is delivered by nothing, and its deliveries stay owed: add
+   its target and restart.
 
 4. What the deliveries say (SQL, read-only, see README §Conventions):
 

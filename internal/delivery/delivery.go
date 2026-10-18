@@ -43,16 +43,24 @@ type Config struct {
 
 	Timeout       time.Duration
 	RetryInterval time.Duration
-	Telemetry     *observability.Telemetry
-	Logger        *slog.Logger
+
+	// Interval and IdleInterval are passed to every dispatcher as foundation-platform's
+	// outbox.Config Interval and IdleInterval. Both are required: foundation-platform's 5 s idle
+	// default exceeds the 1 s commit-to-claim budget (TDD-organization-control-005 §Technical
+	// Context), so a dispatcher never falls back to it.
+	Interval     time.Duration
+	IdleInterval time.Duration
+
+	Telemetry *observability.Telemetry
+	Logger    *slog.Logger
 
 	// registered and run are seams for the tests; nil uses the real ones.
 	registered func(ctx context.Context, consumer string) (bool, error)
 	run        func(ctx context.Context, target Target) error
 }
 
-// registeredStatement is the startup check foundation-reference's dispatcher makes on its own name,
-// on the two columns the dispatch role may read. One row always.
+// registeredStatement is the check a target makes on its consumer's name before its dispatcher
+// starts, on the two columns the dispatch role may read. One row always.
 const registeredStatement = `SELECT EXISTS (
     SELECT 1 FROM projection.consumer WHERE consumer_id = $1 AND retired_at IS NULL)`
 
@@ -80,7 +88,7 @@ func Run(ctx context.Context, cfg Config) error {
 			if err != nil {
 				return err
 			}
-			dispatcher, err := outbox.NewDispatcher(cfg.Pool, publisher, outbox.Config{Consumer: target.Consumer})
+			dispatcher, err := outbox.NewDispatcher(cfg.Pool, publisher, dispatcherConfig(cfg, target))
 			if err != nil {
 				return err
 			}
@@ -98,6 +106,11 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	wg.Wait()
 	return ctx.Err()
+}
+
+// dispatcherConfig is what one target's dispatcher is built with.
+func dispatcherConfig(cfg Config, target Target) outbox.Config {
+	return outbox.Config{Consumer: target.Consumer, Interval: cfg.Interval, IdleInterval: cfg.IdleInterval}
 }
 
 // checkRegistered reads whether the consumer is an active registered consumer, on the dispatch
@@ -121,6 +134,8 @@ func validate(cfg Config) error {
 		return errors.New("delivery: the publication timeout must be positive")
 	case cfg.RetryInterval <= 0:
 		return errors.New("delivery: the retry interval must be positive")
+	case cfg.Interval <= 0 || cfg.IdleInterval < cfg.Interval:
+		return errors.New("delivery: the poll interval must be positive and the idle interval at least as long")
 	case cfg.Telemetry == nil && cfg.run == nil:
 		return errors.New("delivery: telemetry is required")
 	case cfg.Logger == nil:

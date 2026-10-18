@@ -364,9 +364,9 @@ func TestAnIncidentWithNoEvidenceStaysOpen(t *testing.T) {
 // A receipt exists, for this event, carrying applied evidence -- under a consumer name nothing
 // resolves against.
 //
-// This is the case the diagnostic exists for. DISPATCH_CONSUMER_NAME and the registered consumer
-// are configured in two repositories with nothing linking them, so one character of disagreement
-// produces a working delivery path whose receipts no resolution can read. Reported as bare
+// This is the case the diagnostic exists for. A delivery target's name and the registered consumer
+// are configured apart, so one character of disagreement produces a working delivery path whose
+// receipts no resolution can read. Reported as bare
 // "no evidence" it sends an operator to investigate a delivery that is not broken.
 func TestAReceiptUnderAnotherConsumerNameResolvesNothing(t *testing.T) {
 	f := newFixture(t)
@@ -382,7 +382,7 @@ func TestAReceiptUnderAnotherConsumerNameResolvesNothing(t *testing.T) {
 		t.Errorf("the refusal does not name the consumer that did acknowledge the event, so it is "+
 			"indistinguishable from a missing delivery: %v", err)
 	}
-	if !strings.Contains(err.Error(), "DISPATCH_CONSUMER_NAME") {
+	if !strings.Contains(err.Error(), "ORGANIZATION_DELIVERY_TARGETS") {
 		t.Errorf("the refusal does not name the likeliest cause: %v", err)
 	}
 }

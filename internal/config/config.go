@@ -137,7 +137,19 @@ type Delivery struct {
 
 	Timeout       time.Duration
 	RetryInterval time.Duration
+
+	// Interval and IdleInterval are each dispatcher's poll period and the ceiling of its backoff
+	// after empty polls, passed to foundation-platform's dispatcher. A security event committed
+	// while the dispatcher idles is claimed up to one IdleInterval later, so IdleInterval is held
+	// to the 1 s commit-to-claim budget (TDD-organization-control-002 §Enforcement Budget,
+	// TDD-organization-control-005 §Technical Context).
+	Interval     time.Duration
+	IdleInterval time.Duration
 }
+
+// commitToClaimBudget is TDD-organization-control-002 §Enforcement Budget's "outbox commit to
+// dispatch claim", the longest a dispatcher may idle between polls.
+const commitToClaimBudget = time.Second
 
 // parseTargets reads consumer=url pairs separated by commas.
 func parseTargets(raw string) ([]DeliveryTarget, error) {
@@ -350,6 +362,20 @@ func Load() (Config, error) {
 		WorkloadTokenURL: strings.TrimSpace(os.Getenv("ORGANIZATION_WORKLOAD_TOKEN_URL")),
 		Timeout:          durationOr("ORGANIZATION_DELIVERY_TIMEOUT", 5*time.Second, &problems),
 		RetryInterval:    durationOr("ORGANIZATION_DELIVERY_RETRY_INTERVAL", time.Minute, &problems),
+		Interval:         durationOr("ORGANIZATION_DELIVERY_INTERVAL", 500*time.Millisecond, &problems),
+		IdleInterval:     durationOr("ORGANIZATION_DELIVERY_IDLE_INTERVAL", commitToClaimBudget, &problems),
+	}
+	// Set whether or not a target is named, so a value that would break the budget is refused
+	// before a target is added rather than on the deploy that adds one.
+	switch {
+	case cfg.Delivery.IdleInterval > commitToClaimBudget:
+		problems = append(problems, fmt.Errorf(
+			"ORGANIZATION_DELIVERY_IDLE_INTERVAL is %s; a dispatcher idling that long misses the %s commit-to-claim "+
+				"budget (TDD-organization-control-002 §Enforcement Budget)", cfg.Delivery.IdleInterval, commitToClaimBudget))
+	case cfg.Delivery.IdleInterval < cfg.Delivery.Interval:
+		problems = append(problems, fmt.Errorf(
+			"ORGANIZATION_DELIVERY_IDLE_INTERVAL (%s) is below ORGANIZATION_DELIVERY_INTERVAL (%s); it is the ceiling "+
+				"the poll period backs off to", cfg.Delivery.IdleInterval, cfg.Delivery.Interval))
 	}
 	if len(targets) > 0 {
 		for name, value := range map[string]string{

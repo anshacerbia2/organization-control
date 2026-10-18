@@ -257,6 +257,47 @@ func TestADeploymentWithoutDeliveryTargetsNeedsNoDispatchCredential(t *testing.T
 	}
 }
 
+// The intervals the dispatchers are built with default inside TDD-002's 1 s commit-to-claim budget,
+// rather than to foundation-platform's 5 s idle backoff, and a value inside it is read as given.
+func TestTheDeliveryIntervalsDefaultInsideTheBudget(t *testing.T) {
+	required(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Delivery.Interval != 500*time.Millisecond || cfg.Delivery.IdleInterval != time.Second {
+		t.Errorf("the intervals defaulted to %s and %s, want 500ms and 1s", cfg.Delivery.Interval, cfg.Delivery.IdleInterval)
+	}
+
+	t.Setenv("ORGANIZATION_DELIVERY_INTERVAL", "200ms")
+	t.Setenv("ORGANIZATION_DELIVERY_IDLE_INTERVAL", "300ms")
+	if cfg, err = Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Delivery.Interval != 200*time.Millisecond || cfg.Delivery.IdleInterval != 300*time.Millisecond {
+		t.Errorf("the intervals read as %s and %s, want 200ms and 300ms", cfg.Delivery.Interval, cfg.Delivery.IdleInterval)
+	}
+}
+
+// An idle interval past the budget is foundation-platform's 5 s default restored by hand, and one
+// below the poll period is a ceiling under the floor. Each is refused, naming the variable.
+func TestADeliveryIntervalOutsideTheBudgetIsRefused(t *testing.T) {
+	for _, c := range []struct{ interval, idle, names string }{
+		{"", "5s", "ORGANIZATION_DELIVERY_IDLE_INTERVAL"},
+		{"", "1001ms", "ORGANIZATION_DELIVERY_IDLE_INTERVAL"},
+		{"800ms", "400ms", "ORGANIZATION_DELIVERY_INTERVAL"},
+		{"0s", "", "ORGANIZATION_DELIVERY_INTERVAL"},
+		{"", "-1s", "ORGANIZATION_DELIVERY_IDLE_INTERVAL"},
+	} {
+		required(t)
+		t.Setenv("ORGANIZATION_DELIVERY_INTERVAL", c.interval)
+		t.Setenv("ORGANIZATION_DELIVERY_IDLE_INTERVAL", c.idle)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), c.names) {
+			t.Errorf("interval %q, idle %q answered %v", c.interval, c.idle, err)
+		}
+	}
+}
+
 // A named target needs the dispatch credential and the workload client, and each problem is named.
 func TestADeliveryTargetRequiresTheDispatchCredentialAndTheWorkloadClient(t *testing.T) {
 	required(t)
