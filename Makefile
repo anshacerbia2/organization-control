@@ -143,6 +143,7 @@ tidy:
 # it; run in parallel they interfere and fail in ways that look like locking bugs.
 test:
 	go test -race -p 1 ./...
+	go test -race -tags devissuer ./cmd/organization-devissuer
 
 test-unit:
 	go test -race -short ./...

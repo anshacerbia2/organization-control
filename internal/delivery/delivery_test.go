@@ -50,6 +50,7 @@ func (r *recorder) count(m map[string]int, consumer string) int {
 func config(r *recorder, targets ...Target) Config {
 	return Config{
 		Targets: targets, Timeout: time.Second, RetryInterval: 5 * time.Millisecond,
+		Interval: 200 * time.Millisecond, IdleInterval: 300 * time.Millisecond,
 		Logger:     slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		registered: r.registered, run: r.run,
 	}
@@ -121,17 +122,30 @@ func TestAFailedRegistrationCheckStartsNothing(t *testing.T) {
 func TestRunRefusesAnIncompleteConfiguration(t *testing.T) {
 	r := &recorder{checks: map[string]int{}, runs: map[string]int{}}
 	for name, mutate := range map[string]func(*Config){
-		"no logger":          func(c *Config) { c.Logger = nil },
-		"no retry interval":  func(c *Config) { c.RetryInterval = 0 },
-		"no timeout":         func(c *Config) { c.Timeout = 0 },
-		"a nameless target":  func(c *Config) { c.Targets = []Target{{Endpoint: "https://a"}} },
-		"a duplicate target": func(c *Config) { c.Targets = []Target{{"a", "https://a"}, {"a", "https://b"}} },
-		"no pool":            func(c *Config) { c.registered, c.run = nil, nil },
+		"no logger":         func(c *Config) { c.Logger = nil },
+		"no retry interval": func(c *Config) { c.RetryInterval = 0 },
+		"no timeout":        func(c *Config) { c.Timeout = 0 },
+		"no poll interval":  func(c *Config) { c.Interval = 0 },
+		"an idle interval below the poll interval": func(c *Config) { c.IdleInterval = c.Interval / 2 },
+		"a nameless target":                        func(c *Config) { c.Targets = []Target{{Endpoint: "https://a"}} },
+		"a duplicate target":                       func(c *Config) { c.Targets = []Target{{"a", "https://a"}, {"a", "https://b"}} },
+		"no pool":                                  func(c *Config) { c.registered, c.run = nil, nil },
 	} {
 		cfg := config(r, Target{Consumer: "a", Endpoint: "https://a"})
 		mutate(&cfg)
 		if err := Run(context.Background(), cfg); err == nil || errors.Is(err, context.Canceled) {
 			t.Errorf("%s was accepted: %v", name, err)
 		}
+	}
+}
+
+// The configured intervals reach foundation-platform's dispatcher. Left zero, its own defaults would
+// apply, and its 5 s idle backoff exceeds the 1 s commit-to-claim budget.
+func TestTheDispatcherIsBuiltWithTheConfiguredIntervals(t *testing.T) {
+	r := &recorder{checks: map[string]int{}, runs: map[string]int{}}
+	built := dispatcherConfig(config(r), Target{Consumer: "foundation-reference", Endpoint: "https://fr/v1/deliveries"})
+	if built.Consumer != "foundation-reference" || built.Interval != 200*time.Millisecond ||
+		built.IdleInterval != 300*time.Millisecond {
+		t.Errorf("the dispatcher is built with %+v", built)
 	}
 }
