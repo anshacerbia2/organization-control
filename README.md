@@ -43,7 +43,7 @@ by the application:
 | `organization_provider_rt` | Deliberately cross-Tenant | Provider |
 | `organization_consumer_rt` | A registered consumer's own seven routes: reads Memberships and Tenants, writes its own position | Consumer, when consumer authority is configured |
 | `organization_resolution_rt` | Closing and waiving dead letters (TDD-005) | Resolution |
-| `organization_self_rt` | A person reading their own contexts: three tables' named columns, one Principal | None of its own: `SET LOCAL ROLE` on the tenant connections |
+| `organization_self_rt` | A person reading their own contexts: three tables' named columns, one Principal; and, accepting an invitation, the one invitation row their token selects (ADR-ORG-007) | None of its own: `SET LOCAL ROLE` on the tenant connections |
 
 A single role serving both tenant and provider work cannot be constrained: any policy
 permissive enough for provider work is permissive enough for a defect in a tenant-scoped
@@ -235,7 +235,9 @@ misconfigured process start and fail later.
 | `ORGANIZATION_CONSUMER_DATABASE_URL` | no | Connects as `organization_consumer_app` → `organization_consumer_rt`. Set, it enables consumer authority |
 | `ORGANIZATION_DELIVERY_TARGETS` | no | `consumer=https://acceptance-url` pairs, comma-separated. Each gets a dispatcher in this process once it is a registered consumer (ADR-GLB-018 §5.4) |
 | `ORGANIZATION_DISPATCH_DATABASE_URL` | with targets | Connects as `organization_dispatch_app` → `organization_dispatch_rt` |
-| `ORGANIZATION_WORKLOAD_CLIENT_ID`, `ORGANIZATION_WORKLOAD_KEY_FILE`, `ORGANIZATION_WORKLOAD_TOKEN_URL` | with targets | This service's workload client, its RSA key (at least 3072 bits), and the kernel token endpoint. Deliveries carry its access token, never a shared secret |
+| `ORGANIZATION_WORKLOAD_CLIENT_ID`, `ORGANIZATION_WORKLOAD_KEY_FILE`, `ORGANIZATION_WORKLOAD_TOKEN_URL` | with targets or `ORGANIZATION_IDENTITY_CONTROL_URL` | This service's workload client, its RSA key (at least 3072 bits), and the kernel token endpoint. Deliveries and the address match carry its access token, never a shared secret |
+| `ORGANIZATION_IDENTITY_CONTROL_URL` | no | The Identity Control API's base URL. Acceptance asks it whether the caller holds the invited address (`POST /v1/principals/{principal_id}/identifiers:match`, ADR-ORG-007 §5.3). Unset, `POST /v1/invitations/accept` answers `503` |
+| `ORGANIZATION_IDENTITY_CONTROL_TIMEOUT` | no | `5s`. One match request's bound |
 | `ORGANIZATION_DELIVERY_TIMEOUT`, `ORGANIZATION_DELIVERY_RETRY_INTERVAL` | no | `5s` and `1m`: one publication's bound, and how long a target waits before checking its registration again |
 | `ORGANIZATION_DELIVERY_INTERVAL`, `ORGANIZATION_DELIVERY_IDLE_INTERVAL` | no | `500ms` and `1s`: each dispatcher's poll period and its backoff ceiling after empty polls. The idle interval is at least the interval and at most `1s`, the commit-to-claim budget (TDD-002 §Enforcement Budget); anything else is refused at startup |
 | `ORGANIZATION_LISTEN_ADDRESS` | no | Defaults to `:8080` |
@@ -258,9 +260,21 @@ names, and `sub` is not read.
 | Tenant administrator | `subject_type` `human`, `tenant_id`, `acr` `aal2` or higher, `auth_time` | in that Tenant: an active Membership, the Tenant active, and a tenant administration grant (ADR-ORG-003) |
 | Provider | `subject_type` `human`, `acr`, `auth_time`, no `tenant_id` | a provider grant for the `principal_id` |
 | Projection consumer | `subject_type` `workload`, `workload_owner`, no `tenant_id` | an active consumer registered with the `principal_id` |
+| Self | `subject_type` `human`, with or without `tenant_id`, on `GET /v1/principals/{own principal_id}/contexts` (ADR-ORG-005) or `POST /v1/invitations/accept` (ADR-ORG-007) | none: the route reaches the caller's own rows, and acceptance creates the caller's own Membership |
 
 A revoked grant, a retired consumer, a revoked Membership or a suspended Tenant stops at the next
 request, not when the token expires. A record read that fails answers 503 and admits nobody.
+
+**An invited person accepts, signed in as themselves** (ADR-ORG-007, TDD-004 1.14.0):
+
+```text
+POST  /v1/invitations/accept          {"token": "..."}    Idempotency-Key; any human token
+```
+
+The token selects one invitation. The Identity Control API is asked whether the caller holds the
+invited address as a proven address, and the Membership is created for the caller alone. Every
+failed lookup and a mismatch answer the same `404`. `POST /v1/invitations/verify-identity` and the
+`identity_verified` state are gone.
 
 **A Tenant's administrators** are granted by a provider, with `X-Administrative-Reason`:
 
@@ -329,7 +343,7 @@ Tenant administrator, the Tenant from the token:
 GET   /v1/workspaces       ?status=active|archived|retired
 GET   /v1/memberships      ?status=active|suspended|revoked&workspace_id=<uuid>&principal_id=<uuid>
 GET   /v1/memberships/{membership_id}
-GET   /v1/invitations      ?state=pending|identity_verified|accepted|expired|revoked
+GET   /v1/invitations      ?state=pending|accepted|expired|revoked
 
 Provider, with X-Administrative-Reason:
 GET   /v1/organizations    ?status=active|suspended|retired&classification=provider|customer|partner|publisher

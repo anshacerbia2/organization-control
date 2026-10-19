@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.16.0
+  version: 1.17.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -505,7 +505,7 @@ a caller the route does not admit is told `403` rather than about a header.
 | Memberships (`-002`) | `POST /v1/memberships`; `/{membership_id}/suspend`, `/restore`, `/revoke`; `POST /v1/membership-batches`; `/{batch_id}/execute` |
 | Workspaces (this design) | `POST /v1/workspaces`; `/{workspace_id}/archive`, `/restore`, `/retire` |
 | Organizations and Tenants (this design) | `POST /v1/organizations`; `/{organization_id}/suspend`, `/restore`, `/retire`; `POST /v1/tenants`; `/{tenant_id}/activate`, `/suspend`, `/restore`, `/provisioning` |
-| Invitations (`-004`) | `POST /v1/invitations`; `/{invitation_id}/revoke`; `/accept`; `/verify-identity` |
+| Invitations (`-004`) | `POST /v1/invitations`; `/{invitation_id}/revoke`; `/accept` (the self caller's, 1.17.0); `/verify-identity` removed in 1.17.0 (`ADR-ORG-007`) |
 | Offboardings and obligations (`-004`) | `POST /v1/offboardings`; `/{offboarding_id}/freeze`, `/complete-freeze`, `/release`, `/retire`, `/cancel`, `/legal-hold`, `/obligations`, `/deprovisioning/resend` (1.13.0); `POST /v1/obligations/{obligation_id}/resolve` |
 | Provider authority (`-001`) | `POST /v1/provider-grants`; `/{grant_id}/revoke`; `POST /v1/provider-activations`; `/{activation_id}/approve`, `/deny`, `/end`; `POST /v1/tenants/{tenant_id}/administrators`; `/{grant_id}/revoke`; `POST /v1/privileged-access/reviews` (1.12.0); `POST /v1/tenant-administration-pause` (1.13.0) |
 | Consumer registry and recovery (`-002`) | `POST /v1/projections/consumers`; `/{consumer_id}/retire`; `POST /v1/projections/advance-versions` (1.13.0) |
@@ -957,7 +957,7 @@ migration role owns:
 | View | Rows | `organization_provider_rt` holds | Policies of the owner |
 | :-- | :-- | :-- | :-- |
 | `operation.provisioning_sweep` | `tenant.provisioning_request` still `requested` | `SELECT`, `UPDATE (state, resolved_at, detail)` | `provisioning_request_signals_read` (the gauges' `SELECT`, which admits `requested` and `unresolved`), `provisioning_request_sweep` (`UPDATE` from `requested` to `unresolved` only) |
-| `operation.invitation_expiry` | `invitation.invitation` `pending` or `identity_verified` past `expires_at` by the database clock; identifiers, state and expiry only, never the target identifier | `SELECT`, `UPDATE (state)` | `invitation_expiry_read` (`SELECT` of an invitation past its expiry), `invitation_expiry` (`UPDATE` to `expired` only) |
+| `operation.invitation_expiry` | `invitation.invitation` `pending` past `expires_at` by the database clock (`identity_verified` removed, 1.17.0); identifiers, state and expiry only, never the target identifier | `SELECT`, `UPDATE (state)` | `invitation_expiry_read` (`SELECT` of an invitation past its expiry), `invitation_expiry` (`UPDATE` to `expired` only) |
 
 Each view is automatically updatable: "If the view is automatically updatable the system will
 convert any INSERT, UPDATE, DELETE, or MERGE statement on the view into the corresponding statement

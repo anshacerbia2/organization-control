@@ -259,7 +259,12 @@ In this stack's `.env`, then `docker compose up -d organization-control`:
 
 ```text
 ORGANIZATION_DELIVERY_TARGETS=identity-control=http://identity-control:8090/v1/deliveries
+ORGANIZATION_IDENTITY_CONTROL_URL=http://identity-control:8090
 ```
+
+The second line is where invitation acceptance asks whether the signed-in person holds the invited
+address (`POST /v1/principals/{principal_id}/identifiers:match`, ADR-ORG-007 §5.3), with the same
+workload token the dispatcher carries. Without it, `POST /v1/invitations/accept` answers `503`.
 
 ### 6. Point identity-control here
 

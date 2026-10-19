@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.25.0
+  version: 1.26.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-18
+  last_reviewed: 2026-10-19
   parent_sad: SAD-004
 ---
 
@@ -131,8 +131,9 @@ CREATE ROLE organization_provider_rt NOLOGIN;
 -- A registered projection consumer acting on its own records.
 CREATE ROLE organization_consumer_rt NOLOGIN;
 
--- A person reading their own contexts (1.17.0, ADR-ORG-005). Reached only by SET LOCAL ROLE
--- from the tenant connections, never inherited.
+-- A person reading their own contexts (1.17.0, ADR-ORG-005), and the one invitation their
+-- token selects (1.26.0, ADR-ORG-007). Reached only by SET LOCAL ROLE from the tenant
+-- connections, never inherited.
 CREATE ROLE organization_self_rt NOLOGIN;
 GRANT organization_self_rt TO organization_rt WITH INHERIT FALSE, SET TRUE;
 
@@ -191,6 +192,16 @@ and `SELECT` on the columns that read needs, each through a `SELECT` policy of i
   active Membership in it;
 - `principal_id`, `tenant_id` and `revoked_at` of `membership.tenant_admin_grant`, where
   `principal_id` is the bound one.
+
+**It also serves one read for acceptance** (1.26.0, `ADR-ORG-007 §5.2`): `USAGE` on `invitation`
+and `SELECT` on `invitation_id`, `tenant_id`, `workspace_id`, `target_identifier`, `subject_type`,
+`state`, `expires_at` and `token_hash` of `invitation.invitation`, through the `SELECT` policy
+`invitation_self_redeem`, keyed on `app.invitation_token_hash`. `db.WithSelfInvitation` binds the
+SHA-256 of the token the caller presented and nothing else, so the role sees at most the one row
+that token selects (`token_hash` is unique across the table). The ADR asks for "a role with no
+login, entered as `organization_self_rt` is"; this is that role, with one more policy, rather than a
+sixth role. The two reads never meet: the contexts read binds no token hash, the acceptance read
+binds no Principal, and each policy raises on an unbound transaction rather than reading nothing.
 
 It writes nothing, reads no other Principal's row, and reaches no Tenant the Principal is not a
 member of. It has no login and no DSN of its own. `organization_rt` is granted it
@@ -310,7 +321,20 @@ These functions are the only code permitted to bind `app.tenant_id`, `app.provid
 authenticated context rather than from an argument, so a handler cannot pass a Tenant it was
 told about by the caller.
 
-**`WithProviderInTenant` is the one that takes a Tenant as an argument, and only from a
+**Two entry points serve acceptance** (1.26.0, `ADR-ORG-007 §5.2`), and both refuse every scope
+but a self scope:
+
+- `WithSelfInvitation(ctx, self *SelfPool, tokenHash string, fn Body)` runs fn read-only as
+  `organization_self_rt`, with `app.invitation_token_hash` bound to the hash of the token the
+  caller presented. It is the only code that binds that setting.
+- `WithSelfInTenant(ctx, tenants *TenantPool, tenantID id.UUID, fn Body)` runs fn on the tenant
+  pool, as the tenant role, bound to tenantID, with the self caller as actor, and claims the
+  `Idempotency-Key` as `WithTenantScope` does. The Tenant is an argument, and it comes from the row
+  the token selected, never from the caller's token or the request. The invitation service reloads
+  that row by its token hash under the Tenant's policy as its first statement, so a Tenant that
+  does not hold the token's invitation finds nothing and the acceptance is refused.
+
+**`WithProviderInTenant` is the one that takes a Tenant as an argument from a
 provider.** A provider already holds authority over every Tenant. Naming one Tenant narrows
 that authority to the Tenant's own policy; it never widens a caller's reach. The function
 refuses any scope that is not a provider's. A Tenant identifier from a tenant caller therefore
@@ -442,7 +466,7 @@ because its registration's audience names the resource.
 | Provider | `subject_type` `human`, `acr`, `auth_time`; no `tenant_id` | provider authority in force for the `principal_id`: an emergency grant, or an approved activation of an eligible grant (§Provider Activation) | no grant, or `acr` or `auth_time` absent |
 | Eligible provider | as a provider | an eligible grant with no activation in force | reaches only `/v1/provider-activations`; every other route answers `403` before a transaction opens |
 | Projection consumer | `subject_type` `workload`, `workload_owner`; no `tenant_id` | an active consumer registered with the `principal_id` | none registered, or consumer authority not configured |
-| Self (1.17.0) | `subject_type` `human`, as a Tenant administrator's or a provider's claims, with or without `tenant_id`, on `GET /v1/principals/{principal_id}/contexts` whose `principal_id` is the token's | none | reaches that one route, for its own `principal_id`; a human token naming another Principal there is authorized as above |
+| Self (1.17.0) | `subject_type` `human`, as a Tenant administrator's or a provider's claims, with or without `tenant_id`, on `GET /v1/principals/{principal_id}/contexts` whose `principal_id` is the token's, or on `POST /v1/invitations/accept` (1.26.0) | none | reaches those two routes, for its own `principal_id`; a human token naming another Principal on the contexts route is authorized as above; a workload token on `accept` is `403` |
 
 ```text
 authenticate(token):
@@ -451,6 +475,9 @@ authenticate(token):
     type      := subject_type, human or workload
     if type is human and the route is GET /v1/principals/{principal}/contexts:
         return Self(principal)                           -- no record read (1.17.0)
+    if the route is POST /v1/invitations/accept:
+        require type is human                            -- else 403 (1.26.0)
+        return Self(principal)                           -- no record read
     if tenant_id present:
         require type is human, acr aal2 or higher, and auth_time
         require, in tenant_id, read now in one read-only transaction:
@@ -1325,8 +1352,9 @@ than called a proof:
 connection its transaction was opened on. In this repository that is decided in two kinds
 of place:
 
-- A scope wrapper in `internal/db`. `WithTenantScope`, `WithTenantRead` and
-  `WithProviderInTenant` are `organization_rt`.
+- A scope wrapper in `internal/db`. `WithTenantScope`, `WithTenantRead`,
+  `WithProviderInTenant` and `WithSelfInTenant` are `organization_rt`. `WithSelfRead` and
+  `WithSelfInvitation` are `organization_self_rt`.
   `WithProviderScope` and `WithProviderSnapshot` are `organization_provider_rt`.
   `WithResolutionScope` is `organization_resolution_rt`. `WithConsumerScope` and
   `WithConsumerSnapshot` are `organization_consumer_rt`.
@@ -1500,6 +1528,13 @@ administrative connection is explicitly not accepted as evidence.
   more is readable than the Tenant binding allows: the self policies do not reach the tenant role.
 - As the self role, bound to one Principal, no other Principal's Membership, Tenant or
   administration grant is readable, nothing is writable, and an unbound read raises.
+- A human token, with or without `tenant_id`, with or without a provider grant, is a self caller on
+  `POST /v1/invitations/accept`; a workload token there is `403` (1.26.0).
+- As the self role with a token hash bound, only the invitation holding that hash is readable, no
+  invitation is writable, and an unbound read raises; the tenant role reaches nothing through
+  `invitation_self_redeem` (1.26.0).
+- `WithSelfInvitation` and `WithSelfInTenant` refuse a tenant, provider or consumer scope, a blank
+  hash and a nil Tenant (1.26.0).
 
 ### Tenant Administration Grant
 
@@ -2017,6 +2052,7 @@ not pulled.
 | Governed by | ADR-ORG-001 — Separate Organization Authority and Keycloak Projection; §5.11 provider and consumer authority |
 | Governed by | ADR-ORG-003 — Tenant Administration Is a Recorded Grant, Checked with Current Membership |
 | Governed by | ADR-ORG-005 §5.1 — a self caller reads its own contexts, on one route, with no provider record (1.17.0) |
+| Governed by | ADR-ORG-007 §5.1, §5.2 — the self caller accepts an invitation; the token selects one row through the self role (1.26.0) |
 | Governed by | ADR-ORG-002 §5.6 — the privileged-access record is read and reviewed (1.21.0) |
 | Conforms to | STD-GLB-001 1.6.0 §Pagination — the list form and its time window |
 | Conforms to | STD-IAM-002 §3.1.1, §3.2, §3.5 — the grant's holder checks its own record; `principal_id` is the persisted identifier |
