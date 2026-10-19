@@ -1,6 +1,6 @@
 # Runbook: stuck offboarding
 
-Version 1.2.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
+Version 1.3.0. Owner: Core Platform Team. Last reviewed 2026-10-19.
 
 An offboarding moves `freeze -> obligations -> release -> retired`, or ends `cancelled`. Each stage
 is persisted, so a stopped offboarding resumes from where it is. This runbook finds why one has not
@@ -74,6 +74,7 @@ The gauges name no offboarding and no Tenant. Find them with diagnosis step 1.
 | `release` | `realized` | Retire (F) |
 | `freeze` or `obligations` | The offboarding was a mistake | Cancel (G) |
 | `cancelled` | `restore_pending` above 0 | Send the cancel again (G) |
+| `obligations` or `release`, on a development server | Nothing resolves obligations or reports deprovisioning there | Stand in with `scripts/dev-obligation.ps1` (B) and `scripts/dev-deprovisioning.ps1` (E) |
 
 ## Remediation
 
@@ -106,6 +107,11 @@ All are provider commands: `X-Administrative-Reason` and an `Idempotency-Key` ar
     audit can tell a decision from a satisfied obligation (TDD-004 §Security Notes).
   - A missing obligation is raised with `POST /v1/offboardings/{id}/obligations`
     `{"domain", "type", "due_at"}`.
+  - **On a development server** no domain runs, so the operator stands in for the owning one with
+    `scripts/dev-obligation.ps1 -OffboardingId <id> -ObligationId <id> -Domain <domain> -Completed`
+    (or `-Waived -Reason`, `-Failed -Reason`), which calls this route and refuses, sending nothing,
+    under another domain or on a final obligation (`deploy/dev/README.md` §Offboarding a Tenant on the
+    development server; TDD-004 1.13.0 §Offboarding on a Development Server).
 
 - **C. Legal hold.** Release only on counsel's written instruction, cited in the reason:
   `POST /v1/offboardings/{id}/legal-hold` with `{"hold": false}`. A hold blocks release and
@@ -127,6 +133,11 @@ All are provider commands: `X-Administrative-Reason` and an `Idempotency-Key` ar
   4. A `failed` deprovisioning is sent again with H once the provisioning system's owner has fixed
      the cause the `detail` names. An `unresolved` one is never sent again: report its outcome
      first.
+  5. **On a development server** no provisioning system runs, so the operator is its stand-in for
+     step 3, with `scripts/dev-deprovisioning.ps1 -OffboardingId <id> -Realized` (or
+     `-Failed -Reason`). It refuses, sending nothing, unless the offboarding is in `release` and the
+     latest deprovisioning is `requested` or `unresolved`, and it never retires or resends
+     (`deploy/dev/README.md` §Offboarding a Tenant on the development server).
 
 - **F. Retire.** `POST /v1/offboardings/{id}/retire` with `{"expected_version": <Tenant version>}`.
   All three gates are checked again at this moment: no obligation open or failed, no legal hold,
@@ -178,6 +189,6 @@ All are provider commands: `X-Administrative-Reason` and an `Idempotency-Key` ar
 
 | # | Source |
 | :-- | :-- |
-| R1 | TDD-organization-control-004 §Offboarding, §Offboarding Stages, §Cancellation, §Legal Hold, §Sending a Failed Deprovisioning Again, §Operational Notes |
+| R1 | TDD-organization-control-004 §Offboarding, §Offboarding Stages, §Cancellation, §Legal Hold, §Sending a Failed Deprovisioning Again, §Offboarding on a Development Server, §Operational Notes |
 | R2 | TDD-organization-control-003 §Provisioning Correlation (the `unresolved` state) |
 | R3 | NIST SP 800-61r3, §2.3, <https://doi.org/10.6028/NIST.SP.800-61r3>: "Formatting procedures within a playbook instead of another format can improve their usability." |

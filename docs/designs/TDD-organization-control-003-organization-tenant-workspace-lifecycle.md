@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.15.0
+  version: 1.16.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -876,6 +876,18 @@ from the wiring state file. Its rules:
 The procedure is `deploy/dev/README.md` §Provisioning a Tenant on the development server: start
 provisioning in Organization Experience, run the script, then activate in Organization Experience.
 
+**The other direction, from 1.16.0.** The same system receives the deprovisioning command an
+offboarding's release publishes, and reports its outcome through `POST
+/v1/offboardings/{offboarding_id}/deprovisioning` (`TDD-organization-control-004` §Where the
+deprovisioning outcome is recorded). On a development server nothing reported it, so a released
+offboarding's request stayed `requested`, the sweep then aged it to `unresolved`, and retirement was
+refused for good. `scripts/dev-deprovisioning.ps1` stands in for that report under the same rules and
+for the same reasons [R7][R8]: it reports `realized` or `failed` (with a reason) for one offboarding
+through the route the system calls, refuses, sending nothing, unless the offboarding is at `release`
+and its latest deprovisioning is `requested` or `unresolved`, and never retires or sends the command
+again. `TDD-organization-control-004` 1.13.0 §Offboarding on a Development Server holds its rules, and
+those of the stand-in for the domains that own obligations.
+
 **Why a script calling the real routes.** The Twelve-Factor App asks that "One-off admin processes
 should be run in an identical environment as the regular long-running processes of the app" and that
 "Admin code must ship with application code to avoid synchronization issues" [R7]. The script ships in
@@ -1067,6 +1079,9 @@ state (`TDD-organization-control-004` §Membership Activation: "if expired: mark
   a Tenant not yet dispatched, reports a failure found by correlation identifier, refuses a failed
   Tenant without changing it, and realizes a retry (1.15.0, §The Provisioning System on a
   Development Server).
+- On every `deploy-dev` run, `scripts/dev-deprovisioning.ps1` refuses an offboarding not yet released,
+  reports a failure, refuses the failed request, and reports the resent one realized, after which the
+  Tenant retires (1.16.0; `TDD-organization-control-004` 1.13.0).
 - A duplicate realized status produces one effect.
 - The scheduled sweep, on the raw provider connections, ages a request past the timeout and files no
   privileged-access record; through its view it cannot move a request out of any state but
@@ -1162,6 +1177,7 @@ three.
 | Follows | `TDD-identity-control-003` §Reconciliation — every replica schedules an in-process sweep (1.14.0) |
 | Follows | The Twelve-Factor App, XII Admin processes and X Dev/prod parity — the development server's provisioning stand-in is a script in this repository calling the real routes (1.15.0) |
 | Conforms to | STD-GLB-009 1.3.0 §Development Server Deployment — a procedure step is a script CI runs (1.15.0) |
+| Follows | The Twelve-Factor App, XII Admin processes and X Dev/prod parity — the deprovisioning report's stand-in, `scripts/dev-deprovisioning.ps1`, calls the real route (1.16.0) |
 
 | # | Source |
 | :-- | :-- |

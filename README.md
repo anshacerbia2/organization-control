@@ -132,7 +132,8 @@ dashboard presents the sum.
 deployed (STD-GLB-009 §Development Server Deployment). Its README is the procedure, and its
 §Wiring to other services connects this service to the Identity Control API. No provisioning system
 runs there, so §Provisioning a Tenant on the development server is how a requested Tenant becomes
-active.
+active, and no owning domain either, so §Offboarding a Tenant on the development server is how an
+offboarding reaches retirement.
 
 ## Building the database
 
@@ -584,6 +585,16 @@ refuses a Tenant not in `provisioning` or a request that already has an outcome
 (TDD-organization-control-003 1.15.0 §The Provisioning System on a Development Server;
 `deploy/dev/README.md` §Provisioning a Tenant on the development server). `deploy-dev` runs it on every
 change.
+
+**The same holds for an offboarding** (TDD-organization-control-004 1.13.0 §Offboarding on a Development
+Server). `scripts/dev-deprovisioning.ps1` (`-Realized`, or `-Failed -Reason`) reports a released
+offboarding's deprovisioning through `POST /v1/offboardings/{id}/deprovisioning`, and refuses one not at
+`release` or whose latest deprovisioning already has an outcome. `scripts/dev-obligation.ps1`
+(`-Domain <domain>` and `-Completed`, `-Waived -Reason` or `-Failed -Reason`) resolves one obligation as
+the domain it was raised against, through `POST /v1/obligations/{id}/resolve`, and refuses another
+domain's or a final one. Neither retires, releases or resends, and Organization Experience offers no
+control for an obligation (TDD-organization-experience-003 §As Served). `deploy-dev` runs both on every
+change (`deploy/dev/README.md` §Offboarding a Tenant on the development server).
 
 ### `Idempotency-Key`
 
