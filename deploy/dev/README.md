@@ -84,6 +84,8 @@ image, so this rebuilds them too.
 | `bootstrap-provider` | `docker compose run --rm bootstrap-provider -principal-id <id> -operator "<you>" -reason "<why>"` | once per Control Database: it refuses while any grant exists |
 | `maintenance` | `docker compose run --rm maintenance` | daily, from cron; it exits 3 on a security incident open past 24 hours |
 | `scripts/dev-provisioning.ps1` | `pwsh ./scripts/dev-provisioning.ps1 -IdentityRepo <identity-control checkout> -State <wiring state file> -TenantId <id> -Realized` (or `-Failed -Reason "<why>"`) | for each Tenant waiting on provisioning: it stands in for the provisioning system (§Provisioning a Tenant on the development server) |
+| `scripts/dev-obligation.ps1` | `pwsh ./scripts/dev-obligation.ps1 -IdentityRepo <identity-control checkout> -State <wiring state file> -OffboardingId <id> -ObligationId <id> -Domain <its domain> -Completed` (or `-Waived -Reason "<why>"`, `-Failed -Reason "<why>"`) | for each obligation an offboarding raised: it stands in for the domain that owns it (§Offboarding a Tenant on the development server) |
+| `scripts/dev-deprovisioning.ps1` | `pwsh ./scripts/dev-deprovisioning.ps1 -IdentityRepo <identity-control checkout> -State <wiring state file> -OffboardingId <id> -Realized` (or `-Failed -Reason "<why>"`) | for each released offboarding: it stands in for the provisioning system's deprovisioning report (§Offboarding a Tenant on the development server) |
 
 `maintenance` creates the outbox partitions ahead, applies the retention, purges expired Membership
 batch previews and counts stale incidents (the repository README §Building the database). On the
@@ -97,6 +99,33 @@ where that server keeps it:
 Plain `docker compose` from `deploy/dev`, so it reads this stack's `.env` and override like every
 other command here. A run that exits 3 is not a failure of the run: its work is done, and the log
 count says how many incidents to resolve (TDD-organization-control-005; `POST /v1/dead-letters/.../resolve`).
+
+**Check that it is installed and runs.** After adding the line, and whenever the server is rebuilt, as
+the user that runs the stacks:
+
+1. The line is in your crontab:
+
+   ```sh
+   crontab -l | grep -F 'docker compose run --rm maintenance'
+   ```
+
+   No output means it is not installed: add it with `crontab -e`. `crontab -l` prints the crontab cron
+   reads; cron "searches its spool area (/var/spool/cron/crontabs) for crontab files" and picks up a
+   change on its own (Debian, *cron(8)*), so nothing is restarted after an edit.
+2. The cron daemon runs: `systemctl status cron` reads `active (running)`. On Debian and Ubuntu the
+   `cron` package installs the unit `/lib/systemd/system/cron.service`.
+3. It ran: after 03:15 the log has a new run.
+
+   ```sh
+   ls -l --time-style=+%F\ %T "$HOME/organization-control-maintenance.log"
+   tail -n 20 "$HOME/organization-control-maintenance.log"
+   ```
+
+   The file's time is today's run. A missing file means the line never ran: check steps 1 and 2. cron
+   "logs its action to the syslog facility 'cron'", so `journalctl -u cron --since today` shows whether
+   it started the command, and the log file shows what the command printed.
+4. Optional, to see one run without waiting: the line's command by hand, from `deploy/dev`,
+   `docker compose run --rm maintenance`. Its exit code is 0, or 3 with incidents to resolve.
 
 ## Wiring to other services
 
@@ -312,6 +341,74 @@ outcome, never by a retry (TDD-organization-control-003 §Resolving an `unresolv
 `deploy-dev` runs this script on every change (`scripts/dev-wiring-proof.ps1` steps 4 and 8), so the
 procedure here is the one that was tested.
 
+## Offboarding a Tenant on the development server
+
+An offboarding waits on two parties that do not run on a development server: the domains that own its
+obligations, which resolve them, and the provisioning system, which reports the deprovisioning release
+sends. Without them, an obligation stays open and Release stays refused, and a released offboarding's
+deprovisioning stays `requested`, ages to `unresolved`, and Retire stays disabled. You stand in for
+both with two scripts, through the routes they call, with your provider token
+(TDD-organization-control-004 1.13.0 §Offboarding on a Development Server):
+
+- `scripts/dev-obligation.ps1` resolves one obligation as its domain, through
+  `POST /v1/obligations/{obligation_id}/resolve`. Organization Experience offers no control for this on
+  purpose: an operator there cannot resolve another domain's obligation.
+- `scripts/dev-deprovisioning.ps1` reports the deprovisioning outcome, through
+  `POST /v1/offboardings/{offboarding_id}/deprovisioning`.
+
+Production has those parties and never runs either script. Both need what §Provisioning a Tenant on the
+development server needs: the wiring done, the state file, `IDENTITY_CALLER_PASSWORD` and
+`KEYCLOAK_ISSUER` exported, and the operator's TOTP file.
+
+1. **Begin the offboarding**, in Organization Experience in provider mode (Tenants, Offboarding on an
+   `active` or `suspended` Tenant's row, then Begin offboarding). Type the Tenant's name and a reason. Access to the Tenant stops
+   at once; nothing is deleted, and it can be cancelled until Release. The console opens the
+   offboarding's page.
+2. **Freeze**: Suspend the next 100 until no active Membership remains, then Complete the freeze. The
+   offboarding moves to `obligations`.
+3. **Raise each obligation** the Tenant owes (Raise obligation: the domain, such as `product`, and the
+   obligation, such as `data-export`). The board lists each with its `obligation_id`.
+4. **Resolve each one as its domain**, from this repository's root:
+
+   ```sh
+   pwsh ./scripts/dev-obligation.ps1 -IdentityRepo /home/development/apps/identity-control \
+       -State ~/scnehaux-wiring/state.json -OffboardingId <offboarding_id> \
+       -ObligationId <obligation_id> -Domain product -Completed
+   ```
+
+   `-Waived -Reason "<why>"` records that someone decided it will not be done, and the board shows it as
+   waived, never completed. `-Failed -Reason "<why>"` records that the domain could not do it: it still
+   holds Release, and may be completed or waived later. `-Domain` must be the domain the obligation was
+   raised against.
+5. **Release**, on the offboarding's page, once no obligation is open or failed and no legal hold is
+   set. This is irreversible: it publishes the deprovisioning command.
+6. **Report the deprovisioning outcome**:
+
+   ```sh
+   pwsh ./scripts/dev-deprovisioning.ps1 -IdentityRepo /home/development/apps/identity-control \
+       -State ~/scnehaux-wiring/state.json -OffboardingId <offboarding_id> -Realized
+   ```
+
+   To try the failure path, `-Failed -Reason "<why>"`: the page shows the failure with its reason and
+   offers Send deprovisioning again, which records a new attempt to report on (step 6 again).
+7. **Retire**, on the offboarding's page, typing the Tenant's name. The Tenant is `retired`.
+
+Each script prints what it found, what it reported and the result, and the next step. It refuses,
+sending nothing and exiting 2, when the step before is not done: `dev-obligation.ps1` for an obligation
+not on the board, under another domain, already completed, waived or cancelled, or on a retired or
+cancelled offboarding; `dev-deprovisioning.ps1` before Release, on a `failed` deprovisioning (send it
+again first), on a `realized` one (retire), or on a retired or cancelled offboarding. Neither releases,
+retires nor sends the command again.
+
+**A deprovisioning that waited longer than `ORGANIZATION_PROVISIONING_TIMEOUT` (30 minutes) reads
+`unresolved`**: the scheduled sweep ages requests in both directions, provisioning and deprovisioning
+(TDD-organization-control-003 §Scheduled Sweeps). The page then says the outcome is unknown, and there
+is no Send deprovisioning again for it: sending it again is the retry of an unknown outcome. It is
+resolved by reporting its outcome, step 6; the script accepts an `unresolved` request.
+
+`deploy-dev` runs both scripts on every change (`scripts/dev-wiring-proof.ps1` step 9), so the
+procedure here is the one that was tested.
+
 ## Keys
 
 One private key lives here: `./keys/organization-control-workload.pem`, the workload key this service
@@ -411,4 +508,8 @@ the runbook's procedure, which moves each Membership a consumer holds at a highe
 | A command answers `400` naming `Idempotency-Key` | Every command requires one: a value unique to the command, repeated unchanged on a retry |
 | A Tenant stays "Awaiting provisioning" | Nothing reports provisioning outcomes on a development server: §Provisioning a Tenant on the development server |
 | `dev-provisioning.ps1` exits 2 | It refused and sent nothing; its `refused` line says why and what to do first |
+| Release stays disabled, "obligations are outstanding" | An obligation is open or failed, and on a development server no domain resolves it: `dev-obligation.ps1`, §Offboarding a Tenant on the development server, step 4 |
+| Retire stays disabled after Release | Nothing reports deprovisioning outcomes on a development server: `dev-deprovisioning.ps1`, §Offboarding a Tenant on the development server, step 6. A failed one is sent again first |
+| `dev-obligation.ps1` or `dev-deprovisioning.ps1` exits 2 | It refused and sent nothing; its `refused` line says why and what to do first |
+| `maintenance` never ran | The cron line is missing or cron is not running: §One-off tasks, Check that it is installed and runs |
 | identity-control logs the provider projection stale | This service is down, or delivery is not configured: §Wiring to other services, steps 5 to 7 |

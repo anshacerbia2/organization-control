@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 2.6.0
+  version: 2.7.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-09-17
-  last_reviewed: 2026-10-15
+  last_reviewed: 2026-10-19
   parent_sad: SAD-004
 ---
 
@@ -442,6 +442,16 @@ A dead letter naming no consumer is in no consumer's list. No code path writes o
 foundation-platform v0.2.8, and an authority-bearing one already stops the deploy (§The superseded
 case), so it is read with SQL when it exists, and the runbook says so.
 
+### The console's use of these routes
+
+2.7.0. Organization Experience's projection-health page (`TDD-organization-experience-002` 1.7.0), in
+provider mode, lists each consumer's dead letters from the route above and sends replay, resolve and
+waive on one of them, and retires a consumer (`POST /v1/projections/consumers/{consumer_id}/retire`).
+Each command carries the operator's reason as `X-Administrative-Reason` (the window's when they give
+none) and an `Idempotency-Key` per distinct request, which these three routes honour and do not require
+(§API / Interface). The console adds no rule: every refusal above is the API's, shown in its own words.
+Nothing here changes.
+
 ## Algorithms / Logic
 
 ### The resolution predicate
@@ -816,6 +826,7 @@ handler-level tests cover only refusals that must land before the database is re
 | The dev issuer's client credentials grant and assertion checks | RFC 6749 §4.4, RFC 7523 §2.2 and §3 (ADR-GLB-018 [R12], [R13]) |
 | One workload token for every target, and resource indicators as the likely direction | ADR-GLB-018 §5.4, RFC 8707 §2 ([R14]); ROADMAP item 44 |
 | Migration integrity and schema drift gates | ADR-GLB-004 |
+| Consumed by: the projection-health page lists dead letters and sends replay, resolve, waive and consumer retire (2.7.0) | `TDD-organization-experience-002` 1.7.0 |
 | Review record of these decisions | `RESPONSE-7` through `RESPONSE-26` in the architecture-description workspace |
 
 ## Operational Notes

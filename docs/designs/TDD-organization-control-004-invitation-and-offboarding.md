@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.12.0
+  version: 1.13.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-09
+  last_reviewed: 2026-10-19
   parent_sad: SAD-004
 ---
 
@@ -755,6 +755,66 @@ The process is resumable because the stage and every obligation are persisted. A
 mid-offboarding continues from the recorded stage rather than restarting a flow that has
 already frozen a Tenant.
 
+### Offboarding on a Development Server (1.13.0)
+
+**Two parties the offboarding waits on do not run on a development server**: the provisioning system,
+which reports the deprovisioning outcome, and the domains that own obligations, which resolve them.
+Until 1.13.0 an offboarding there stopped at the first wait. An obligation raised in Organization
+Experience stayed `open`, so release was refused. An offboarding released with no obligation recorded a
+deprovisioning command nobody answered: it stayed `requested`, the sweep aged it to `unresolved`
+(`TDD-organization-control-003` §Scheduled Sweeps, which ages both directions), and retirement was
+refused with Retire disabled in the console. Nothing a development operator could send moved it on.
+
+**Decision: two operator scripts stand in for them, on the routes they call.** Both are the same kind
+of tool as the provisioning stand-in (`TDD-organization-control-003` 1.16.0 §The Provisioning System on
+a Development Server), for the same reasons: an admin process that ships with the code and runs
+against the deployed service [R4], with development's backing services and routes kept production's
+[R5]. Nothing in the service knows either exists, and production never runs them.
+
+| Script | Stands in for | Route | Sends only when |
+| :-- | :-- | :-- | :-- |
+| `scripts/dev-deprovisioning.ps1 -OffboardingId <id> -Realized` (or `-Failed -Reason "<why>"`) | the provisioning system's report | `POST /v1/offboardings/{offboarding_id}/deprovisioning` | the offboarding is at `release` and its latest deprovisioning is `requested` or `unresolved` |
+| `scripts/dev-obligation.ps1 -OffboardingId <id> -ObligationId <id> -Domain <domain> -Completed` (or `-Waived -Reason`, `-Failed -Reason`) | the domain that owns the obligation | `POST /v1/obligations/{obligation_id}/resolve` | the obligation is on the offboarding's board, `-Domain` is the domain it was raised against, it is `open` or `failed`, and the offboarding is not `retired` or `cancelled` |
+
+Their rules:
+
+- **Each reads first, and refuses with exit code 2, sending nothing,** naming what to do instead. A
+  deprovisioning report on an offboarding not yet released is refused with "release first"; on a
+  `failed` request with "send deprovisioning again", the resend of §Sending a Failed Deprovisioning
+  Again, then report the new attempt; on a `realized` one with "retire".
+- **The deprovisioning stand-in never retires and never resends.** Retirement stays a deliberate act
+  (§Where the deprovisioning outcome is recorded), and the resend is the operator's, in the console. An
+  `unresolved` request is resolved by reporting its outcome, as in production, never by a resend.
+- **The obligation stand-in acts for one named domain, and the API checks it.** The operator names the
+  domain they stand in for, and the request carries it, so `ErrWrongDomain` refuses a closure of
+  another domain's obligation exactly as it would refuse a real domain's mistake (§Negative). The
+  script refuses it before sending, too. A waiver and a failure need a reason, which is the row's
+  `detail`; the resolution records the operator as `resolved_by`. The first completion or waiver is
+  final, as the service rules; a `failed` obligation may still be completed or waived.
+- **The resolution requires an `Idempotency-Key`**, and the script sends one per run. The deprovisioning
+  report honours a key and does not require one (§API / Interface), so none is sent.
+- **Organization Experience offers neither control.** Its obligation board "offers no completion or
+  waiver": "An obligation is resolved by its accountable domain, which states its domain to the API",
+  and it "offers no control that would let an operator resolve another domain's obligation"
+  (`TDD-organization-experience-003` §As Served). A console control would be that control in
+  production too. The deprovisioning outcome is the provisioning system's, and the console does not
+  report outcomes (`TDD-organization-experience-002` §Operator Transitions). It does send the resend,
+  which is the operator's own act.
+- **`deploy-dev` runs both on every change** (`scripts/dev-wiring-proof.ps1` step 9): an offboarding
+  is begun, frozen and given two obligations; the deprovisioning report is refused before release and
+  a resolution under the wrong domain is refused and changes nothing; one obligation is completed and
+  the other waived; release; a failed deprovisioning, a refusal of it, a resend, a realized report,
+  and retirement.
+
+The procedure is `deploy/dev/README.md` §Offboarding a Tenant on the development server.
+
+| Option | Why not |
+| :-- | :-- |
+| A development flag that resolves obligations or realizes deprovisioning in the service | An inferred completion, which SAD-004 §5.6 forbids ("infers completion from no single response"), behind a flag production would carry unused. It would also take the failure, waiver and `unresolved` paths away from development |
+| Resolve and waive controls on the console's obligation board | The control `TDD-organization-experience-003` decided against: an operator closing another domain's obligation |
+| Stub services consuming `tenant.offboarding.released` and `obligation-raised` | Consumer registrations, delivery targets and workload credentials that decide outcomes nobody chose; none of it production's |
+| `curl` commands in the README | STD-GLB-009 1.3.0: a procedure step is a script CI runs |
+
 ### Legal Hold
 
 ```text
@@ -851,6 +911,11 @@ transaction. The route runs the same statements through the same view under a pr
   version is refused and changes nothing.
 - A second cancel request resumes an unfinished restoration and changes nothing else.
 - A freeze batch after a cancellation is refused.
+- On every `deploy-dev` run, `scripts/dev-deprovisioning.ps1` and `scripts/dev-obligation.ps1` carry an
+  offboarding to retirement: the report is refused before release, a resolution under the wrong domain
+  is refused and changes nothing, an obligation is completed and another waived, a failed
+  deprovisioning is refused, resent and reported realized, and the Tenant retires (1.13.0, §Offboarding
+  on a Development Server).
 
 ### Negative
 
@@ -958,6 +1023,8 @@ and sends a failed deprovisioning again. Written (1.11.0):
 | R1 | PostgreSQL 17, *CREATE VIEW*, Notes, <https://www.postgresql.org/docs/17/sql-createview.html>, accessed 2026-10-09: "By default, access to the underlying base relations referenced in the view is determined by the permissions of the view owner." and "If any of the underlying base relations has row-level security enabled, then by default, the row-level security policies of the view owner are applied, and access to any additional relations referred to by those policies is determined by the permissions of the view owner." |
 | R2 | Prometheus, *Metric and label naming*, <https://prometheus.io/docs/practices/naming/>, accessed 2026-10-09: "Remember that every unique combination of key-value label pairs represents a new time series" and "Do not use labels to store dimensions with high cardinality (many different label values), such as user IDs, email addresses, or other unbounded sets of values." |
 | R3 | PostgreSQL 17, *CREATE FUNCTION*, "Writing SECURITY DEFINER Functions Safely", <https://www.postgresql.org/docs/17/sql-createfunction.html>, accessed 2026-10-09: "For security, search_path should be set to exclude any schemas writable by untrusted users." |
+| R4 | The Twelve-Factor App, *XII. Admin processes*, <https://12factor.net/admin-processes>, accessed 2026-10-19: "One-off admin processes should be run in an identical environment as the regular long-running processes of the app." and "Admin code must ship with application code to avoid synchronization issues." |
+| R5 | The Twelve-Factor App, *X. Dev/prod parity*, <https://12factor.net/dev-prod-parity>, accessed 2026-10-19: "Keep development, staging, and production as similar as possible" and "The twelve-factor developer resists the urge to use different backing services between development and production" |
 
 ## Traceability
 
@@ -976,3 +1043,6 @@ and sends a failed deprovisioning again. Written (1.11.0):
 | Depends on | `TDD-organization-control-002` — Membership creation and suspension |
 | Depends on | `TDD-organization-control-003` — Tenant state transitions this flow drives |
 | Correlates with | `TDD-identity-control-001` — identity verification is the other half of the join |
+| Follows | The Twelve-Factor App, XII Admin processes and X Dev/prod parity — the development server's stand-ins for the deprovisioning report and the owning domains are scripts calling the real routes (1.13.0) |
+| Conforms to | STD-GLB-009 1.3.0 §Development Server Deployment — a procedure step is a script CI runs (1.13.0) |
+| Conforms to | `TDD-organization-experience-003` §As Served — the obligation board offers no completion or waiver, so the development stand-in is a script (1.13.0) |

@@ -23,7 +23,13 @@
 #   8. scripts/dev-provisioning.ps1, the development server's stand-in for the provisioning system
 #      (TDD-organization-control-003 1.15.0), refuses a Tenant whose provisioning was not started,
 #      reports a failure by correlation identifier, refuses a failed Tenant, and reports a retry
-#      realized. Step 4 also realizes its Tenant with it.
+#      realized. Step 4 also realizes its Tenant with it;
+#   9. scripts/dev-obligation.ps1 and scripts/dev-deprovisioning.ps1, the development server's
+#      stand-ins for the domains that own offboarding obligations and for the provisioning system's
+#      deprovisioning report (TDD-organization-control-004 1.13.0), carry step 8's Tenant through an
+#      offboarding to retirement: a report refused before release, an obligation refused to the wrong
+#      domain, one completed and one waived, a failed deprovisioning, a refusal of it, a resend, a
+#      realized report, and the retirement.
 #
 # Environment and SECRETS: as dev-wire.ps1, plus the kernel's console administrator for steps 4 and 5,
 # which read the kernel's Organizations and delete a user the way identity-control's Proof B does:
@@ -290,16 +296,19 @@ function Report-Version([string] $membershipId) {
     return [long]$row.membership_version
 }
 
-# Dev-Provisioning runs scripts/dev-provisioning.ps1, the development server's stand-in for the
-# provisioning system, as the operator runs it: its own process, its own sign-in. Its output is shown
-# indented, and its exit code returned (0 reported, 2 refused).
-function Dev-Provisioning([string[]] $arguments) {
-    $output = & pwsh -NoProfile -File (Join-Path $PSScriptRoot "dev-provisioning.ps1") -IdentityRepo $IdentityRepo `
+# Dev-Script runs one of the development server's stand-ins (scripts/dev-provisioning.ps1,
+# dev-obligation.ps1, dev-deprovisioning.ps1) as the operator runs it: its own process, its own
+# sign-in. Its output is shown indented, and its exit code returned (0 reported, 2 refused).
+function Dev-Script([string] $script, [string[]] $arguments) {
+    $output = & pwsh -NoProfile -File (Join-Path $PSScriptRoot $script) -IdentityRepo $IdentityRepo `
         -State $State @arguments 2>&1
     $code = $LASTEXITCODE
     $output | ForEach-Object { Write-Host "        $_" }
     return @{ code = $code; text = ($output -join "`n") }
 }
+function Dev-Provisioning([string[]] $arguments) { return Dev-Script "dev-provisioning.ps1" $arguments }
+function Dev-Obligation([string[]] $arguments) { return Dev-Script "dev-obligation.ps1" $arguments }
+function Dev-Deprovisioning([string[]] $arguments) { return Dev-Script "dev-deprovisioning.ps1" $arguments }
 
 $memberPrincipal = $null
 $memberId = $null
@@ -509,6 +518,68 @@ try {
     $retried = Require "the Tenant read after the retry" (Call "GET" "$organizationApi/v1/tenants/$provTenant" $null (Provider-Token) $null) 200
     Expect "the retry is a new request" ($retried.provisioning.correlation_id -ne $requested.correlation_id) $true
     Expect "realized, awaiting activation" "$($retried.status) $($retried.provisioning.state)" "provisioning realized"
+} catch {
+    Write-Host "  FAIL  $($_.Exception.Message)"
+    $failures++
+    $provTenant = $null
+}
+
+Write-Host ""
+Write-Host "9. the development server's stand-ins for the owning domains and the deprovisioning report carry an offboarding to retirement"
+try {
+    if ($null -eq $provTenant) { throw "step 8 left no Tenant to offboard" }
+    # deploy/dev/README.md §Offboarding a Tenant on the development server, with the routes the console
+    # sends.
+    $current = Require "step 8's Tenant read" (Call "GET" "$organizationApi/v1/tenants/$provTenant" $null (Provider-Token) $null) 200
+    $null = Require "it is activated" (Call "POST" "$organizationApi/v1/tenants/$provTenant/activate" @{
+            expected_version = $current.version } (Provider-Token) "proof-off-activate") 200
+    $current = Require "the Tenant read" (Call "GET" "$organizationApi/v1/tenants/$provTenant" $null (Provider-Token) $null) 200
+    $begun = Require "its offboarding begun" (Call "POST" "$organizationApi/v1/offboardings" @{
+            tenant_id = $provTenant; expected_version = $current.version } (Provider-Token) "proof-off-begin") 201
+    $off = $begun.offboarding_id
+    $base = "$organizationApi/v1/offboardings/$off"
+    Expect "with no active Membership left to freeze" $begun.active_memberships 0
+    $null = Require "its freeze completed" (Call "POST" "$base/complete-freeze" @{} (Provider-Token) "proof-off-freeze") 200
+    $export = Require "a product obligation raised" (Call "POST" "$base/obligations" @{
+            domain = "product"; type = "data-export" } (Provider-Token) "proof-off-raise-export") 201
+    $invoice = Require "a billing obligation raised" (Call "POST" "$base/obligations" @{
+            domain = "billing"; type = "final-invoice" } (Provider-Token) "proof-off-raise-invoice") 201
+
+    Expect "dev-deprovisioning.ps1 refuses an offboarding not yet released" `
+        (Dev-Deprovisioning @("-OffboardingId", $off, "-Realized")).code 2
+    Expect "dev-obligation.ps1 refuses to resolve product's obligation as billing" `
+        (Dev-Obligation @("-OffboardingId", $off, "-ObligationId", $export.obligation_id, "-Domain", "billing", "-Completed")).code 2
+    $board = Require "the board read" (Call "GET" "$base/obligations" $null (Provider-Token) $null) 200
+    Expect "and changed nothing" (@($board.obligations | Where-Object { $_.state -eq "open" }).Count) 2
+    Expect "dev-obligation.ps1 completes product's obligation, as product" `
+        (Dev-Obligation @("-OffboardingId", $off, "-ObligationId", $export.obligation_id, "-Domain", "product", "-Completed")).code 0
+    Expect "dev-obligation.ps1 waives billing's obligation, as billing, with a reason" `
+        (Dev-Obligation @("-OffboardingId", $off, "-ObligationId", $invoice.obligation_id, "-Domain", "billing", "-Waived",
+            "-Reason", "deploy-dev: no invoice is owed")).code 0
+    $board = Require "the board read again" (Call "GET" "$base/obligations" $null (Provider-Token) $null) 200
+    Expect "nothing is outstanding" @($board.outstanding).Count 0
+    Expect "the waiver is recorded as waived, not completed" `
+        (@($board.obligations | Where-Object { $_.obligation_id -eq $invoice.obligation_id })[0].state) "waived"
+
+    $null = Require "the offboarding released" (Call "POST" "$base/release" @{} (Provider-Token) "proof-off-release") 200
+    Expect "dev-deprovisioning.ps1 reports a failure" `
+        (Dev-Deprovisioning @("-OffboardingId", $off, "-Failed", "-Reason", "deploy-dev: the stand-in refuses this one")).code 0
+    $failed = Require "the offboarding read" (Call "GET" $base $null (Provider-Token) $null) 200
+    Expect "its deprovisioning is failed, with the detail" "$($failed.deprovisioning.state) $($failed.deprovisioning.detail)" `
+        "failed deploy-dev: the stand-in refuses this one"
+    Expect "dev-deprovisioning.ps1 refuses a failed deprovisioning" `
+        (Dev-Deprovisioning @("-OffboardingId", $off, "-Realized")).code 2
+    $current = Require "the Tenant read" (Call "GET" "$organizationApi/v1/tenants/$provTenant" $null (Provider-Token) $null) 200
+    Expect "Retire is refused while the deprovisioning is failed" (Call "POST" "$base/retire" @{
+            expected_version = $current.version } (Provider-Token) "proof-off-retire-early").code 412
+    $null = Require "the deprovisioning sent again" (Call "POST" "$base/deprovisioning/resend" @{} (Provider-Token) "proof-off-resend") 200
+    Expect "dev-deprovisioning.ps1 reports the new attempt realized" `
+        (Dev-Deprovisioning @("-OffboardingId", $off, "-Realized")).code 0
+    $current = Require "the Tenant read" (Call "GET" "$organizationApi/v1/tenants/$provTenant" $null (Provider-Token) $null) 200
+    $null = Require "the offboarding retired" (Call "POST" "$base/retire" @{
+            expected_version = $current.version } (Provider-Token) "proof-off-retire") 200
+    $retired = Require "the Tenant read after retirement" (Call "GET" "$organizationApi/v1/tenants/$provTenant" $null (Provider-Token) $null) 200
+    Expect "the Tenant is retired" $retired.status "retired"
 } catch {
     Write-Host "  FAIL  $($_.Exception.Message)"
     $failures++
