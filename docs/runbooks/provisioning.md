@@ -1,6 +1,6 @@
 # Runbook: stuck, unresolved and refused provisioning
 
-Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
+Version 1.2.0. Owner: Core Platform Team. Last reviewed 2026-10-19.
 
 A Tenant is not `active` until the external system that owns its isolation boundary confirms the
 boundary exists (SAD-004 §5.1). This service records the desired state as a provisioning request,
@@ -8,7 +8,9 @@ publishes it, and correlates the realized status back by the request's correlati
 (TDD-organization-control-003 §Provisioning Correlation). This runbook covers the three runbooks
 TDD-003 §Operational Notes requires: stuck provisioning, unresolved provisioning resolution, and
 Tenant activation refused. From 1.1.0 it also answers a scheduled sweep that has stopped
-(TDD-003 §Scheduled Sweeps).
+(TDD-003 §Scheduled Sweeps). From 1.2.0 it says how an `unresolved` request is resolved (TDD-003
+§Resolving an `unresolved` Request) and what reports outcomes on a development server, where no
+provisioning system runs (TDD-003 §The Provisioning System on a Development Server).
 
 ## Trigger
 
@@ -54,6 +56,7 @@ The gauges count requests and name no Tenant. The Tenant is found in diagnosis.
    | Tenant `status` | `provisioning.state` | Meaning |
    | :-- | :-- | :-- |
    | `requested` | `requested` | Recorded and published, not yet dispatched here |
+   | `requested` | `unresolved` | Recorded and published, and nobody dispatched it within `ORGANIZATION_PROVISIONING_TIMEOUT`: the sweep aged it. The outcome is unknown |
    | `provisioning` | `requested` | Dispatched, waiting on the provisioning system |
    | `provisioning` | `unresolved` | Timed out with no outcome: ambiguous |
    | `provisioning` | `realized` | Built; waiting on an operator's activation |
@@ -67,9 +70,11 @@ The gauges count requests and name no Tenant. The Tenant is found in diagnosis.
 | Finding | Act |
 | :-- | :-- |
 | `requested` Tenant, `requested` request | Dispatch (A) |
+| `requested` Tenant, `unresolved` request | Dispatch (A): `unresolved` counts as outstanding, and the dispatch records the same attempt. Then as `unresolved` |
 | `provisioning`, `requested`, the provisioning system still working | Wait. Past `ORGANIZATION_PROVISIONING_TIMEOUT` (default 30m) the scheduled sweep marks it `unresolved` within one reconcile interval; (B) does it now |
 | `provisioning`, `requested`, the provisioning system has no record of it | Report `failed` on its confirmation (C), then retry (D) |
-| `unresolved` | Establish the outcome with the provisioning system's owner, then report it (C) |
+| `unresolved` | Establish the outcome with the provisioning system's owner, then report it (C). Never retry it; nothing resolves it automatically |
+| A development server, any Tenant waiting on an outcome | There is no provisioning system: report the outcome with `scripts/dev-provisioning.ps1` (C) |
 | `failed` | Fix the cause the `detail` names, then retry (D) |
 | `realized` | Activate (E) |
 | Activation answers `412` | Read the message (E) |
@@ -107,6 +112,20 @@ and do not require it.
   - `412`: the identifier matches requests for more than one Tenant. It is refused rather than
     guessed; resolve each Tenant with its owner.
   A realized outcome does not activate the Tenant. Activation stays a deliberate act (E).
+
+  **On a development server** no provisioning system runs, so the operator is its stand-in, with
+  `scripts/dev-provisioning.ps1` (`deploy/dev/README.md` §Provisioning a Tenant on the development
+  server). It reads the Tenant first, refuses unless the Tenant is `provisioning` with a latest request
+  `requested` or `unresolved`, and then sends the same report:
+
+  ```sh
+  pwsh ./scripts/dev-provisioning.ps1 -IdentityRepo <identity-control checkout> -State <wiring state file> \
+      -TenantId <tenant_id> -Realized
+  pwsh ./scripts/dev-provisioning.ps1 -IdentityRepo <identity-control checkout> -State <wiring state file> \
+      -CorrelationId <correlation_id> -Failed -Reason "<why>"
+  ```
+
+  It exits 2 on a refusal, having sent nothing. Never use it where a provisioning system runs.
 - **D. Retry a failed provisioning.** `POST /v1/tenants/{tenant_id}/provisioning`
   `{"expected_version": <version>}` on a `failed` Tenant writes a new request with a new correlation
   identifier, copying the desired profile from the Tenant, and moves it back to `provisioning`. The
@@ -159,6 +178,6 @@ and do not require it.
 
 | # | Source |
 | :-- | :-- |
-| R1 | TDD-organization-control-003 §Tenant State Machine, §Tenant Activation, §Provisioning Correlation, §Scheduled Sweeps, §Operational Notes |
+| R1 | TDD-organization-control-003 §Tenant State Machine, §Tenant Activation, §Provisioning Correlation, §Resolving an `unresolved` Request, §The Provisioning System on a Development Server, §Scheduled Sweeps, §Operational Notes |
 | R2 | SAD-004 §5.1, §7.5 |
 | R3 | NIST SP 800-61r3, §2.3, <https://doi.org/10.6028/NIST.SP.800-61r3>: "Playbooks provide actionable steps or tasks for people to perform during various scenarios or situations." |

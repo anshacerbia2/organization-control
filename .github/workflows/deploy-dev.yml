@@ -10,8 +10,10 @@ name: deploy-dev
 # its stack alone; only this job proves that the three meet: Organization's grant reaches
 # identity-control's projection, the ceremony's grant is retired by it, a Membership a Tenant
 # administrator grants here reaches identity-control and the kernel and survives a relink of its
-# Principal, priority events are timed against the enforcement budget, and an Organization outage
-# leaves the emergency grant honored (TDD-identity-control-006, ADR-ORG-002, ADR-ORG-003).
+# Principal, priority events are timed against the enforcement budget, an Organization outage
+# leaves the emergency grant honored, and scripts/dev-provisioning.ps1, the development server's
+# stand-in for the provisioning system, reports and refuses as deploy/dev/README.md says
+# (TDD-identity-control-006, ADR-ORG-002, ADR-ORG-003, TDD-organization-control-003 1.15.0).
 #
 # The kernel and identity-control steps call their own repositories' scripts; the glue around them is
 # identity-control's deploy-dev's, kept the same. The daily run catches a change on either main that

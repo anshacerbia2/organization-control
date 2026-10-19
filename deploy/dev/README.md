@@ -83,6 +83,7 @@ image, so this rebuilds them too.
 | :-- | :-- | :-- |
 | `bootstrap-provider` | `docker compose run --rm bootstrap-provider -principal-id <id> -operator "<you>" -reason "<why>"` | once per Control Database: it refuses while any grant exists |
 | `maintenance` | `docker compose run --rm maintenance` | daily, from cron; it exits 3 on a security incident open past 24 hours |
+| `scripts/dev-provisioning.ps1` | `pwsh ./scripts/dev-provisioning.ps1 -IdentityRepo <identity-control checkout> -State <wiring state file> -TenantId <id> -Realized` (or `-Failed -Reason "<why>"`) | for each Tenant waiting on provisioning: it stands in for the provisioning system (§Provisioning a Tenant on the development server) |
 
 `maintenance` creates the outbox partitions ahead, applies the retention, purges expired Membership
 batch previews and counts stale incidents (the repository README §Building the database). On the
@@ -263,6 +264,54 @@ IDENTITY_ORGANIZATION_BASE_URL=http://organization-control:8080
 The proof deletes a Keycloak user and registers a client and a Tenant per run, so run it only
 against a kernel and a database this server or a CI job owns.
 
+## Provisioning a Tenant on the development server
+
+A Tenant is created `requested` and becomes `active` only after the provisioning system reports that
+its boundary exists (TDD-organization-control-003 §Tenant State Machine). **No provisioning system runs
+on a development server.** You stand in for it with `scripts/dev-provisioning.ps1`, which reports the
+outcome through the two routes the provisioning system calls, `POST /v1/provisioning/realized` and
+`/failed`, with your provider token (TDD-organization-control-003 1.15.0 §The Provisioning System on a
+Development Server). Production has a real provisioning system and never runs it.
+
+It needs the wiring done (§Wiring to other services): the state file `dev-wire.ps1` wrote, and the
+same variables as the wiring scripts, `IDENTITY_CALLER_PASSWORD` and `KEYCLOAK_ISSUER` exported, and
+the operator's TOTP file (identity-control's `deploy/dev/keys/operator-totp.json`, found on its own, or
+`IDENTITY_OPERATOR_TOTP_FILE`).
+
+1. **Request the Tenant**, in Organization Experience in provider mode (Tenants, Request tenant).
+   It reads `requested`, "Awaiting provisioning".
+2. **Start provisioning** on its row (Tenants, Start provisioning). The Tenant moves to
+   `provisioning`, and its row shows the request's correlation identifier.
+3. **Report the outcome**, from this repository's root:
+
+   ```sh
+   pwsh ./scripts/dev-provisioning.ps1 -IdentityRepo /home/development/apps/identity-control \
+       -State ~/scnehaux-wiring/state.json -TenantId <tenant_id> -Realized
+   ```
+
+   `-CorrelationId <correlation_id>` names the Tenant by its request instead. To try the failure path,
+   `-Failed -Reason "<why>"`: the Tenant becomes `failed` with that reason, and its row offers
+   Retry provisioning, which makes a new request to report on.
+4. **Activate** on its row (Tenants, Activate). The Tenant is `active`, and Memberships can be granted
+   into it.
+
+The script prints the Tenant, its request, what it reported and the result. It refuses, sending
+nothing and exiting 2, when the Tenant is not `provisioning` (a `requested` one: start provisioning
+first; a `failed` one: retry first) or when the latest request already has an outcome. It never
+activates and never retries.
+
+**A request that waited longer than `ORGANIZATION_PROVISIONING_TIMEOUT` (30 minutes) reads
+`unresolved`**: the scheduled sweep ages any request with no outcome, including one nobody
+dispatched. The console then says "outcome unknown, do not retry". It is resolved by reporting its
+outcome, never by a retry (TDD-organization-control-003 §Resolving an `unresolved` Request):
+
+- a Tenant still `requested`: Start provisioning (step 2) is still allowed, because it records the same
+  attempt; then steps 3 and 4;
+- a Tenant in `provisioning`: steps 3 and 4. The script accepts an `unresolved` request.
+
+`deploy-dev` runs this script on every change (`scripts/dev-wiring-proof.ps1` steps 4 and 8), so the
+procedure here is the one that was tested.
+
 ## Keys
 
 One private key lives here: `./keys/organization-control-workload.pem`, the workload key this service
@@ -360,4 +409,6 @@ the runbook's procedure, which moves each Membership a consumer holds at a highe
 | `network ... needs to be recreated` after adding the override | The subnet changed. `docker compose down` (no `-v`), then `docker compose up -d` |
 | `maintenance` exits 3 | An unresolved dead letter is older than 24 hours. The run's work is done; resolve the incident |
 | A command answers `400` naming `Idempotency-Key` | Every command requires one: a value unique to the command, repeated unchanged on a retry |
+| A Tenant stays "Awaiting provisioning" | Nothing reports provisioning outcomes on a development server: §Provisioning a Tenant on the development server |
+| `dev-provisioning.ps1` exits 2 | It refused and sent nothing; its `refused` line says why and what to do first |
 | identity-control logs the provider projection stale | This service is down, or delivery is not configured: §Wiring to other services, steps 5 to 7 |

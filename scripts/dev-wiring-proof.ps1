@@ -19,7 +19,11 @@
 #      acknowledgement, its publication and identity-control's applied receipt, against
 #      TDD-organization-control-002 §Enforcement Budget;
 #   7. with Organization Control stopped, identity-control reads the projection stale and still
-#      honors the emergency grant; started again, the projection reads fresh.
+#      honors the emergency grant; started again, the projection reads fresh;
+#   8. scripts/dev-provisioning.ps1, the development server's stand-in for the provisioning system
+#      (TDD-organization-control-003 1.15.0), refuses a Tenant whose provisioning was not started,
+#      reports a failure by correlation identifier, refuses a failed Tenant, and reports a retry
+#      realized. Step 4 also realizes its Tenant with it.
 #
 # Environment and SECRETS: as dev-wire.ps1, plus the kernel's console administrator for steps 4 and 5,
 # which read the kernel's Organizations and delete a user the way identity-control's Proof B does:
@@ -286,6 +290,17 @@ function Report-Version([string] $membershipId) {
     return [long]$row.membership_version
 }
 
+# Dev-Provisioning runs scripts/dev-provisioning.ps1, the development server's stand-in for the
+# provisioning system, as the operator runs it: its own process, its own sign-in. Its output is shown
+# indented, and its exit code returned (0 reported, 2 refused).
+function Dev-Provisioning([string[]] $arguments) {
+    $output = & pwsh -NoProfile -File (Join-Path $PSScriptRoot "dev-provisioning.ps1") -IdentityRepo $IdentityRepo `
+        -State $State @arguments 2>&1
+    $code = $LASTEXITCODE
+    $output | ForEach-Object { Write-Host "        $_" }
+    return @{ code = $code; text = ($output -join "`n") }
+}
+
 $memberPrincipal = $null
 $memberId = $null
 try {
@@ -299,8 +314,11 @@ try {
     $tenantId = $requested.tenant.tenant_id
     $null = Require "its provisioning dispatched" (Call "POST" "$organizationApi/v1/tenants/$tenantId/provisioning" @{
             expected_version = $requested.tenant.version } (Provider-Token) "proof-provision") 200
-    $null = Require "its provisioning realized" (Call "POST" "$organizationApi/v1/provisioning/realized" @{
-            correlation_id = $requested.correlation_id } (Provider-Token) "proof-realized") 200
+    # The provisioning system's report, made the way an operator makes it on a development server
+    # (deploy/dev/README.md §Provisioning a Tenant on the development server).
+    $reported = Dev-Provisioning @("-TenantId", $tenantId, "-Realized")
+    if ($reported.code -ne 0) { throw "scripts/dev-provisioning.ps1 -Realized exited $($reported.code)" }
+    Write-Host "  ok    its provisioning realized, by scripts/dev-provisioning.ps1"
     $current = Require "the Tenant read" (Call "GET" "$organizationApi/v1/tenants/$tenantId" $null (Provider-Token) $null) 200
     $null = Require "the Tenant activated" (Call "POST" "$organizationApi/v1/tenants/$tenantId/activate" @{
             expected_version = $current.version } (Provider-Token) "proof-activate") 200
@@ -460,6 +478,40 @@ try {
 }
 $null = Wait-For "started again, the projection reads fresh" 90 {
     (Logs $identityDeploy "identity-control" $startedAt) -match "the provider projection is fresh"
+}
+
+Write-Host ""
+Write-Host "8. the development server's stand-in for the provisioning system reports a refusal, and refuses what it must"
+try {
+    $organization = Require "an Organization registered" (Call "POST" "$organizationApi/v1/organizations" @{
+            display_name = "Provisioning proof $run"; classification = "customer" } (Provider-Token) "proof-prov-organization") 201
+    $requested = Require "a Tenant requested" (Call "POST" "$organizationApi/v1/tenants" @{
+            organization_id = $organization.organization_id; display_name = "Provisioning proof $run"
+            isolation_profile = "pooled" } (Provider-Token) "proof-prov-tenant") 201
+    $provTenant = $requested.tenant.tenant_id
+    Expect "the script refuses a Tenant whose provisioning was not started" `
+        (Dev-Provisioning @("-TenantId", $provTenant, "-Realized")).code 2
+    $null = Require "its provisioning dispatched" (Call "POST" "$organizationApi/v1/tenants/$provTenant/provisioning" @{
+            expected_version = $requested.tenant.version } (Provider-Token) "proof-prov-dispatch") 200
+    Expect "the script reports a failure, found by its correlation identifier" `
+        (Dev-Provisioning @("-CorrelationId", $requested.correlation_id, "-Failed", "-Reason", "deploy-dev: the stand-in refuses this one")).code 0
+    $failed = Require "the Tenant read" (Call "GET" "$organizationApi/v1/tenants/$provTenant" $null (Provider-Token) $null) 200
+    Expect "the Tenant is failed" $failed.status "failed"
+    Expect "with the failure's detail" $failed.provisioning.detail "deploy-dev: the stand-in refuses this one"
+    Expect "the script refuses to report an outcome for a failed Tenant" `
+        (Dev-Provisioning @("-TenantId", $provTenant, "-Realized")).code 2
+    $unchanged = Require "the Tenant read again" (Call "GET" "$organizationApi/v1/tenants/$provTenant" $null (Provider-Token) $null) 200
+    Expect "and changed nothing" "$($unchanged.status) $($unchanged.version) $($unchanged.provisioning.state)" `
+        "$($failed.status) $($failed.version) $($failed.provisioning.state)"
+    $null = Require "its provisioning retried" (Call "POST" "$organizationApi/v1/tenants/$provTenant/provisioning" @{
+            expected_version = $failed.version } (Provider-Token) "proof-prov-retry") 200
+    Expect "the script reports the retry realized" (Dev-Provisioning @("-TenantId", $provTenant, "-Realized")).code 0
+    $retried = Require "the Tenant read after the retry" (Call "GET" "$organizationApi/v1/tenants/$provTenant" $null (Provider-Token) $null) 200
+    Expect "the retry is a new request" ($retried.provisioning.correlation_id -ne $requested.correlation_id) $true
+    Expect "realized, awaiting activation" "$($retried.status) $($retried.provisioning.state)" "provisioning realized"
+} catch {
+    Write-Host "  FAIL  $($_.Exception.Message)"
+    $failures++
 }
 
 if ($failures -gt 0) {
