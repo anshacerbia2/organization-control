@@ -130,7 +130,9 @@ dashboard presents the sum.
 
 `deploy/dev` runs this service on the shared development server, the way every service there is
 deployed (STD-GLB-009 §Development Server Deployment). Its README is the procedure, and its
-§Wiring to other services connects this service to the Identity Control API.
+§Wiring to other services connects this service to the Identity Control API. No provisioning system
+runs there, so §Provisioning a Tenant on the development server is how a requested Tenant becomes
+active.
 
 ## Building the database
 
@@ -569,6 +571,19 @@ The design's API list names none of these four provisioning routes; that is an o
 prohibition, since it mandates realized-status correlation, gives this service no inbound transport
 but HTTP, and `POST /v1/offboardings/{id}/deprovisioning` already reports the other direction's
 outcome the same way.
+
+**An `unresolved` request is resolved by reporting its outcome.** The provisioning system, or an
+operator with its answer, sends `realized` or `failed` with the correlation identifier; either is
+accepted on an `unresolved` request. Nothing retries it and nothing resolves it automatically. A Tenant
+still `requested` whose request timed out can still be dispatched: that records the same attempt
+(TDD-organization-control-003 1.15.0 §Resolving an `unresolved` Request).
+
+**On a development server the operator stands in for the provisioning system**, with
+`scripts/dev-provisioning.ps1` (`-Realized`, or `-Failed -Reason`), which calls the same two routes and
+refuses a Tenant not in `provisioning` or a request that already has an outcome
+(TDD-organization-control-003 1.15.0 §The Provisioning System on a Development Server;
+`deploy/dev/README.md` §Provisioning a Tenant on the development server). `deploy-dev` runs it on every
+change.
 
 ### `Idempotency-Key`
 

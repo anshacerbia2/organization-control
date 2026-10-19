@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.14.0
+  version: 1.15.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-09
+  last_reviewed: 2026-10-19
   parent_sad: SAD-004
 ---
 
@@ -824,6 +824,73 @@ outcome is unknown is how a Tenant gets provisioned twice, and EAD-004 §6.6 req
 critical mutations to define duplicate protection at the business boundary rather than
 at the transport.
 
+### Resolving an `unresolved` Request (1.15.0)
+
+The algorithm above ends "reconciliation queries the provisioning system and resolves it", and
+§Scheduled Sweeps says how: "Resolving an `unresolved` request stays an operator's act with the
+provisioning system's answer behind it". This section gathers what that means, because the console
+and the development server both have to say it to an operator. It describes behaviour the coordinator
+already has; it adds none.
+
+| Question | Answer |
+| :-- | :-- |
+| What resolves it | Its outcome, reported through `POST /v1/provisioning/realized` or `/failed` with the request's correlation identifier: by the provisioning system, or by an operator on its behalf with its answer in the reason (`docs/runbooks/provisioning.md` C). Either outcome is accepted on an `unresolved` request; §Testing Strategy's "A realized status arriving after the timeout resolves the request by correlation" is this |
+| Who finds the outcome | The operator, from the provisioning system's owner, by the correlation identifier. This service has no query interface on the provisioning system (§Scheduled Sweeps) |
+| What does not resolve it | A retry: `failed -> provisioning` is the only retry, and an `unresolved` request's Tenant is never `failed`. The sweep: it only ages `requested` to `unresolved`. Anything automatic: success is never inferred (SAD-004 §7.5) |
+| After a realized report | The Tenant is `provisioning`, awaiting activation (§Tenant Activation). Activation is still the operator's |
+| After a failed report | The Tenant is `failed`, with the detail. A retry is then a new request with a new correlation identifier |
+
+**A Tenant still `requested` whose request aged to `unresolved` may be dispatched.** The sweep ages a
+request from the moment intake recorded it, so a Tenant nobody dispatched within
+`ORGANIZATION_PROVISIONING_TIMEOUT` reads `requested` with an `unresolved` request. `POST
+/v1/tenants/{tenant_id}/provisioning` accepts it: the dispatch requires an outstanding request, and
+`unresolved` counts as outstanding, because "a request that timed out may still be in flight" and a
+dispatch recorded against it "is a statement about the same attempt, not a new one"
+(`internal/tenant/coordinator.go`, `outstandingStatement`). The dispatch writes no new request and
+leaves the request `unresolved`; its outcome is then reported as the table says.
+
+### The Provisioning System on a Development Server (1.15.0)
+
+**No provisioning system runs on a development server.** A Tenant requested there stays `requested`
+until a provider dispatches it, and `provisioning` after that, because nothing reports an outcome.
+Until 1.15.0 only `scripts/dev-wiring-proof.ps1` reported one, inline, for the Tenant it made.
+
+**Decision: an operator script, `scripts/dev-provisioning.ps1`, stands in for it.** It reports
+`realized` or `failed` (with a reason) for one Tenant, named by its identifier or by its correlation
+identifier, through the two routes the provisioning system calls, with the operator's provider token
+from the wiring state file. Its rules:
+
+- It reads the Tenant first, and refuses, sending nothing, unless the Tenant is `provisioning` and its
+  latest provisioning request is `requested` or `unresolved`. A Tenant still `requested` is refused
+  with "start provisioning first": the dispatch stays the operator's act in the console, as in
+  production. A `failed` Tenant is refused with "retry first".
+- A failure needs a reason, which becomes the request's `detail`.
+- It never activates and never retries. It prints the Tenant, the request before, what it reported,
+  and the request and Tenant after.
+- It is a development tool. Production's outcomes come from the real provisioning system through the
+  same routes; nothing in the service knows the script exists.
+- `deploy-dev` runs it on every change (`scripts/dev-wiring-proof.ps1` steps 4 and 8): a realized
+  report, a refusal before dispatch, a failure found by correlation identifier, a refusal of a failed
+  Tenant that changes nothing, and a retry realized.
+
+The procedure is `deploy/dev/README.md` §Provisioning a Tenant on the development server: start
+provisioning in Organization Experience, run the script, then activate in Organization Experience.
+
+**Why a script calling the real routes.** The Twelve-Factor App asks that "One-off admin processes
+should be run in an identical environment as the regular long-running processes of the app" and that
+"Admin code must ship with application code to avoid synchronization issues" [R7]. The script ships in
+this repository and calls the deployed service as any provider does. It also keeps development like
+production where it matters: "The twelve-factor developer resists the urge to use different backing
+services between development and production" [R8]. The routes, the authentication, the correlation
+and the state checks a development Tenant passes through are production's; only the caller of two
+routes differs.
+
+| Option | Why not |
+| :-- | :-- |
+| A development flag that makes the service realize every dispatch itself | It puts an inferred success into the service, the inference §Provisioning Correlation and SAD-004 §7.5 refuse, behind a flag production would carry unused. It also takes the failure and `unresolved` paths away from development, where an operator should be able to see them |
+| A stub provisioning service consuming `tenant.lifecycle.requested` | It needs a consumer registration, a delivery target and a workload credential, and would still decide outcomes nobody chose. More moving parts than the gap, and none of them production's |
+| `curl` commands in the README | STD-GLB-009 1.3.0: a procedure step is a script CI runs. A hand-typed call is the step CI does not prove |
+
 ### Scheduled Sweeps
 
 **The two periodic sweeps run in this process (1.14.0).** "On timeout with no status" above needs
@@ -996,6 +1063,10 @@ state (`TDD-organization-control-004` §Membership Activation: "if expired: mark
 - A timeout with no status produces `unresolved`, not `failed`.
 - An unresolved request is not retried automatically.
 - A realized status arriving after the timeout resolves the request by correlation.
+- On every `deploy-dev` run, `scripts/dev-provisioning.ps1` realizes the wiring proof's Tenant, refuses
+  a Tenant not yet dispatched, reports a failure found by correlation identifier, refuses a failed
+  Tenant without changing it, and realizes a retry (1.15.0, §The Provisioning System on a
+  Development Server).
 - A duplicate realized status produces one effect.
 - The scheduled sweep, on the raw provider connections, ages a request past the timeout and files no
   privileged-access record; through its view it cannot move a request out of any state but
@@ -1089,6 +1160,8 @@ three.
 | Conforms to | draft-ietf-httpapi-idempotency-key-header-07 §2.6 — a retry after completion answers the first result; recorded with the effect (1.11.0) |
 | Governed by | ADR-ORG-002 §5.1, §5.6 — provider authority is a person's activation; its access record is reviewed, so a timer does not file one (1.14.0) |
 | Follows | `TDD-identity-control-003` §Reconciliation — every replica schedules an in-process sweep (1.14.0) |
+| Follows | The Twelve-Factor App, XII Admin processes and X Dev/prod parity — the development server's provisioning stand-in is a script in this repository calling the real routes (1.15.0) |
+| Conforms to | STD-GLB-009 1.3.0 §Development Server Deployment — a procedure step is a script CI runs (1.15.0) |
 
 | # | Source |
 | :-- | :-- |
@@ -1098,3 +1171,5 @@ three.
 | R4 | Prometheus, *Instrumentation*, "Timestamps, not time since", <https://prometheus.io/docs/practices/instrumentation/>, accessed 2026-10-09: "If you want to track the amount of time since something happened, export the Unix timestamp at which it happened - not the time since it happened. With the timestamp exported, you can use the expression time() - my_timestamp_metric to calculate the time since the event, removing the need for update logic and protecting you against the update logic getting stuck." and, of batch jobs, "The key metric of a batch job is the last time it succeeded." |
 | R5 | Prometheus, *Alerting*, "Batch jobs", <https://prometheus.io/docs/practices/alerting/>, accessed 2026-10-09: "For batch jobs it makes sense to page if the batch job has not succeeded recently enough, and this will cause user-visible problems. This should generally be at least enough time for 2 full runs of the batch job." |
 | R6 | PostgreSQL 17, *Row Security Policies*, <https://www.postgresql.org/docs/17/ddl-rowsecurity.html>, accessed 2026-10-09: "Superusers and roles with the BYPASSRLS attribute always bypass the row security system when accessing a table." |
+| R7 | The Twelve-Factor App, *XII. Admin processes*, <https://12factor.net/admin-processes>, accessed 2026-10-19: "One-off admin processes should be run in an identical environment as the regular long-running processes of the app." and "Admin code must ship with application code to avoid synchronization issues." |
+| R8 | The Twelve-Factor App, *X. Dev/prod parity*, <https://12factor.net/dev-prod-parity>, accessed 2026-10-19: "Keep development, staging, and production as similar as possible" and "The twelve-factor developer resists the urge to use different backing services between development and production" |
