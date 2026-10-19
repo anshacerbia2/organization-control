@@ -1437,8 +1437,8 @@ table "invitation" {
     null = false
     type = uuid
   }
-  // Null until the invited party has a Principal. Populated on identity verification, which
-  // is why the state machine carries `identity_verified` between pending and accepted.
+  // Null until the invitation is accepted, and then the caller who accepted it: the Membership is
+  // created for that Principal alone (ADR-ORG-007 §5.1).
   column "principal_id" {
     null = true
     type = uuid
@@ -1476,7 +1476,7 @@ table "invitation" {
   }
 
   check "invitation_state_check" {
-    expr = "state IN ('pending', 'identity_verified', 'accepted', 'expired', 'revoked')"
+    expr = "state IN ('pending', 'accepted', 'expired', 'revoked')"
   }
   check "invitation_subject_check" {
     expr = "subject_type IN ('human', 'workload')"
@@ -1495,7 +1495,7 @@ table "invitation" {
     on {
       expr = "COALESCE(workspace_id, tenant_id)"
     }
-    where = "state IN ('pending', 'identity_verified')"
+    where = "state = 'pending'"
   }
 
   // A token resolves to at most one invitation, and it is resolved before any Tenant is known.

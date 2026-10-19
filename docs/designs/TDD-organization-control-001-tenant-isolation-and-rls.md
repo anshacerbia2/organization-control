@@ -201,7 +201,9 @@ SHA-256 of the token the caller presented and nothing else, so the role sees at 
 that token selects (`token_hash` is unique across the table). The ADR asks for "a role with no
 login, entered as `organization_self_rt` is"; this is that role, with one more policy, rather than a
 sixth role. The two reads never meet: the contexts read binds no token hash, the acceptance read
-binds no Principal, and each policy raises on an unbound transaction rather than reading nothing.
+binds no Principal. The context policies raise on an unbound transaction; the invitation policy
+raises on a connection that never bound its setting and matches nothing on one that bound it in an
+earlier transaction, because `LOCAL` leaves the setting empty and no `token_hash` is empty.
 
 It writes nothing, reads no other Principal's row, and reaches no Tenant the Principal is not a
 member of. It has no login and no DSN of its own. `organization_rt` is granted it
@@ -1531,7 +1533,7 @@ administrative connection is explicitly not accepted as evidence.
 - A human token, with or without `tenant_id`, with or without a provider grant, is a self caller on
   `POST /v1/invitations/accept`; a workload token there is `403` (1.26.0).
 - As the self role with a token hash bound, only the invitation holding that hash is readable, no
-  invitation is writable, and an unbound read raises; the tenant role reaches nothing through
+  invitation is writable, and an unbound read raises or reads nothing; the tenant role reaches nothing through
   `invitation_self_redeem` (1.26.0).
 - `WithSelfInvitation` and `WithSelfInTenant` refuse a tenant, provider or consumer scope, a blank
   hash and a nil Tenant (1.26.0).

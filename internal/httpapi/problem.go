@@ -149,7 +149,11 @@ var mapping = []struct {
 	{invitation.ErrSettled, platform.StateTransitionRefused},
 	{invitation.ErrTransitionRefused, platform.StateTransitionRefused},
 	{invitation.ErrExpired, platform.PreconditionUnmet},
-	{invitation.ErrTenantNotActive, platform.PreconditionUnmet},
+	// ADR-ORG-007 §5.4: the one refusal for every failed lookup is 404, and a refused Tenant is 409,
+	// because by then the caller has proved they hold the invited address.
+	{invitation.ErrNotAcceptable, platform.NotFound},
+	{invitation.ErrIdentityUnavailable, platform.DependencyUnavailable},
+	{invitation.ErrTenantNotActive, platform.StateTransitionRefused},
 	{invitation.ErrAlreadyMember, platform.StateTransitionRefused},
 	{invitation.ErrTTL, platform.ValidationFailed},
 	{invitation.ErrToken, platform.ValidationFailed},

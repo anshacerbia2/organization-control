@@ -113,3 +113,70 @@ func TestNoOutboundHTTPClient(t *testing.T) {
 		t.Fatalf("the walk parsed only %d files, so it is not covering the excepted packages", scanned)
 	}
 }
+
+// TestTheIdentityClientIsTheOnlyCaller holds internal/identity, the one package arch.json excepts to
+// call out (ADR-ORG-007 §5.3), to one client construction and one request, built in its non-test
+// files, to the address match path. Its tests serve with httptest and are not walked: a test server
+// is inbound.
+func TestTheIdentityClientIsTheOnlyCaller(t *testing.T) {
+	t.Parallel()
+
+	root, err := filepath.Abs(filepath.Join("..", "identity"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	matchPath := false
+	scanned := 0
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fileSet := token.NewFileSet()
+		file, err := parser.ParseFile(fileSet, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Errorf("parse %s: %v", path, err)
+			return nil
+		}
+		scanned++
+		ast.Inspect(file, func(node ast.Node) bool {
+			switch n := node.(type) {
+			case *ast.CompositeLit:
+				// http.Client is counted where one is constructed, not where the type is named.
+				if selector, ok := n.Type.(*ast.SelectorExpr); ok {
+					if pkg, ok := selector.X.(*ast.Ident); ok && pkg.Name == "http" && selector.Sel.Name == "Client" {
+						counts["http.Client"]++
+					}
+				}
+			case *ast.SelectorExpr:
+				if pkg, ok := n.X.(*ast.Ident); ok && pkg.Name+"."+n.Sel.Name != "http.Client" {
+					counts[pkg.Name+"."+n.Sel.Name]++
+				}
+			case *ast.BasicLit:
+				if n.Value == `"identifiers:match"` {
+					matchPath = true
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk: %v", walkErr)
+	}
+	if scanned == 0 {
+		t.Fatal("internal/identity has no source file to check")
+	}
+	allowed := map[string]int{"http.Client": 1, "http.NewRequestWithContext": 1}
+	for _, form := range outboundForms {
+		if got, want := counts[form.selector], allowed[form.selector]; got != want {
+			t.Errorf("internal/identity uses %s %d times, want %d: it %s", form.selector, got, want, form.why)
+		}
+	}
+	if !matchPath {
+		t.Error("internal/identity does not name the identifiers:match path it is excepted for")
+	}
+}

@@ -219,13 +219,16 @@ GRANT UPDATE (restored_at) ON membership.offboarding_freeze TO organization_rt;
 GRANT SELECT ON membership.offboarding_freeze TO organization_provider_rt;
 
 -- invitation.invitation
---   organization_rt          SELECT, INSERT, UPDATE   issue, accept, revoke
---   organization_provider_rt SELECT, UPDATE           identity verification across Tenants; the
---                                                     expiry sweep writes through
---                                                     operation.invitation_expiry instead
-GRANT USAGE ON SCHEMA invitation TO organization_rt, organization_provider_rt;
+--   organization_rt          SELECT, INSERT, UPDATE   issue, revoke, and acceptance's write in the
+--                                                     invitation's Tenant (db.WithSelfInTenant)
+--   organization_provider_rt nothing                  the expiry sweep writes through
+--                                                     operation.invitation_expiry; identity
+--                                                     verification, the one provider write, was
+--                                                     removed with ADR-ORG-007
+--   organization_self_rt     SELECT on eight columns  acceptance's read of the one row the token
+--                                                     selects (the self role, below)
+GRANT USAGE ON SCHEMA invitation TO organization_rt;
 GRANT SELECT, INSERT, UPDATE ON invitation.invitation TO organization_rt;
-GRANT SELECT, UPDATE         ON invitation.invitation TO organization_provider_rt;
 
 -- operation.offboarding, operation.offboarding_obligation -- provider only. Offboarding is a
 -- provider operation; its freeze of Memberships runs under tenant scope and touches only
@@ -755,8 +758,18 @@ GRANT SELECT (membership_id, principal_id, tenant_id, workspace_id, status)
 GRANT SELECT (tenant_id, display_name, status) ON tenant.tenant TO organization_self_rt;
 GRANT SELECT (principal_id, tenant_id, revoked_at) ON membership.tenant_admin_grant TO organization_self_rt;
 
+-- Accepting an invitation (ADR-ORG-007 §5.2): the columns acceptance reads of the one row the token's
+-- hash selects, under invitation_self_redeem in rls.sql. token_hash is granted because the predicate
+-- names it. Not the inviter, the reason, the correlation or any timestamp but the expiry.
+GRANT USAGE ON SCHEMA invitation TO organization_self_rt;
+GRANT SELECT (invitation_id, tenant_id, workspace_id, target_identifier, subject_type, state, expires_at,
+              token_hash)
+    ON invitation.invitation TO organization_self_rt;
+
 -- Nothing inherited: a table added later must be granted deliberately.
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA membership
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_self_rt;
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA tenant
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_self_rt;
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA invitation
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_self_rt;

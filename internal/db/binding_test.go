@@ -702,3 +702,90 @@ func TestASelfReadBindsThePrincipalAlone(t *testing.T) {
 		}
 	}
 }
+
+// TestAnInvitationReadBindsTheTokenHashAlone: the acceptance read is read-only, becomes the self role
+// before it binds anything, binds app.invitation_token_hash as a parameter and nothing else, and
+// refuses every scope but a self scope and a blank hash (ADR-ORG-007 §5.2).
+func TestAnInvitationReadBindsTheTokenHashAlone(t *testing.T) {
+	scope, err := db.SelfScope(mustUUID(t), mustUUID(t))
+	if err != nil {
+		t.Fatalf("SelfScope: %v", err)
+	}
+	ctx := db.WithScope(context.Background(), scope)
+	source := &fakeTx{}
+	pool, _ := db.NewSelfPool(source)
+	const hash = "c0ffee"
+	if err := db.WithSelfInvitation(ctx, pool, hash, func(context.Context, db.Tx) error { return nil }); err != nil {
+		t.Fatalf("WithSelfInvitation: %v", err)
+	}
+	if got := source.bound(); len(got) != 1 || got[0] != "app.invitation_token_hash" {
+		t.Errorf("bound settings = %v, want [app.invitation_token_hash]", got)
+	}
+	calls := source.tx.Calls()
+	if len(calls) < 3 || !strings.Contains(calls[0].SQL, "READ ONLY") ||
+		calls[1].SQL != "SET LOCAL ROLE organization_self_rt" {
+		t.Fatalf("statements %v, want read-only, then the self role, then the binding", calls)
+	}
+	if strings.Contains(calls[2].SQL, hash) || len(calls[2].Args) != 1 || calls[2].Args[0] != hash {
+		t.Errorf("the binding %q %v does not carry the hash as a parameter", calls[2].SQL, calls[2].Args)
+	}
+
+	if err := db.WithSelfInvitation(ctx, pool, "", func(context.Context, db.Tx) error { return nil }); err == nil {
+		t.Error("a blank hash was bound")
+	}
+	tenantScope, _ := db.TenantScope(mustUUID(t), mustUUID(t), mustUUID(t))
+	providerScope, _ := db.ProviderScope(mustUUID(t), mustUUID(t), db.EmergencyAuthority())
+	consumerScope, _ := db.ConsumerScope(mustUUID(t), mustUUID(t))
+	opened := source.opened
+	for _, other := range []db.Scope{tenantScope, providerScope, consumerScope} {
+		if err := db.WithSelfInvitation(db.WithScope(context.Background(), other), pool, hash,
+			func(context.Context, db.Tx) error { return nil }); !errors.Is(err, db.ErrWrongScope) {
+			t.Errorf("WithSelfInvitation with %+v: error = %v, want ErrWrongScope", other, err)
+		}
+	}
+	if source.opened != opened {
+		t.Errorf("a refused scope opened %d transactions", source.opened-opened)
+	}
+}
+
+// TestASelfCallerActsInTheInvitationsTenant: WithSelfInTenant binds the Tenant it is given, as a tenant
+// scope whose actor is the self caller, with no acting provider, and refuses every other scope and a
+// nil Tenant before a transaction opens.
+func TestASelfCallerActsInTheInvitationsTenant(t *testing.T) {
+	principal, tenant := mustUUID(t), mustUUID(t)
+	scope, _ := db.SelfScope(principal, mustUUID(t))
+	source := &fakeTx{}
+	tenants, _ := db.NewTenantPool(source)
+	var inside db.Scope
+	if err := db.WithSelfInTenant(db.WithScope(context.Background(), scope), tenants, tenant,
+		func(ctx context.Context, _ db.Tx) error {
+			inside, _ = db.ScopeFrom(ctx)
+			return nil
+		}); err != nil {
+		t.Fatalf("WithSelfInTenant: %v", err)
+	}
+	if got := source.bound(); len(got) != 1 || got[0] != "app.tenant_id" {
+		t.Errorf("bound settings = %v, want [app.tenant_id] and no acting provider", got)
+	}
+	if inside.TenantID() != tenant || inside.Actor() != principal || inside.IsSelf() || inside.IsProvider() {
+		t.Errorf("the scope inside is %+v, want a tenant scope for the invitation's Tenant acted by the caller", inside)
+	}
+
+	if err := db.WithSelfInTenant(db.WithScope(context.Background(), scope), tenants, id.UUID{},
+		func(context.Context, db.Tx) error { return nil }); err == nil {
+		t.Error("a nil Tenant was bound")
+	}
+	tenantScope, _ := db.TenantScope(mustUUID(t), mustUUID(t), mustUUID(t))
+	providerScope, _ := db.ProviderScope(mustUUID(t), mustUUID(t), db.EmergencyAuthority())
+	consumerScope, _ := db.ConsumerScope(mustUUID(t), mustUUID(t))
+	opened := source.opened
+	for _, other := range []db.Scope{tenantScope, providerScope, consumerScope} {
+		if err := db.WithSelfInTenant(db.WithScope(context.Background(), other), tenants, tenant,
+			func(context.Context, db.Tx) error { return nil }); !errors.Is(err, db.ErrWrongScope) {
+			t.Errorf("WithSelfInTenant with %+v: error = %v, want ErrWrongScope", other, err)
+		}
+	}
+	if source.opened != opened {
+		t.Errorf("a refused scope opened %d transactions", source.opened-opened)
+	}
+}

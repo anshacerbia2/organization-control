@@ -61,9 +61,10 @@ type Caller struct {
 	// privileged-access record names it (ADR-ORG-002 §5.6).
 	Activation id.UUID
 
-	// Self is a person reading their own contexts: a human token on
-	// GET /v1/principals/{principal_id}/contexts whose principal_id is the path's (ADR-ORG-005 §5.1).
-	// Authentication sets it on that route alone, so no other route ever sees a self caller.
+	// Self is a person acting for themselves alone: a human token on
+	// GET /v1/principals/{principal_id}/contexts whose principal_id is the path's (ADR-ORG-005 §5.1),
+	// or any human token on POST /v1/invitations/accept (ADR-ORG-007 §5.1). Authentication sets it on
+	// those two routes alone, so no other route ever sees a self caller.
 	Self bool
 }
 

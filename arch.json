@@ -171,6 +171,15 @@
     ],
     "internal/delivery": [],
 
+    "_comment_identity": [
+      "internal/identity asks the Identity Control API whether a Principal holds an address as a proven",
+      "address (ADR-ORG-007 5.3). It reaches no internal package: the composition root hands its client",
+      "to internal/invitation through an interface, so no domain package holds a network client. It is",
+      "the one package excepted from the net/http denial to call out, and internal/httpapi's",
+      "outbound_test.go holds it to one client and one request."
+    ],
+    "internal/identity": [],
+
     "_comment_config": [
       "internal/config reads the environment and has no internal edges. A configuration package",
       "that could reach a domain package could validate a value by calling the thing it configures,",
@@ -208,6 +217,7 @@
       "internal/db",
       "internal/delivery",
       "internal/httpapi",
+      "internal/identity",
       "internal/context",
       "internal/invitation",
       "internal/membership",
@@ -236,8 +246,8 @@
       "except": []
     },
     "net/http": {
-      "reason": "this service reaches no other domain over HTTP but one way: internal/delivery posts the outbox to the acceptance API each registered consumer declared, and fetches this service's workload token for it, through foundation-platform's outbox/httpdelivery and clientauth (ADR-GLB-018 5.4). No package of this repository imports net/http to call out. ADR-ORG-001 5.4 gives it neither the Keycloak administration credential nor a route to the kernel's administration API, and that prohibition is structural rather than procedural: an outbound HTTP client here would be the first step toward the projection path the Identity Control Service owns. The two packages excepted below serve; they do not call. An import-level rule cannot tell a server from a client once the package is excepted, so the prohibition that matters is enforced where it can be seen: internal/httpapi's outbound_test.go walks both packages for a client construction or a package-level request helper and fails on any. Widening this list without extending that walk would retire the rule while leaving it written down",
-      "except": ["internal/httpapi", "cmd/organization-control"]
+      "reason": "this service reaches no other domain over HTTP but one way: internal/delivery posts the outbox to the acceptance API each registered consumer declared, and fetches this service's workload token for it, through foundation-platform's outbox/httpdelivery and clientauth (ADR-GLB-018 5.4). No other package of this repository imports net/http to call out. ADR-ORG-001 5.4 gives it neither the Keycloak administration credential nor a route to the kernel's administration API, and that prohibition is structural rather than procedural: an outbound HTTP client here would be the first step toward the projection path the Identity Control Service owns. internal/httpapi and cmd/organization-control, excepted below, serve; they do not call. internal/identity, excepted third (ADR-ORG-007 5.3), calls one route of the Identity Control API, the address match, and nothing else. An import-level rule cannot tell a server from a client once the package is excepted, so the prohibition that matters is enforced where it can be seen: internal/httpapi's outbound_test.go walks both packages for a client construction or a package-level request helper and fails on any. The walk also holds internal/identity to one client construction and one request, to the match path. Widening this list without extending that walk would retire the rule while leaving it written down",
+      "except": ["internal/httpapi", "cmd/organization-control", "internal/identity"]
     }
   },
 

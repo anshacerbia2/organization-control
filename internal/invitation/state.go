@@ -8,8 +8,9 @@
 // inbox, and an inbox is not a Principal.
 //
 // Every control here follows from that one sentence. Membership activates on the *join* of two
-// independent facts — an unexpired invitation, and a verified identity carrying the invited
-// identifier — and neither alone activates anything. The Tenant is rechecked at activation, because
+// independent facts — an unexpired invitation, and the signed-in caller holding the invited address
+// as a proven address — and neither alone activates anything (ADR-ORG-007). Both are checked when
+// the person accepts, so no half-join waits in a state. The Tenant is rechecked at activation, because
 // the window between issuing an invitation and accepting it is exactly what a long-lived invitation
 // creates. And the anonymous lookup discloses nothing, because a distinguishable response turns an
 // opaque token into an oracle.
@@ -33,17 +34,11 @@ import (
 type State string
 
 const (
-	// StatePending is issued and waiting. Nothing has been verified.
-	StatePending State = "pending"
-
-	// StateIdentityVerified means the identity kernel has confirmed a Principal holds the invited
-	// identifier. One of the two facts is in hand; Membership still does not exist.
+	// StatePending is issued and waiting for the invited person to accept.
 	//
-	// A distinct state rather than a flag, because it is the point at which `principal_id` becomes
-	// known and the point from which acceptance is possible. Collapsing it into `pending` would
-	// make "waiting for identity" and "waiting for acceptance" the same row, and the second is the
-	// only one an operator can act on.
-	StateIdentityVerified State = "identity_verified"
+	// It is the only outstanding state. `identity_verified`, the half-join a verification fact used
+	// to record, was removed with ADR-ORG-007 §5.4: acceptance checks the address itself.
+	StatePending State = "pending"
 
 	// StateAccepted is terminal and successful: Membership exists.
 	StateAccepted State = "accepted"
@@ -60,7 +55,7 @@ const (
 // Valid reports whether the state is one this service persists. Mirrors `invitation_state_check`.
 func (s State) Valid() bool {
 	switch s {
-	case StatePending, StateIdentityVerified, StateAccepted, StateExpired, StateRevoked:
+	case StatePending, StateAccepted, StateExpired, StateRevoked:
 		return true
 	}
 	return false
@@ -69,20 +64,16 @@ func (s State) Valid() bool {
 // Outstanding reports whether the invitation still occupies the one-per-target slot.
 //
 // Read from one place so the partial unique index and every gate agree on what "outstanding"
-// means. The index is `WHERE state IN ('pending', 'identity_verified')`, and this is that
-// predicate in Go.
+// means. The index is `WHERE state = 'pending'`, and this is that predicate in Go.
 func (s State) Outstanding() bool {
-	return s == StatePending || s == StateIdentityVerified
+	return s == StatePending
 }
 
 // Action is a requested transition.
 type Action string
 
 const (
-	// ActionVerifyIdentity records that the kernel confirmed the invited identifier.
-	ActionVerifyIdentity Action = "verify-identity"
-
-	// ActionAccept creates the Membership.
+	// ActionAccept creates the Membership, for the caller who holds the invited address.
 	ActionAccept Action = "accept"
 
 	// ActionRevoke withdraws the intent.
@@ -94,20 +85,19 @@ const (
 
 // transitions is the machine as data.
 //
-// `accept` is reachable from `identity_verified` only. That single row is the join SAD-004 §5.5
-// requires: an invitation cannot be accepted before the kernel has confirmed who holds the invited
-// identifier, so possession of the token cannot create Membership on its own.
+// `accept` is reachable from `pending`. The join SAD-004 §5.5 requires is not a row here: it is the
+// address match Accept asks for before this transition is resolved, so possession of the token
+// cannot create Membership on its own (ADR-ORG-007 §5.3).
 //
-// `revoke` and `expire` are reachable from both outstanding states, because an intent can be
-// withdrawn or lapse at any point before Membership exists.
+// `revoke` and `expire` are reachable from `pending`, because an intent can be withdrawn or lapse at
+// any point before Membership exists.
 var transitions = map[Action]struct {
 	from []State
 	to   State
 }{
-	ActionVerifyIdentity: {from: []State{StatePending}, to: StateIdentityVerified},
-	ActionAccept:         {from: []State{StateIdentityVerified}, to: StateAccepted},
-	ActionRevoke:         {from: []State{StatePending, StateIdentityVerified}, to: StateRevoked},
-	ActionExpire:         {from: []State{StatePending, StateIdentityVerified}, to: StateExpired},
+	ActionAccept: {from: []State{StatePending}, to: StateAccepted},
+	ActionRevoke: {from: []State{StatePending}, to: StateRevoked},
+	ActionExpire: {from: []State{StatePending}, to: StateExpired},
 }
 
 var (
@@ -140,6 +130,17 @@ var (
 	// invitation may still be in an outstanding state — expiry is a fact about the clock, and the
 	// sweep has not necessarily materialised it yet.
 	ErrExpired = errors.New("invitation: the invitation has expired")
+
+	// ErrNotAcceptable is the one refusal acceptance gives for every failed lookup: an unknown,
+	// expired, revoked or already-accepted token, and a caller who does not hold the invited address
+	// as a proven address (ADR-ORG-007 §5.4). One sentinel and one message for all of them, so no
+	// answer tells a token holder which tokens are live or that an invitation is someone else's.
+	ErrNotAcceptable = errors.New("invitation: the invitation cannot be accepted")
+
+	// ErrIdentityUnavailable reports that the Identity Control API could not be asked whether the
+	// caller holds the invited address, or that no client for it is configured. Unknown is not no:
+	// acceptance answers 503 and changes nothing (ADR-ORG-007 §5.3).
+	ErrIdentityUnavailable = errors.New("invitation: whether the caller holds the invited address could not be checked")
 
 	// ErrTenantNotActive refuses acceptance into a Tenant that is not active. The recheck exists
 	// because an invitation issued while a Tenant was active may be accepted after it was
@@ -293,28 +294,19 @@ func (i Invitation) Expired(now time.Time) bool {
 // so no event here withdraws anything. The event that grants access is the Membership's own
 // `membership.lifecycle.granted`, published by the Membership service inside the acceptance
 // transaction.
-//
-// `verify-identity` publishes nothing. It records that one of the two required facts arrived, and
-// no consumer outside this service can act on half a join — the actionable event is the Membership
-// that follows.
 var eventTypes = map[Action]string{
 	ActionAccept: "com.scnehaux.organization.membership.invitation.accepted",
 	ActionRevoke: "com.scnehaux.organization.membership.invitation.revoked",
 	ActionExpire: "com.scnehaux.organization.membership.invitation.expired",
 }
 
-// requestedEventType is published when the intent is recorded, so the identity flow can begin.
+// requestedEventType is published when the intent is recorded.
 const requestedEventType = "com.scnehaux.organization.membership.invitation.requested"
 
-// silentActions publish nothing, declared rather than absent so a test can assert an action is
-// never in neither set.
-var silentActions = map[Action]bool{ActionVerifyIdentity: true}
-
 // EventType returns the validated type for an action, and reports whether the action publishes.
+// Every action publishes since `verify-identity`, the one silent action, was removed; the boolean
+// stays so a future silent action is declared rather than absent.
 func EventType(action Action) (event.Type, bool, error) {
-	if silentActions[action] {
-		return "", false, nil
-	}
 	raw, ok := eventTypes[action]
 	if !ok {
 		return "", false, fmt.Errorf("%w: %q has no event type", ErrUnknownAction, action)

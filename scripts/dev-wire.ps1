@@ -186,6 +186,7 @@ $null = Require "identity-control registered as a consumer" (Send-Json "POST" "$
 
 Write-Host "5. deliver to identity-control"
 Set-EnvLine (Join-Path $organizationDeploy ".env") "ORGANIZATION_DELIVERY_TARGETS" "identity-control=http://identity-control:8090/v1/deliveries"
+Set-EnvLine (Join-Path $organizationDeploy ".env") "ORGANIZATION_IDENTITY_CONTROL_URL" "http://identity-control:8090"
 Invoke-Compose $organizationDeploy @("up", "-d", "organization-control")
 Wait-Ready $organizationApi
 

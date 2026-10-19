@@ -111,6 +111,11 @@ type Config struct {
 	// none.
 	Delivery Delivery
 
+	// IdentityControl is the Identity Control API that invitation acceptance asks whether the caller
+	// holds the invited address (ADR-ORG-007 §5.3). An empty URL configures none, and acceptance
+	// answers 503.
+	IdentityControl IdentityControl
+
 	// OTLPEndpoint is the OpenTelemetry Collector's OTLP/HTTP base URL. A deployment sets it; unset,
 	// the process exports nothing and says so at startup, and the absent-telemetry alert fires
 	// (TDD-foundation-platform-002 §Configuration).
@@ -145,6 +150,17 @@ type Delivery struct {
 	// TDD-organization-control-005 §Technical Context).
 	Interval     time.Duration
 	IdleInterval time.Duration
+}
+
+// IdentityControl configures the address match client (TDD-organization-control-004 1.14.0
+// §Configuration). It authenticates with the dispatchers' workload client, Delivery.Workload*.
+type IdentityControl struct {
+	// URL is ORGANIZATION_IDENTITY_CONTROL_URL, an absolute http(s) URL without a path past the API
+	// root.
+	URL string
+
+	// Timeout is ORGANIZATION_IDENTITY_CONTROL_TIMEOUT, one match request's bound.
+	Timeout time.Duration
 }
 
 // commitToClaimBudget is TDD-organization-control-002 §Enforcement Budget's "outbox commit to
@@ -376,6 +392,27 @@ func Load() (Config, error) {
 		problems = append(problems, fmt.Errorf(
 			"ORGANIZATION_DELIVERY_IDLE_INTERVAL (%s) is below ORGANIZATION_DELIVERY_INTERVAL (%s); it is the ceiling "+
 				"the poll period backs off to", cfg.Delivery.IdleInterval, cfg.Delivery.Interval))
+	}
+	// The address match (ADR-ORG-007 §5.3). Nothing is required while it is unset; set, it needs the
+	// workload client the dispatchers use, which is the one identity-control admits.
+	cfg.IdentityControl = IdentityControl{
+		URL:     strings.TrimSpace(os.Getenv("ORGANIZATION_IDENTITY_CONTROL_URL")),
+		Timeout: durationOr("ORGANIZATION_IDENTITY_CONTROL_TIMEOUT", 5*time.Second, &problems),
+	}
+	if raw := cfg.IdentityControl.URL; raw != "" {
+		if parsed, err := url.Parse(raw); err != nil || parsed.Host == "" ||
+			(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.RawQuery != "" || parsed.Fragment != "" {
+			problems = append(problems, errors.New("ORGANIZATION_IDENTITY_CONTROL_URL is not an absolute http(s) URL with no query"))
+		}
+		for name, value := range map[string]string{
+			"ORGANIZATION_WORKLOAD_CLIENT_ID": cfg.Delivery.WorkloadClientID,
+			"ORGANIZATION_WORKLOAD_KEY_FILE":  cfg.Delivery.WorkloadKeyFile,
+			"ORGANIZATION_WORKLOAD_TOKEN_URL": cfg.Delivery.WorkloadTokenURL,
+		} {
+			if value == "" {
+				problems = append(problems, fmt.Errorf("%s is required while ORGANIZATION_IDENTITY_CONTROL_URL is set", name))
+			}
+		}
 	}
 	if len(targets) > 0 {
 		for name, value := range map[string]string{

@@ -369,3 +369,48 @@ func TestASubMinuteSweepIntervalIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// The address match is optional; set, it needs the dispatchers' workload client, its URL is an
+// absolute http(s) URL, and its timeout defaults to 5s (TDD-organization-control-004 1.14.0
+// §Configuration).
+func TestTheIdentityControlURLRequiresTheWorkloadClient(t *testing.T) {
+	required(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.IdentityControl.URL != "" || cfg.IdentityControl.Timeout != 5*time.Second {
+		t.Errorf("unset, IdentityControl = %+v, want no URL and a 5s timeout", cfg.IdentityControl)
+	}
+
+	t.Setenv("ORGANIZATION_IDENTITY_CONTROL_URL", "http://identity-control:8090")
+	_, err = Load()
+	for _, name := range []string{"ORGANIZATION_WORKLOAD_CLIENT_ID", "ORGANIZATION_WORKLOAD_KEY_FILE",
+		"ORGANIZATION_WORKLOAD_TOKEN_URL"} {
+		if err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("Load does not name %s as required: %v", name, err)
+		}
+	}
+	if err != nil && strings.Contains(err.Error(), "ORGANIZATION_DISPATCH_DATABASE_URL") {
+		t.Errorf("the match needs no dispatch credential: %v", err)
+	}
+
+	t.Setenv("ORGANIZATION_WORKLOAD_CLIENT_ID", "organization-control-workload")
+	t.Setenv("ORGANIZATION_WORKLOAD_KEY_FILE", "/run/secrets/workload.pem")
+	t.Setenv("ORGANIZATION_WORKLOAD_TOKEN_URL", "http://kernel:8080/realms/scnehaux/protocol/openid-connect/token")
+	t.Setenv("ORGANIZATION_IDENTITY_CONTROL_TIMEOUT", "2s")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.IdentityControl.URL != "http://identity-control:8090" || cfg.IdentityControl.Timeout != 2*time.Second {
+		t.Errorf("IdentityControl = %+v", cfg.IdentityControl)
+	}
+
+	for _, raw := range []string{"identity-control:8090", "ftp://identity-control", "http://identity-control?x=1", "/v1"} {
+		t.Setenv("ORGANIZATION_IDENTITY_CONTROL_URL", raw)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ORGANIZATION_IDENTITY_CONTROL_URL") {
+			t.Errorf("%q answered %v", raw, err)
+		}
+	}
+}

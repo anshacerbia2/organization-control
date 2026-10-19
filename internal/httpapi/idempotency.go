@@ -157,6 +157,11 @@ func Idempotent(store ClaimCompleter, telemetry *observability.Telemetry) (Middl
 // would let one replay the other's response, and a key is a value a client chooses — so it is
 // guessable by construction.
 func claimScope(caller Caller) string {
+	if caller.Self {
+		// A self caller has no Tenant, so its keys are its own: one person's key cannot replay
+		// another's acceptance.
+		return "self:" + caller.Subject.String()
+	}
 	if caller.Provider {
 		return "provider:" + caller.Subject.String()
 	}

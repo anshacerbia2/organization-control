@@ -83,13 +83,15 @@ func TestACommandWithoutAKeyIsRefusedBeforeTheDatabase(t *testing.T) {
 
 	commands, _ := postRoutes(t)
 	tenant, provider := tenantCaller(t), providerCaller(t)
-	tenantHandler, providerHandler := mounted(t, &tenant), mounted(t, &provider)
+	self := Caller{Subject: mustID(t), Self: true}
+	tenantHandler, providerHandler, selfHandler := mounted(t, &tenant), mounted(t, &provider), mounted(t, &self)
 
 	for _, route := range commands {
 		t.Run(route, func(t *testing.T) {
 			path := fill(t, route)
 			refusedForTheKey := 0
-			for _, handler := range []http.Handler{tenantHandler, providerHandler} {
+			// A self caller is admitted to acceptance alone (ADR-ORG-007 §5.1), and refused elsewhere.
+			for _, handler := range []http.Handler{tenantHandler, providerHandler, selfHandler} {
 				recorder := post(t, handler, path, `{}`, map[string]string{
 					ReasonHeader: "an audit", IdempotencyHeader: "",
 				})

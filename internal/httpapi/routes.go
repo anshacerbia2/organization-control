@@ -221,10 +221,12 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/invitations", command(h.issueInvitation))
 	api.HandleFunc("GET /v1/invitations/{invitation_id}", h.getInvitation)
 	api.HandleFunc("POST /v1/invitations/{invitation_id}/revoke", command(h.revokeInvitation))
+
+	// The self caller's (ADR-ORG-007 §5.1): the invited person, signed in as themselves, with no
+	// Tenant needed. The token in the body selects the invitation, and its row names the Tenant.
 	api.HandleFunc("POST /v1/invitations/accept", command(h.acceptInvitation))
 
 	// Provider-scoped.
-	api.HandleFunc("POST /v1/invitations/verify-identity", command(h.recordVerifiedIdentity))
 	api.HandleFunc("POST /v1/invitations/expire-lapsed", h.expireLapsedInvitations)
 
 	api.HandleFunc("GET /v1/organizations", h.listOrganizations)

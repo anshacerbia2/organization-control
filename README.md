@@ -698,9 +698,11 @@ failure there leaves the gauges above reporting:
 | `organization_offboarding_in_progress`, `organization_offboarding_oldest_in_progress_age_seconds` | offboardings in `freeze`, `obligations` or `release`, and the oldest's time since it began |
 | `organization_provisioning_requests{operation,state}`, `organization_provisioning_oldest_request_age_seconds{operation,state}` | provisioning and deprovisioning requests `requested` or `unresolved`, and the oldest's age |
 
-Two counters are added to by the HTTP surface: `organization_isolation_refusals_total{control}`, a
+Three counters are added to by the HTTP surface: `organization_isolation_refusals_total{control}`, a
 statement a `WITH CHECK` policy or an unset binding refused (TDD-organization-control-001
-§Operational Notes), and `organization_invitation_lookups_total`, every anonymous invitation lookup.
+§Operational Notes), `organization_invitation_lookups_total`, every anonymous invitation lookup, and
+`organization_invitation_acceptances_refused_total`, every refused invitation acceptance, each also
+logged with the caller's `principal_id` (TDD-organization-control-004 1.14.0 §Operational Notes).
 
 `observability/alerts/organization-control.rules.yml` holds the alert rules, with each threshold's source
 noted beside it (SAD-004 §9.3.2 and the TDDs). CI checks the rules and runs their unit tests with a

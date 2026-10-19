@@ -205,9 +205,11 @@ func requireTenant(w http.ResponseWriter, r *http.Request) (db.Scope, bool) {
 		platform.Problem(w, r, platform.Internal, "The request could not be completed")
 		return db.Scope{}, false
 	}
-	if scope.IsProvider() || scope.IsConsumer() {
+	if scope.IsProvider() || scope.IsConsumer() || scope.IsSelf() {
+		// A self caller is admitted to two routes alone, and neither calls this; refused here as well,
+		// before the key and before a transaction, so a self scope can never pass for a Tenant's.
 		platform.Problem(w, r, platform.Forbidden,
-			"This route acts within one Tenant, and a provider or consumer caller carries none")
+			"This route acts within one Tenant, and a provider, consumer or self caller carries none")
 		return db.Scope{}, false
 	}
 	if !requireKey(w, r) {

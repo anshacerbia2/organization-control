@@ -18,16 +18,21 @@ import (
 
 // Service issues invitations and completes them into Membership.
 //
-// It holds both pools, and the split follows who can know what. Issuing, revoking, and listing are
+// It holds three pools, and the split follows who can know what. Issuing, revoking, and listing are
 // a Tenant administrator's work inside one Tenant, which is what the tenant-scoped role and its
-// policy exist for. Resolving an identity-verification fact and sweeping expiries are not: both
-// arrive without a Tenant — the first as a broker event correlated by identifier, the second as a
-// clock — so neither can bind a Tenant it does not yet know.
+// policy exist for. Sweeping expiries is not: it arrives as a clock, with no Tenant. Accepting is the
+// invited person's own command, signed in with no Tenant (ADR-ORG-007 §5.1): the token selects the
+// row through the self pool, and the row names the Tenant the Membership is written in.
 type Service struct {
 	tenantPool *db.TenantPool
 	provider   *db.ProviderPool
+	self       *db.SelfPool
 
 	memberships *membership.Service
+
+	// matcher asks the Identity Control API whether the caller holds the invited address. Nil when
+	// no client is configured, and then every acceptance is ErrIdentityUnavailable: unknown is not no.
+	matcher AddressMatcher
 
 	now   func() time.Time
 	newID func() (id.UUID, error)
@@ -43,19 +48,30 @@ type Service struct {
 	beforeGrant func(context.Context) error
 }
 
-// New constructs the service.
-func New(tenantPool *db.TenantPool, provider *db.ProviderPool,
-	memberships *membership.Service) (*Service, error) {
+// AddressMatcher answers whether a Principal holds an address as a proven address: an `active`
+// address with `verified_at` set, of an active Principal (ADR-ORG-007 §5.3). internal/identity's
+// Client is the production one; the composition root hands it here, so this package holds no
+// network client.
+type AddressMatcher interface {
+	Match(ctx context.Context, principal id.UUID, address string) (bool, error)
+}
+
+// New constructs the service. matcher may be nil, for a deployment with no Identity Control API
+// configured; acceptance then answers ErrIdentityUnavailable and changes nothing.
+func New(tenantPool *db.TenantPool, provider *db.ProviderPool, self *db.SelfPool,
+	memberships *membership.Service, matcher AddressMatcher) (*Service, error) {
 	switch {
 	case tenantPool == nil:
 		return nil, errors.New("invitation: a tenant-scoped pool is required")
 	case provider == nil:
 		return nil, errors.New("invitation: a provider-scoped pool is required")
+	case self == nil:
+		return nil, errors.New("invitation: a self pool is required")
 	case memberships == nil:
 		return nil, errors.New("invitation: a membership service is required")
 	}
 	return &Service{
-		tenantPool: tenantPool, provider: provider, memberships: memberships,
+		tenantPool: tenantPool, provider: provider, self: self, memberships: memberships, matcher: matcher,
 		now: time.Now, newID: id.NewV7, newToken: NewToken,
 	}, nil
 }
@@ -93,7 +109,7 @@ const insertStatement = `INSERT INTO invitation.invitation
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11)
 RETURNING created_at`
 
-// Issue records the intent and publishes the event that starts the identity flow.
+// Issue records the intent and publishes `invitation.requested`.
 func (s *Service) Issue(ctx context.Context, req IssueRequest) (Issued, error) {
 	switch {
 	case strings.TrimSpace(req.TargetIdentifier) == "":
@@ -120,8 +136,8 @@ func (s *Service) Issue(ctx context.Context, req IssueRequest) (Issued, error) {
 	}
 	correlationID := scope.Correlation()
 	if correlationID.IsNil() {
-		// The correlation is what joins the identity fact back to this intent, so it cannot be
-		// absent. A tenant scope permits an empty correlation; this flow does not.
+		// The correlation names the intent in every event it publishes, so it cannot be absent. A
+		// tenant scope permits an empty correlation; this flow does not.
 		if correlationID, err = s.newID(); err != nil {
 			return Issued{}, fmt.Errorf("invitation: mint correlation: %w", err)
 		}
@@ -183,6 +199,16 @@ func (s *Service) Lookup(token Token) bool {
 	return token.WellFormed()
 }
 
+// selectRedeemable is acceptance's narrow read, as the self role through invitation_self_redeem: the
+// one row whose token_hash the transaction bound, and the columns the self role is granted. The
+// WHERE repeats the binding so the statement reads the same row whatever the policy admits.
+const selectRedeemable = `SELECT invitation_id::text, tenant_id::text, coalesce(workspace_id::text, ''),
+       target_identifier, subject_type, state, expires_at
+FROM invitation.invitation
+WHERE token_hash = $1`
+
+// selectByTokenHash reloads the row in the acceptance transaction, under the Tenant's policy, and
+// locks it: the row the token selected, in the Tenant the read named, or nothing.
 const selectByTokenHash = `SELECT invitation_id::text,
        tenant_id::text,
        coalesce(workspace_id::text, ''),
@@ -221,96 +247,8 @@ FROM invitation.invitation
 WHERE invitation_id = $1
 FOR UPDATE`
 
-const markVerified = `UPDATE invitation.invitation
-SET state = 'identity_verified', principal_id = $2
-WHERE invitation_id = $1`
-
-// VerifiedIdentity is the fact the identity kernel reports back.
-type VerifiedIdentity struct {
-	// CorrelationID joins the fact to the intent. Carried through the identity flow rather than
-	// re-derived, so a verification cannot be matched to an invitation nobody sent.
-	CorrelationID id.UUID
-
-	// Identifier is the identifier the kernel verified. Checked against the invitation's own
-	// target: a verification for a different identifier is not this invitation's second fact,
-	// however well the correlation matches.
-	Identifier string
-
-	PrincipalID id.UUID
-}
-
-const selectByCorrelation = `SELECT invitation_id::text FROM invitation.invitation
-WHERE correlation_id = $1 AND state = 'pending'`
-
-// RecordVerifiedIdentity is the second of the two facts arriving.
-//
-// Provider-scoped, because the fact arrives from the broker carrying a correlation and an
-// identifier and no Tenant. It records and does not accept: Membership is created by Accept, which
-// runs the Tenant recheck and the duplicate check. Splitting them is what keeps a broker redelivery
-// from being an acceptance.
-func (s *Service) RecordVerifiedIdentity(ctx context.Context, fact VerifiedIdentity) (Invitation, error) {
-	switch {
-	case fact.CorrelationID.IsNil():
-		return Invitation{}, fmt.Errorf("%w: a correlation identifier is required", ErrInvalid)
-	case strings.TrimSpace(fact.Identifier) == "":
-		return Invitation{}, fmt.Errorf("%w: the verified identifier is required", ErrInvalid)
-	case fact.PrincipalID.IsNil():
-		return Invitation{}, fmt.Errorf("%w: a principal identifier is required", ErrInvalid)
-	}
-
-	var record Invitation
-	at := s.now().UTC()
-
-	if err := db.WithProviderScope(ctx, s.provider,
-		"record verified identity for correlation "+fact.CorrelationID.String(),
-		func(ctx context.Context, tx db.Tx) error {
-			var rawID string
-			if err := tx.QueryRow(ctx, selectByCorrelation, fact.CorrelationID.String()).Scan(&rawID); err != nil {
-				return fmt.Errorf("%w: no pending invitation for correlation %s",
-					ErrNotFound, fact.CorrelationID)
-			}
-			invitationID, err := id.Parse(rawID)
-			if err != nil {
-				return fmt.Errorf("invitation: stored identifier %q: %w", rawID, err)
-			}
-
-			loaded, err := load(ctx, tx, selectForUpdate, invitationID.String())
-			if err != nil {
-				return err
-			}
-			// The identifier must match. A correlation identifies the intent; it does not certify
-			// which identifier was verified, and accepting a mismatch would admit whoever the
-			// kernel happened to verify rather than whoever was invited.
-			if loaded.TargetHash != HashIdentifier(fact.Identifier) {
-				return fmt.Errorf(
-					"%w: the verified identifier is not the invited one", ErrTransitionRefused)
-			}
-			// Expiry is checked against the clock, not the state. The sweep may not have run.
-			if loaded.Expired(at) {
-				return fmt.Errorf("%w: %s", ErrExpired, loaded.InvitationID)
-			}
-			if _, err := Resolve(ActionVerifyIdentity, loaded.State); err != nil {
-				return err
-			}
-
-			if _, err := tx.Exec(ctx, markVerified,
-				invitationID.String(), fact.PrincipalID.String()); err != nil {
-				return fmt.Errorf("invitation: record verified identity: %w", err)
-			}
-			loaded.State = StateIdentityVerified
-			principal := fact.PrincipalID
-			loaded.PrincipalID = &principal
-			record = loaded
-			return db.Respond(ctx, tx, record)
-		}); err != nil {
-		return Invitation{}, err
-	}
-
-	return record, nil
-}
-
 const acceptStatement = `UPDATE invitation.invitation
-SET state = 'accepted', accepted_at = $2
+SET state = 'accepted', principal_id = $2, accepted_at = $3
 WHERE invitation_id = $1`
 
 const tenantStatusStatement = `SELECT status FROM tenant.tenant WHERE tenant_id = $1`
@@ -329,16 +267,37 @@ type Acceptance struct {
 	Membership membership.Result
 }
 
-// Accept completes the join and creates the Membership.
+// redeemable is what the narrow read returns: enough to check the invitation and ask the match.
+type redeemable struct {
+	tenantID    id.UUID
+	target      string
+	subjectType string
+	state       State
+	expiresAt   time.Time
+}
+
+// Accept completes the join and creates the Membership for the caller (ADR-ORG-007 §5.1 to §5.4).
 //
-// Tenant-scoped, because it writes a Membership and the Membership service is bound to the
-// tenant-scoped policy. The caller supplies the token: acceptance is the authenticated path, so
-// resolving by token here is the read the anonymous lookup deliberately does not perform.
+// The caller is the self scope's actor, the signed-in person; no field of the request names a
+// Principal. In order:
 //
-// Everything commits together — the invitation's state, its accepted timestamp, the Membership, and
-// the Membership's grant event. An accepted invitation with no Membership is an intent recorded as
-// fulfilled that granted nothing, and a Membership against an invitation still open is an intent
-// that can be fulfilled twice.
+//  1. The token's hash selects at most one row, read as the self role (db.WithSelfInvitation).
+//  2. It must be pending and not past its expiry by the clock.
+//  3. The Identity Control API is asked whether the caller holds the row's address as a proven
+//     address. Asked before any transaction opens, so no lock is held across the call. Unreachable or
+//     unconfigured is ErrIdentityUnavailable, and nothing changes.
+//  4. One transaction in the Tenant the row names (db.WithSelfInTenant) reloads the row by its token
+//     hash FOR UPDATE, rechecks it, refuses a Tenant that is not active or an existing Membership,
+//     creates the Membership for the caller, records the acceptance, and publishes.
+//
+// Every failure in 1 to 3, the match answering no included, and a row the reload no longer finds
+// pending, is ErrNotAcceptable: one refusal, so no answer tells a token holder which tokens are live
+// or that an invitation is addressed to someone else (ADR-ORG-007 §5.4).
+//
+// Everything in 4 commits together — the invitation's state, its accepted timestamp, the Membership,
+// and both events. An accepted invitation with no Membership is an intent recorded as fulfilled that
+// granted nothing, and a Membership against an invitation still open is an intent that can be
+// fulfilled twice.
 func (s *Service) Accept(ctx context.Context, token Token) (Invitation, membership.Result, error) {
 	if !token.WellFormed() {
 		return Invitation{}, membership.Result{}, ErrToken
@@ -347,34 +306,89 @@ func (s *Service) Accept(ctx context.Context, token Token) (Invitation, membersh
 	if !ok {
 		return Invitation{}, membership.Result{}, db.ErrNoScope
 	}
+	if !scope.IsSelf() {
+		// The route admits the self caller alone; a service reached with another scope is a wiring
+		// defect, and the Membership would otherwise go to whoever that scope names.
+		return Invitation{}, membership.Result{}, fmt.Errorf("%w: acceptance is the invited person's own command", db.ErrWrongScope)
+	}
+	caller := scope.Actor()
+	hash := token.Hash()
+	at := s.now().UTC()
+
+	var row redeemable
+	found := false
+	if err := db.WithSelfInvitation(ctx, s.self, hash, func(ctx context.Context, tx db.Tx) error {
+		// Query rather than QueryRow, so an absent row (no Next) is told apart from a failed read
+		// (Err): the first is a refusal, the second an internal error, and the driver that would name
+		// its no-rows sentinel is not importable here.
+		rows, err := tx.Query(ctx, selectRedeemable, hash)
+		if err != nil {
+			return fmt.Errorf("invitation: read by token: %w", err)
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			return rows.Err()
+		}
+		var rawID, rawTenant, rawWorkspace, state string
+		if err := rows.Scan(&rawID, &rawTenant, &rawWorkspace,
+			&row.target, &row.subjectType, &state, &row.expiresAt); err != nil {
+			return fmt.Errorf("invitation: scan by token: %w", err)
+		}
+		tenantID, err := id.Parse(rawTenant)
+		if err != nil {
+			return fmt.Errorf("invitation: stored tenant %q: %w", rawTenant, err)
+		}
+		row.tenantID, row.state, found = tenantID, State(state), true
+		return nil
+	}); err != nil {
+		return Invitation{}, membership.Result{}, err
+	}
+	// Absent, settled, or lapsed by the clock rather than the state, which closes the race between
+	// the sweep and an acceptance arriving in the same moment.
+	if !found || row.state != StatePending || !at.Before(row.expiresAt) {
+		return Invitation{}, membership.Result{}, ErrNotAcceptable
+	}
+
+	if s.matcher == nil {
+		return Invitation{}, membership.Result{}, fmt.Errorf("%w: no Identity Control API is configured", ErrIdentityUnavailable)
+	}
+	match, err := s.matcher.Match(ctx, caller, row.target)
+	if err != nil {
+		// The matcher's error names no address (internal/identity), and it is not returned to the
+		// caller: the 503 says only that the question could not be asked.
+		return Invitation{}, membership.Result{}, fmt.Errorf("%w: %w", ErrIdentityUnavailable, err)
+	}
+	if !match {
+		return Invitation{}, membership.Result{}, ErrNotAcceptable
+	}
 
 	var (
 		record Invitation
 		result membership.Result
 	)
-	at := s.now().UTC()
-
-	if err := db.WithTenantScope(ctx, s.tenantPool, func(ctx context.Context, tx db.Tx) error {
-		loaded, err := load(ctx, tx, selectByTokenHash, token.Hash())
+	if err := db.WithSelfInTenant(ctx, s.tenantPool, row.tenantID, func(ctx context.Context, tx db.Tx) error {
+		loaded, err := load(ctx, tx, selectByTokenHash, hash)
+		if errors.Is(err, ErrNotFound) {
+			// The Tenant the read named no longer holds the token's row under its own policy: nothing
+			// this caller may accept.
+			return ErrNotAcceptable
+		}
 		if err != nil {
 			return err
 		}
-		if loaded.TenantID != scope.TenantID() {
-			// Unreachable through the policy, which already confines the read. Kept because the
-			// refusal must not depend on the policy being the only thing that stops it.
-			return fmt.Errorf("%w: %s", ErrNotFound, loaded.InvitationID)
+		if loaded.TenantID != row.tenantID {
+			// Unreachable through the policy, which already confines the reload to the bound Tenant.
+			// Kept because the refusal must not depend on the policy being the only thing that stops it.
+			return ErrNotAcceptable
 		}
-		// Expiry against the clock rather than the state, which closes the race between the sweep
-		// and an acceptance arriving in the same moment: whichever runs first, the invitation is
-		// past its expiry and acceptance is refused.
-		if loaded.Expired(at) {
-			return fmt.Errorf("%w: %s", ErrExpired, loaded.InvitationID)
+		// Rechecked under the lock: a concurrent acceptance, revocation or expiry since the read
+		// leaves this one nothing to accept. Used once (ADR-ORG-007 §5.4).
+		// The address must still be the one the match was asked about.
+		if loaded.State != StatePending || loaded.Expired(at) || loaded.TargetIdentifier != row.target {
+			return ErrNotAcceptable
 		}
 		if _, err := Resolve(ActionAccept, loaded.State); err != nil {
 			return err
-		}
-		if loaded.PrincipalID == nil {
-			return fmt.Errorf("%w: no verified Principal is recorded", ErrTransitionRefused)
 		}
 
 		var status string
@@ -387,20 +401,22 @@ func (s *Service) Accept(ctx context.Context, token Token) (Invitation, membersh
 
 		var existing int
 		if err := tx.QueryRow(ctx, activeMembershipStatement,
-			loaded.PrincipalID.String(), loaded.TenantID.String(),
+			caller.String(), loaded.TenantID.String(),
 			nullableUUID(loaded.WorkspaceID), loaded.SubjectType).Scan(&existing); err != nil {
 			return fmt.Errorf("invitation: count active Memberships: %w", err)
 		}
 		if existing > 0 {
-			return fmt.Errorf("%w: %s", ErrAlreadyMember, loaded.PrincipalID)
+			return fmt.Errorf("%w: %s", ErrAlreadyMember, caller)
 		}
 
-		if _, err := tx.Exec(ctx, acceptStatement, loaded.InvitationID.String(), at); err != nil {
+		if _, err := tx.Exec(ctx, acceptStatement, loaded.InvitationID.String(), caller.String(), at); err != nil {
 			return fmt.Errorf("invitation: accept: %w", err)
 		}
 		loaded.State = StateAccepted
 		accepted := at
 		loaded.AcceptedAt = &accepted
+		principal := caller
+		loaded.PrincipalID = &principal
 
 		if s.beforeGrant != nil {
 			if err := s.beforeGrant(ctx); err != nil {
@@ -409,7 +425,7 @@ func (s *Service) Accept(ctx context.Context, token Token) (Invitation, membersh
 		}
 
 		granted, err := s.memberships.GrantWithin(ctx, tx, membership.GrantRequest{
-			PrincipalID: *loaded.PrincipalID,
+			PrincipalID: caller,
 			TenantID:    loaded.TenantID,
 			WorkspaceID: derefUUID(loaded.WorkspaceID),
 			SubjectType: loaded.SubjectType,
@@ -709,7 +725,7 @@ func (s *Service) List(ctx context.Context, query ListQuery) (Page, error) {
 		return Page{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	if query.State != "" && !query.State.Valid() {
-		return Page{}, fmt.Errorf("%w: state must be pending, identity_verified, accepted, expired or revoked", ErrInvalid)
+		return Page{}, fmt.Errorf("%w: state must be pending, accepted, expired or revoked", ErrInvalid)
 	}
 
 	page := Page{Invitations: []Invitation{}}

@@ -998,7 +998,7 @@ re-used" [R8].
 - A workload token is refused `403`; a human token with or without `tenant_id`, with or without a
   provider grant, is a self caller on this route.
 - As the self role with a token hash bound, no other invitation is readable and nothing is
-  writable; unbound, the read raises.
+  writable; unbound, the read raises or reads nothing.
 - On every `deploy-dev` run, against the real Identity Control API: the invited person, holding
   the address as a proven one, accepts; another member holding the token is refused first
   (`scripts/dev-wiring-proof.ps1` step 10).

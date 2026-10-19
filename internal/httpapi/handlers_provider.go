@@ -27,7 +27,6 @@ import (
 	"github.com/anshacerbia2/foundation-platform/id"
 
 	occontext "github.com/anshacerbia2/organization-control/internal/context"
-	"github.com/anshacerbia2/organization-control/internal/invitation"
 	"github.com/anshacerbia2/organization-control/internal/offboarding"
 	"github.com/anshacerbia2/organization-control/internal/organization"
 	"github.com/anshacerbia2/organization-control/internal/projection"
@@ -346,29 +345,6 @@ func (h *handlers) retireOrganization(w http.ResponseWriter, r *http.Request) {
 	h.organizationTransition(w, r, func(ctx stdcontext.Context, cmd organization.Command) (organization.Organization, error) {
 		return h.services.Organizations.Retire(ctx, cmd)
 	})
-}
-
-type verifiedIdentityRequest struct {
-	CorrelationID id.UUID `json:"correlation_id"`
-	Identifier    string  `json:"identifier"`
-	PrincipalID   id.UUID `json:"principal_id"`
-}
-
-func (h *handlers) recordVerifiedIdentity(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireProvider(w, r); !ok {
-		return
-	}
-	body, ok := decode[verifiedIdentityRequest](w, r)
-	if !ok {
-		return
-	}
-	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (invitation.Invitation, error) {
-		return h.services.Invitations.RecordVerifiedIdentity(ctx, invitation.VerifiedIdentity{
-			CorrelationID: body.CorrelationID,
-			Identifier:    body.Identifier,
-			PrincipalID:   body.PrincipalID,
-		})
-	}, viewInvitation)
 }
 
 type batchRequest struct {

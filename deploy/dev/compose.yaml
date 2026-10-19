@@ -125,6 +125,10 @@ services:
       ORGANIZATION_WORKLOAD_CLIENT_ID: organization-control-workload
       ORGANIZATION_WORKLOAD_KEY_FILE: /keys/organization-control-workload.pem
       ORGANIZATION_WORKLOAD_TOKEN_URL: http://keycloak:8080/realms/scnehaux/protocol/openid-connect/token
+      # Invitation acceptance asks the Identity Control API whether the caller holds the invited
+      # address (ADR-ORG-007 §5.3), with the workload token above. Empty until README §Wiring to
+      # other services step 5 sets it; acceptance then answers 503.
+      ORGANIZATION_IDENTITY_CONTROL_URL: ${ORGANIZATION_IDENTITY_CONTROL_URL:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
       migrate:
