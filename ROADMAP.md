@@ -556,8 +556,10 @@ against 900 s. Two gaps stay recorded, not claimed:
 - **The provisioning system is still external** (2026-10-19, backlog item 45). No system that builds
   a Tenant's isolation boundary and reports `realized` or `failed` exists yet; on the development
   server an operator stands in for it with `scripts/dev-provisioning.ps1`, which production never
-  runs. Production needs that system, its owner, and its own provider credential for the two report
-  routes (TDD-organization-control-003 §The Provisioning System on a Development Server). This
+  runs. Production needs that system and its owner. It also needs a way for that system to authenticate
+  to the two report routes, which today admit provider authority only, and provider authority is a
+  person's (ADR-ORG-002 §5.1). That is open, for the owner and the provisioning system's design
+  (TDD-organization-control-003 §The Provisioning System on a Development Server). This
   repository does not build it: physical Tenant provisioning is out of scope (§Not this service).
 
 ## Debt, named rather than implied
