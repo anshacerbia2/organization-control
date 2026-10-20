@@ -450,7 +450,7 @@ deployment:
 
 ### Caller Authority
 
-A caller is one of three, decided from the token's standard claims and this service's own
+A caller is one of five, decided from the token's standard claims and this service's own
 records, never from a role in the token (`ADR-ORG-001 §5.11`, `STD-IAM-002 §3.1.1`). Every
 token needs a `principal_id` that is a UUID and a `subject_type` of `human` or `workload`; the
 `principal_id` is the actor every event and every evidence row names, and `sub` is not read.
@@ -468,6 +468,7 @@ because its registration's audience names the resource.
 | Provider | `subject_type` `human`, `acr`, `auth_time`; no `tenant_id` | provider authority in force for the `principal_id`: an emergency grant, or an approved activation of an eligible grant (§Provider Activation) | no grant, or `acr` or `auth_time` absent |
 | Eligible provider | as a provider | an eligible grant with no activation in force | reaches only `/v1/provider-activations`; every other route answers `403` before a transaction opens |
 | Projection consumer | `subject_type` `workload`, `workload_owner`; no `tenant_id` | an active consumer registered with the `principal_id` | none registered, or consumer authority not configured |
+| Reporter (1.27.0) | `subject_type` `workload`, `workload_owner`; no `tenant_id`; on a report route only | an active reporter registered with the `principal_id`, for what that route reports (§Reporters) | none registered, or registered to report something else; on any other route the token is authorized as any workload's |
 | Self (1.17.0) | `subject_type` `human`, as a Tenant administrator's or a provider's claims, with or without `tenant_id`, on `GET /v1/principals/{principal_id}/contexts` whose `principal_id` is the token's, or on `POST /v1/invitations/accept` (1.26.0) | none | reaches those two routes, for its own `principal_id`; a human token naming another Principal on the contexts route is authorized as above; a workload token on `accept` is `403` |
 
 ```text
@@ -494,6 +495,10 @@ authenticate(token):
             return Provider(principal, emergency?)
         return Eligible(principal)
     require workload_owner
+    if the route is a report route:                       -- 1.27.0, §Reporters
+        reporter := the active reporter registered with principal   -- read now
+        require it reports what the route takes        -- provisioning, or obligation:<domain>
+        return Reporter(principal, reporter)
     consumer := the active consumer registered with principal   -- read now
     return Consumer(principal, consumer)
 ```
@@ -617,6 +622,83 @@ requires it, and re-registering a consumer under a different `principal_id` is r
 `ORGANIZATION_CONSUMER_CLAIM` are gone. Startup refuses a deployment that still sets one, because
 such a deployment expects authority to come from where it no longer does, and a silently ignored
 setting would leave it believing so.
+
+### Reporters
+
+(1.27.0, `ADR-ORG-001 §5.11`, amended 2026-10-20.) A reporter is a workload Principal this service
+registered to report one kind of outcome. The production provisioning system reports
+`POST /v1/provisioning/realized`, `POST /v1/provisioning/failed` and
+`POST /v1/offboardings/{offboarding_id}/deprovisioning`. An obligation-owning domain reports
+`POST /v1/obligations/{obligation_id}/resolve`. Neither is a person, so neither holds a person's
+provider token. Each is one workload client, registered through identity-control's workload
+registration with an owner (`ADR-IAM-003 §5.8`), which gets its token with the client credentials
+grant and a client assertion signed by its own key.
+
+```sql
+CREATE TABLE organization.reporter (
+    reporter_id     UUID        PRIMARY KEY,
+    principal_id    UUID        NOT NULL UNIQUE,      -- retired rows included: one reporter for good
+    reports         TEXT        NOT NULL,             -- provisioning, or obligation:<domain>
+    purpose         TEXT        NOT NULL,
+    version         BIGINT      NOT NULL DEFAULT 1,
+    registered_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    registered_by   UUID        NOT NULL,
+    register_reason TEXT        NOT NULL,
+    retired_at      TIMESTAMPTZ,
+    retired_by      UUID,
+    retire_reason   TEXT
+);
+```
+
+`reports` is `provisioning` or `obligation:` and a lowercase domain of letters, digits and hyphens.
+The provider role reads and inserts the table and updates the retirement columns and the version
+alone; nobody deletes a row. Authentication reads it on the raw provider connections, as it reads
+the consumer registry (`authority.Reader.ReporterFor`).
+
+**Admitted from the record, per route.** A workload token on a report route is a reporter's or
+nobody's. A `provisioning` reporter reaches the three provisioning reports. An
+`obligation:<domain>` reporter reaches `/resolve`, and the domain comes from its record, so a
+`domain` in the body must be that one (`403` otherwise) and the service still refuses an obligation
+raised against another domain. On every other route the token is authorized as any workload's: a
+consumer's when one is registered with it, and refused otherwise. No OAuth scope decides it, because
+roles stay out of tokens (`STD-IAM-002 §3.2`) and retiring a reporter is a change to this record, not
+to the kernel. Least privilege: "Access should also be granted with the least privileges needed to
+complete the task" (NIST SP 800-207 §2.1, cited in `ADR-ORG-001` [R14]).
+
+**Its scope.** A reporter resolves to the provider scope under the authority `reporter`, because
+the reports change records only the provider role writes. `requireProvider` refuses it on every
+provider route, since it holds no provider authority, and the report handlers admit it alone. It
+needs no `X-Administrative-Reason`: like a consumer, it is a workload doing what its record admits.
+Its access row carries the header when one is sent, and otherwise names the reporter.
+
+**A person's fallback stays a person's act.** A provider still reports provisioning on the system's
+behalf, with the system's confirmation in its reason. No provider resolves an obligation: the route
+refuses one, as `TDD-organization-control-004` §Offboarding on a Development Server already said no
+control lets an operator resolve another domain's obligation.
+
+**Recorded and reviewed through the owner.** Each report writes a privileged-access row with the
+authority `reporter`. Like a consumer's, it is not due in the weekly provider review
+(§Privileged Access Review) and not in a Tenant's view: the workload's owner reviews it
+(`ADR-IAM-003 §5.8`).
+
+**The registry, through the API.** Four provider routes, each with `X-Administrative-Reason`, the
+two commands with an `Idempotency-Key`:
+
+```text
+GET   /v1/reporters                         ?after=&limit=&reports=&state=active|retired
+POST  /v1/reporters                         {"principal_id", "reports", "purpose"}        201
+GET   /v1/reporters/{reporter_id}
+POST  /v1/reporters/{reporter_id}/retire    {"expected_version"}
+```
+
+A second registration of a workload, active or retired, is `409` `state-transition-refused`. A
+stale `expected_version` is `409` `version-conflict`, and retiring a retired reporter `409`
+`state-transition-refused`. A retirement takes effect at the workload's next request.
+
+**On a development server** the stand-ins of `STD-GLB-009` rule 13 report as development reporter
+workloads with their own keys. `scripts/dev-wire.ps1` step 6b creates one per stand-in in
+identity-control and registers it here: `provisioning`, and `obligation:product`, `:hcm`,
+`:billing` and `:audit`. Development runs production's path.
 
 ### The Tenant Administration Grant
 
@@ -957,7 +1039,7 @@ ALTER TABLE audit.privileged_access
     ADD COLUMN tenant_id     UUID,
     ADD COLUMN operation     TEXT,
     ADD CONSTRAINT privileged_access_authority_check
-        CHECK (authority IN ('emergency', 'activation', 'eligible', 'consumer')),
+        CHECK (authority IN ('emergency', 'activation', 'eligible', 'consumer', 'reporter')),
     ADD CONSTRAINT privileged_access_activation_check
         CHECK ((authority = 'activation') = (activation_id IS NOT NULL)),
     ADD CONSTRAINT privileged_access_operation_check
@@ -969,7 +1051,9 @@ CREATE INDEX privileged_access_tenant_idx
 - **`authority`** is what admitted the request. `emergency`: the caller's emergency grant.
   `activation`: an approved activation in force, named by `activation_id`. `eligible`: a grant holder
   with nothing in force, which reaches the activation routes alone. `consumer`: a registered
-  projection consumer. Authentication reads it with the standing (§Caller Authority), and the scope
+  projection consumer. `reporter`: a registered reporter workload on its report routes (1.27.0,
+  §Reporters); like `consumer`, it is reviewed through the workload's owner and never due in the
+  provider review, and a Tenant's view leaves it out. Authentication reads it with the standing (§Caller Authority), and the scope
   carries it: `db.ProviderScope` takes it as an argument and refuses a scope without one, so a
   provider transaction cannot record an access with no authority behind it.
 - **`tenant_id`** is the one Tenant the access named, or null. It is the Tenant
@@ -1406,7 +1490,12 @@ of place:
   `WithSelfInvitation` are `organization_self_rt`.
   `WithProviderScope` and `WithProviderSnapshot` are `organization_provider_rt`.
   `WithResolutionScope` is `organization_resolution_rt`. `WithConsumerScope` and
-  `WithConsumerSnapshot` are `organization_consumer_rt`.
+  `WithConsumerSnapshot` are `organization_consumer_rt`. `WithConsumerReconciliation` and
+  `WithConsumerReconciliationSnapshot` are `organization_provider_rt` (1.27.0): a consumer reconciling
+  its own copy (`TDD-organization-control-002` §Reconciliation Interval) runs this service's
+  comparison and repair on the provider connections, recorded under the consumer's authority. The
+  consumer role gains nothing: granting it `INSERT` on the outbox would let a leaked consumer
+  credential publish any authority event.
 - A declared boundary: a struct that holds a `Transactor` and opens its own transaction on
   it. Its role is whatever the composition root hands it, so it is declared in the tool with
   the `main.go` line it mirrors. A boundary built on two roles' connections lists both:
@@ -2107,7 +2196,7 @@ not pulled.
 | Parent system | SAD-004 — Scnehaux Organization Control |
 | Realizes capability | PAD-PLT-002 — Organization & Tenancy Platform |
 | Governed by | ADR-GLB-002 — Enterprise PostgreSQL Row-Level Security for Isolation |
-| Governed by | ADR-ORG-001 — Separate Organization Authority and Keycloak Projection; §5.11 provider and consumer authority |
+| Governed by | ADR-ORG-001 — Separate Organization Authority and Keycloak Projection; §5.11 provider, consumer and reporter authority (reporter amended 2026-10-20, 1.27.0) |
 | Governed by | ADR-ORG-003 — Tenant Administration Is a Recorded Grant, Checked with Current Membership |
 | Governed by | ADR-ORG-005 §5.1 — a self caller reads its own contexts, on one route, with no provider record (1.17.0) |
 | Governed by | ADR-ORG-007 §5.1, §5.2 — the self caller accepts an invitation; the token selects one row through the self role (1.26.0) |

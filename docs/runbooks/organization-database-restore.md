@@ -1,6 +1,6 @@
 # Runbook: Organization Database restore
 
-Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
+Version 1.2.0. Owner: Core Platform Team. Last reviewed 2026-10-20.
 
 The Organization Database is the authority for Organizations, Tenants, Memberships, provider grants
 and offboardings, and it holds the outbox every consumer's projection is built from. This runbook
@@ -8,7 +8,12 @@ restores it from the daily backup when its volume or its data is lost. A restore
 backup is drilled on every change and daily (`scripts/dev-restore-drill.sh`, STD-GLB-002 §Restore
 Evidence [R1]). A restore to an older point than the consumers' state is contained by pausing
 Tenant administration and reconciled by §After a restore to an older point, which moves each
-Membership a consumer holds at a higher version past it (SAD-004 §6.6, §9.1.1).
+Membership a consumer holds at a higher version past it (SAD-004 §6.6, §9.1.1). From 1.2.0 `restore.sh`
+also bumps every Tenant and provider grant version by 10^9 before the service serves (ADR-ORG-003
+§5.5), and a provider re-applies a lost Membership withdrawal under the pause (ADR-ORG-003 §5.6).
+
+`ReconciliationRequestedAfterRestore` (warning) fires for each consumer from the bump until its next
+recorded reconciliation: this runbook's §After a restore to an older point, step 1.
 
 ## Trigger
 
@@ -50,7 +55,13 @@ happened after the backup.
    It applies the roles, then the database with `pg_restore --create --exit-on-error` [R2], and stops
    at the first error. With `PAUSE_REASON` set it then records a pause of Tenant administration in the
    restored database, before anything can serve, so no Tenant administrator changes authority until
-   §After a restore to an older point is done. Always set it: whether the backup is older than a
+   §After a restore to an older point is done. Last it runs the restore bump: it builds the migrate
+   image, applies any newer migration, and runs `organization-migrate -stage=restore-bump`, which adds
+   10^9 to every Tenant version, Tenant security version and provider grant version, publishes the
+   suspended, offboarding and retired Tenants and the revoked or ended grants at their new versions and
+   no active one, and asks every consumer to reconcile (TDD-organization-control-002 §After a Restore
+   to an Older Point). Its log line counts each. Never set `RESTORE_BUMP=0`: that is the drill's, which
+   compares the restored tables with the source before it bumps. Always set it: whether the backup is older than a
    consumer's state is learned only after the restore. If the backup predates the pause table
    (TDD-organization-control-001 1.22.0), `restore.sh` stops after the restore with the insert's
    error; go on, and pause through the API (step 8) the moment the service answers.
@@ -99,12 +110,12 @@ Run under the pause, in this order. Every call is a provider call with the incid
 2. **Re-apply lost withdrawals first.** Tenant suspensions (`POST /v1/tenants/{tenant_id}/suspend`),
    provider-grant revocations ([provider-access review](provider-access-review.md)) and offboardings
    ([stuck offboarding](stuck-offboarding.md)) are provider acts and run under the pause. A lost
-   **Membership** revocation or suspension is a Tenant administrator's command, which the pause
-   refuses, and no provider route transitions a single Membership (see "Gaps"). The consumer already
-   holds it withdrawn at a higher version, so it keeps refusing; but authority, and so
-   `POST /v1/context/verify`, answers granted meanwhile. Where that matters, suspend the Tenant until
-   its administrator re-applies the withdrawal after step 6. Grants come last, and only when their
-   requester confirms them again. The sources are the incident record, the consumers' own logs and
+   **Membership** revocation or suspension is re-applied by a provider, under the pause, with
+   `POST /v1/tenants/{tenant_id}/memberships/{membership_id}/suspend` or `/revoke`
+   `{"expected_version": <its version>}`, the incident in the reason and an `Idempotency-Key`
+   (ADR-ORG-003 §5.6). It is recorded naming the Tenant, which its administrators read in
+   `GET /v1/provider-access`. A provider never restores or grants one. Grants come last, and only when
+   their requester confirms them again. The sources are the incident record, the consumers' own logs and
    the requesters.
 3. **Advance the versions** for each consumer, with the same report:
 
@@ -158,25 +169,18 @@ Run under the pause, in this order. Every call is a provider call with the incid
 - **The RPO is 24 hours, not 1 minute.** The backup is a daily `pg_dump`. PAD-PLT-002 §6.2 targets
   1 minute, which needs continuous WAL archiving with point-in-time recovery on the production
   platform [R1] [R3]. Until it does, a restore loses up to a day.
-- **Tenant security versions and provider grant versions are not advanced.** A consumer's report
-  carries Memberships only, so nothing says which Tenant or grant version it holds. A Tenant
-  suspension or restoration lost by the restore is handled by re-applying it (step 2). The options
-  are in TDD-organization-control-002 §After a Restore to an Older Point, for the owner.
 - **A Membership the consumer holds withdrawn at a higher version is not advanced.** It is not in
   the report. The consumer keeps the narrower state, a denial, until authority's version passes its
   own; re-applying the withdrawal (step 2) makes the two agree.
-- **No provider route re-applies a lost Membership withdrawal under the pause.** Membership
-  transitions are a Tenant administrator's, and the pause refuses them. Until the pause is lifted,
-  authority and the fresh check answer the lost withdrawal's Membership as granted while the
-  consumer refuses it; the containment is a Tenant suspension. Whether a provider may transition one
-  Membership inside a Tenant, as the offboarding freeze does in bulk, is a decision for the owner
-  (TDD-organization-control-001 §Pausing Tenant Administration).
 - **The same version, two states, is not detected.** A report gives versions only. The pause stops
   Tenant administrators changing authority meanwhile; a provider's change in that window is the
   remaining exposure.
 - **Only the procedure is timed.** The drill measures it on CI data, not on a production-sized
   database, and it does not exercise `.env`, `keys/`, the server's cron, `PAUSE_REASON` or the
-  version advance.
+  Membership version advance. It does run the restore bump on the restored database (its step 8).
+- **The consumers' schedulers are not built.** Until identity-control and foundation-reference
+  reconcile themselves on their declared interval, step 1 is run for each consumer by hand, and
+  `ReconciliationRequestedAfterRestore` holds until it is.
 
 ## References
 

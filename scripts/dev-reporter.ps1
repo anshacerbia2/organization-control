@@ -5,7 +5,7 @@
 # amended 2026-10-20). On a development server the stand-ins of STD-GLB-009 rule 13 (1.10.0) report as
 # development reporter workloads with their own keys, so development runs production's path:
 # dev-provisioning.ps1 and dev-deprovisioning.ps1 as the provisioning reporter, dev-obligation.ps1 as
-# the reporter of the obligation's domain. scripts/dev-wire.ps1 step 7 creates them and writes each one's
+# the reporter of the obligation's domain. scripts/dev-wire.ps1 step 6b creates them and writes each one's
 # client and key file into the wiring state file.
 #
 # The token comes from the client credentials grant, authenticated by a client assertion signed with
@@ -27,7 +27,7 @@ function Get-ReporterEntry($state, [string] $reports) {
 function Get-ReporterToken($state, [string] $reports) {
     $entry = Get-ReporterEntry $state $reports
     if ($null -eq $entry) {
-        throw "the wiring state names no development reporter for $reports; scripts/dev-wire.ps1 step 7 registers them"
+        throw "the wiring state names no development reporter for $reports; scripts/dev-wire.ps1 step 6b registers them"
     }
     $kcBase = if ($env:KC_BASE_URL) { $env:KC_BASE_URL.TrimEnd('/') } else { Get-DevKernelUrl }
     $realm = if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }

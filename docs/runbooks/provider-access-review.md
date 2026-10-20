@@ -94,12 +94,16 @@ All reads are provider reads with `X-Administrative-Reason`, and each writes an 
      -H "Authorization: Bearer $TOKEN" -H "X-Administrative-Reason: weekly provider-access review"
    ```
 
-   Each access: `access_id`, `actor_id`, `authority` (`emergency`, `activation`, `eligible` or
-   `consumer`), `activation_id`, `tenant_id` (the one Tenant it named, or null), `operation` (the
+   Each access: `access_id`, `actor_id`, `authority` (`emergency`, `activation`, `eligible`,
+   `consumer` or `reporter`), `activation_id`, `tenant_id` (the one Tenant it named, or null), `operation` (the
    method and route), `correlation_id`, `reason`, `occurred_at`. Follow `next` until it is null.
    Narrow with `authority=emergency`, `tenant_id=...` or `correlation_id=...` (a provider-mode window
    in the administrative experience carries one correlation). The row does not record the outcome:
-   join `correlation_id` to the request logs for the status.
+   join `correlation_id` to the request logs for the status. `consumer` and `reporter` rows are
+   workloads acting on what their records admit (ADR-ORG-001 §5.11): they are never due in this
+   review and a Tenant's view leaves them out. Each workload's owner reviews its rows, and a
+   registration no owner vouches for is retired (`POST /v1/projections/consumers/{id}/retire`,
+   `POST /v1/reporters/{id}/retire`).
 
    A row records a Tenant only when the access named one. A list across Tenants, or a record
    addressed by its own identifier such as an offboarding, has a null `tenant_id`. Read those rows by

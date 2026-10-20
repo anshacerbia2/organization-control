@@ -1,6 +1,6 @@
 # Runbook: suspected cross-tenant exposure
 
-Version 1.0.1. Owner: Core Platform Team; incident policy: Security. Last reviewed 2026-10-20.
+Version 1.1.0. Owner: Core Platform Team; incident policy: Security. Last reviewed 2026-10-20.
 
 A Tenant's data or authority may have been read or changed by someone acting for another Tenant, or
 by a provider without a recorded reason. SAD-004 §9.2 treats "a cross-tenant authorization defect" as
@@ -80,7 +80,12 @@ Any of:
 - **B. Contain the actor.** A provider: revoke the grant (`POST /v1/provider-grants/{grant_id}/revoke`)
   or end the activation (`POST /v1/provider-activations/{activation_id}/end`). The authority read
   stops the next request. A Tenant administrator: revoke the administration grant
-  (`POST /v1/tenants/{tenant_id}/administrators/{grant_id}/revoke`). A consumer: retire it
+  (`POST /v1/tenants/{tenant_id}/administrators/{grant_id}/revoke`). A compromised member of one
+  Tenant: suspend or revoke that one Membership as a provider,
+  `POST /v1/tenants/{tenant_id}/memberships/{membership_id}/suspend` or `/revoke`
+  `{"expected_version": n}` (1.1.0, ADR-ORG-003 §5.6); it publishes the priority withdrawal and is
+  recorded naming the Tenant. A provider never restores it: the Tenant administrator does, once the
+  incident allows. A reporter workload: retire it (`POST /v1/reporters/{reporter_id}/retire`). A consumer: retire it
   (`POST /v1/projections/consumers/{consumer_id}/retire`; it stops being served, and is an outage for
   what it serves). Each is a provider command: `X-Administrative-Reason` and `Idempotency-Key`.
 - **C. Contain the route.** Roll back the release. If the route is a Tenant administrator's command,
@@ -109,8 +114,8 @@ Any of:
 ## Gaps
 
 - The access record names a Tenant only when the access named one. A list across Tenants, or a
-  record addressed by its own identifier, records none ([provider-access review](provider-access-review.md),
-  Gaps): read those by `operation` and `correlation_id`.
+  record addressed by its own identifier, records none: read those by `operation` and
+  `correlation_id` ([provider-access review](provider-access-review.md), Diagnosis).
 - Tenant-scoped requests write no privileged-access row. Their trail is the request log, kept as
   long as the log platform keeps it.
 - No route reads the posture report itself; it is in the service log.

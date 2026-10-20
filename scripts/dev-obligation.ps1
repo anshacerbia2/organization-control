@@ -148,7 +148,7 @@ if ($obligation.state -eq "completed" -or $obligation.state -eq "waived" -or $ob
 }
 
 if ($null -eq (Get-ReporterEntry $s "obligation:$($obligation.domain)")) {
-    Refuse "the wiring state names no development reporter for obligation:$($obligation.domain); scripts/dev-wire.ps1 step 7 registers product, hcm, billing and audit"
+    Refuse "the wiring state names no development reporter for obligation:$($obligation.domain); scripts/dev-wire.ps1 step 6b registers product, hcm, billing and audit"
 }
 $body = @{ domain = $obligation.domain; state = $outcome }
 if (-not [string]::IsNullOrWhiteSpace($Reason)) { $body.detail = $Reason.Trim() }

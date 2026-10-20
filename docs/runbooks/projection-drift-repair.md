@@ -1,6 +1,6 @@
 # Runbook: projection drift repair
 
-Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
+Version 1.2.0. Owner: Core Platform Team. Last reviewed 2026-10-20.
 
 A consumer's projection of Memberships disagrees with authority. Reconciliation finds the
 difference and publishes a repair. Authority is never changed from a projection: repair runs one
@@ -18,7 +18,11 @@ way, toward authority (TDD-organization-control-002 §Reconciliation).
   `last_reconciled_findings` above 0, and `last_reconciled_extra_findings`, the `extra` among them.
 - A person is refused a context they hold, or admitted to one they do not, at a consumer, while
   `POST /v1/context/verify` (`{"consumer_id", "tenant_id", "principal_id"}`) answers the opposite in `granted`.
-- `reconciliation_age_seconds` on a consumer is older than the team's sweep interval.
+- `ReconciliationOverdueWarning` (warning) and `ReconciliationOverdueCritical` (critical), labelled with
+  the `consumer` (1.2.0, ADR-ORG-001 §5.7): `organization_projection_consumer_reconciliation_age_seconds`
+  is past one, or two, of the `reconciliation_interval_seconds` the consumer declared at registration.
+  The consumer reconciles itself on `POST /v1/projections/reconcile`; its scheduler stopped, or its
+  calls fail. Read its logs, then run one for it as below until it does.
 
 ## Impact
 
@@ -68,6 +72,10 @@ curl -sS -X POST "$OC/v1/projections/reconcile" -H "Authorization: Bearer $TOKEN
   recorded too, and is what clears `ReconciliationExtraFinding`.
 - Repeating it against the same report finds the same findings. The repair is applied by version,
   so a second one changes nothing.
+- The consumer runs the same call itself, as its own workload, for its own `consumer_id`, with no
+  reason header, on the interval it declared (1.2.0). An operator's run, as above, is a provider's
+  privileged access; the consumer's is recorded under its own authority. Either clears
+  `reconciliation_requested_at` after a restore.
 
 **B. Act on each finding.**
 

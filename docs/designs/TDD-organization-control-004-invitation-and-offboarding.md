@@ -397,16 +397,31 @@ past, and acceptance refuses it all the same (§Expiry Sweep).
 | Outcome | Answer |
 | :-- | :-- |
 | Accepted | `200`, `{"invitation": <the invitation view, state accepted>, "membership": <the Membership result POST /v1/memberships answers with>}` |
-| Unknown, expired, revoked, already accepted, or the caller does not hold the invited address as a proven address | `404` `not-found`, detail `The invitation cannot be accepted`, identical for each |
+| Unknown, expired, revoked, already accepted, or the caller does not hold the invited address as a proven address | `404` `invitation-not-acceptable` (1.15.0), detail `The invitation cannot be accepted`, identical for each |
 | The Tenant is not active, or the caller already holds an active Membership for the invitation's context | `409` `state-transition-refused` |
 | The Identity Control API could not be asked, or no client for it is configured | `503` `dependency-unavailable`; nothing changed |
 | A malformed token | `400` `validation-failed` |
 
-`ADR-ORG-007 §5.4` names the one refusal `invitation-not-acceptable`. The problem types are
-foundation-platform's closed registry (`httpapi.ProblemType`), which has no such type, so the
-refusal is `not-found` with one constant detail. What the ADR asks of it holds: every failed
-lookup answers the same status, type and detail. A type of its own is a foundation-platform
-change, recorded in ROADMAP §Open.
+`ADR-ORG-007 §5.4` names the one refusal `invitation-not-acceptable`. From 1.15.0 it is that type,
+which foundation-platform v0.5.0 registers in its closed registry (`httpapi.InvitationNotAcceptable`,
+`STD-GLB-001` 1.7.0): `https://problems.scnehaux.com/invitation-not-acceptable`, "The invitation cannot
+be accepted", `404`. Until 1.15.0 it was `not-found`. Every failed lookup answers the same status, type
+and detail, so a guessed token learns nothing of which check failed (RFC 9457 §5). A client branches
+on the type, never on the status or the detail: "Consumers MUST use the "type" URI (after resolution,
+if necessary) as the problem type's primary identifier" (RFC 9457 §3.1.1, as `STD-GLB-001` 1.7.0
+quotes it).
+
+**Issuing answers the token once** (1.15.0, `ADR-ORG-007 §5.5` amended 2026-10-20, `STD-GLB-001`
+1.7.0). `POST /v1/invitations` answers `{"invitation": ..., "token": ...}` live, and records its answer
+for replay without `/token` (`db.WithholdFromRecord`, foundation-platform's
+`idempotency.CompleteWithheld`), in the transaction that commits the invitation. A retry with the same
+`Idempotency-Key` therefore answers the invitation issued, `201`, without its token, as the draft asks
+a replay to "respond with the result of the previously completed operation": the result is the
+invitation. A link lost that way is revoked and issued again. A response the surface records after
+the handler is withheld the same way, and one lacking the member is not recorded at all, so the key
+stays claimed rather than holding a renamed secret. `TestTheIssueRecordHoldsNoToken` reads the record
+and the replay against the engine. Organization Experience shows a replay as such and uses a new key
+after each answer (`TDD-organization-experience-002`).
 
 The lookup's constant `next` is `accept` from 1.14.0, where it was `verify-identity`.
 
@@ -434,6 +449,15 @@ From 1.9.0 every `POST` above requires an `Idempotency-Key` but one:
 `/{offboarding_id}/deprovisioning` is the provisioning system's report of an outcome, and the same
 outcome sent again records the same state, so it honours a key and does not require one
 (`TDD-organization-control-003` §The `Idempotency-Key` Is Required on Commands).
+
+**Two of them are reports, not provider commands** (1.15.0, `ADR-ORG-001 §5.11`, amended 2026-10-20;
+`TDD-organization-control-001` §Reporters). `/{offboarding_id}/deprovisioning` admits the provisioning
+system's registered reporter workload, or a provider reporting on its behalf.
+`/v1/obligations/{obligation_id}/resolve` admits only the reporter registered for
+`obligation:<domain>`, and only for an obligation raised against that domain: the domain comes from
+its record, so a `domain` in the body must be that one (`403`), and no provider resolves an obligation
+(`403`). A reporter sends no `X-Administrative-Reason`; its access row names it. Until 1.15.0 both
+admitted provider authority only, which a domain could hold only through a person.
 
 The list near the top of this section is the shape the flow was designed in; the block above is
 what a client calls. Beginning names its Tenant in the body, the four stage advances are
@@ -894,8 +918,15 @@ Their rules:
   domain they stand in for, and the request carries it, so `ErrWrongDomain` refuses a closure of
   another domain's obligation exactly as it would refuse a real domain's mistake (§Negative). The
   script refuses it before sending, too. A waiver and a failure need a reason, which is the row's
-  `detail`; the resolution records the operator as `resolved_by`. The first completion or waiver is
-  final, as the service rules; a `failed` obligation may still be completed or waived.
+  `detail`; the resolution records the reporter workload as `resolved_by`. The first completion or
+  waiver is final, as the service rules; a `failed` obligation may still be completed or waived.
+- **Each reports as a development reporter workload** (1.15.0, `ADR-ORG-001 §5.11`, amended
+  2026-10-20; `STD-GLB-009` rule 13, 1.10.0). `scripts/dev-wire.ps1` step 6b registers one workload with
+  its own key for `provisioning` and one for each of `obligation:product`, `:hcm`, `:billing` and
+  `:audit`. The deprovisioning stand-in reports as the provisioning reporter, the obligation stand-in
+  as the reporter of the obligation's domain, with a client credentials token; each reads first with
+  the operator's provider token, because a reporter reaches its report routes alone. Development runs
+  production's path: the domain is bound by the reporter's record, not by the operator's word.
 - **The resolution requires an `Idempotency-Key`**, and the script sends one per run. The deprovisioning
   report honours a key and does not require one (§API / Interface), so none is sent.
 - **Organization Experience offers neither control.** Its obligation board "offers no completion or
@@ -907,9 +938,9 @@ Their rules:
   which is the operator's own act.
 - **`deploy-dev` runs both on every change** (`scripts/dev-wiring-proof.ps1` step 9): an offboarding
   is begun, frozen and given two obligations; the deprovisioning report is refused before release and
-  a resolution under the wrong domain is refused and changes nothing; one obligation is completed and
-  the other waived; release; a failed deprovisioning, a refusal of it, a resend, a realized report,
-  and retirement.
+  a resolution under the wrong domain is refused and changes nothing; the operator's own token is
+  refused on `/resolve` (1.15.0); one obligation is completed and the other waived; release; a failed
+  deprovisioning, a refusal of it, a resend, a realized report, and retirement.
 
 The procedure is `deploy/dev/README.md` §Offboarding a Tenant on the development server.
 
@@ -1179,6 +1210,9 @@ and sends a failed deprovisioning again. Written (1.11.0):
 | Parent system | SAD-004 — Scnehaux Organization Control |
 | Realizes capability | PAD-PLT-002 — invitation, onboarding correlation, offboarding coordination |
 | Governed by | ADR-ORG-001 §5.1 — Tenant offboarding and retirement coordination |
+| Governed by | ADR-ORG-001 §5.11 (amended 2026-10-20) — the provisioning system and each obligation-owning domain report as registered reporter workloads (1.15.0) |
+| Governed by | ADR-ORG-007 §5.4, §5.5 (amended 2026-10-20) — the refusal's own type; a retry answers the invitation without its token (1.15.0) |
+| Conforms to | STD-GLB-001 1.7.0 — the problem type registry; a secret answered once is never in the idempotency record, tested (1.15.0) |
 | Governed by | ADR-ORG-007 — the invited person accepts an invitation, signed in as themselves; the caller must hold the invited address as a proven address (1.14.0) |
 | Depends on | `TDD-identity-control-008` — `POST /v1/principals/{principal_id}/identifiers:match`, Organization Control's workload alone (1.14.0) |
 | Consumed by | `TDD-organization-experience-002` — the link shown once on issue, and the acceptance page (1.14.0) |

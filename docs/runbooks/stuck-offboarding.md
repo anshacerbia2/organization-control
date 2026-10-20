@@ -1,6 +1,6 @@
 # Runbook: stuck offboarding
 
-Version 1.3.0. Owner: Core Platform Team. Last reviewed 2026-10-19.
+Version 1.4.0. Owner: Core Platform Team. Last reviewed 2026-10-20.
 
 An offboarding moves `freeze -> obligations -> release -> retired`, or ends `cancelled`. Each stage
 is persisted, so a stopped offboarding resumes from where it is. This runbook finds why one has not
@@ -92,26 +92,33 @@ All are provider commands: `X-Administrative-Reason` and an `Idempotency-Key` ar
 
   `complete-freeze` answers `409` naming how many active Memberships remain.
 
-- **B. Obligations.** The owning domain reports the outcome. On its behalf, with its confirmation in
-  the reason:
+- **B. Obligations.** The owning domain reports the outcome, as its registered reporter workload
+  (1.4.0, `ADR-ORG-001 §5.11`, amended 2026-10-20). No provider resolves an obligation: a provider's
+  token on this route is refused `403`, so chase the domain's owner. What the domain sends:
 
   ```sh
-  curl -sS -X POST "$OC/v1/obligations/$OBLIGATION_ID/resolve" -H "Authorization: Bearer $TOKEN" \
-    -H "X-Administrative-Reason: INC-123 billing confirmed export" -H "Idempotency-Key: $(uuidgen)" \
+  curl -sS -X POST "$OC/v1/obligations/$OBLIGATION_ID/resolve" -H "Authorization: Bearer $DOMAIN_TOKEN" \
+    -H "Idempotency-Key: $(uuidgen)" \
     -H "Content-Type: application/json" -d '{"domain":"billing","state":"completed"}'
   ```
 
+  - `$DOMAIN_TOKEN` is the domain workload's client credentials token. Its reporter record,
+    `obligation:billing` here, is what admits it (`GET /v1/reporters?reports=obligation:billing`). A
+    domain with no active reporter cannot resolve: register one, with its owner, through
+    `POST /v1/reporters` (TDD-001 §Reporters).
   - `state` is `completed`, `waived` or `failed`. `waived` and `failed` need a `detail`.
-  - `domain` must be the one the obligation was raised against, or it is refused `403`.
+  - `domain` must be the reporter's own and the one the obligation was raised against, or it is
+    refused `403`.
   - Waive only on the decision of an accountable person, named in `detail`. `waived` exists so an
     audit can tell a decision from a satisfied obligation (TDD-004 §Security Notes).
   - A missing obligation is raised with `POST /v1/offboardings/{id}/obligations`
     `{"domain", "type", "due_at"}`.
   - **On a development server** no domain runs, so the operator stands in for the owning one with
     `scripts/dev-obligation.ps1 -OffboardingId <id> -ObligationId <id> -Domain <domain> -Completed`
-    (or `-Waived -Reason`, `-Failed -Reason`), which calls this route and refuses, sending nothing,
-    under another domain or on a final obligation (`deploy/dev/README.md` §Offboarding a Tenant on the
-    development server; TDD-004 1.13.0 §Offboarding on a Development Server).
+    (or `-Waived -Reason`, `-Failed -Reason`), which calls this route as the development reporter for
+    that domain and refuses, sending nothing, under another domain or on a final obligation
+    (`deploy/dev/README.md` §Offboarding a Tenant on the development server; TDD-004 1.15.0
+    §Offboarding on a Development Server).
 
 - **C. Legal hold.** Release only on counsel's written instruction, cited in the reason:
   `POST /v1/offboardings/{id}/legal-hold` with `{"hold": false}`. A hold blocks release and
@@ -127,7 +134,8 @@ All are provider commands: `X-Administrative-Reason` and an `Idempotency-Key` ar
      do it now: `POST /v1/provisioning/sweep-unresolved` with `{"size": 100}`.
   2. Ask the infrastructure owner what happened, giving the offboarding's `correlation_id`, the
      Tenant, and `deprovisioning.requested_at`.
-  3. The provisioning system reports, or you report on its behalf with its confirmation:
+  3. The provisioning system reports, as its registered `provisioning` reporter workload, or you report
+     on its behalf, as a provider, with its confirmation in the reason:
      `POST /v1/offboardings/{id}/deprovisioning` with `{"state":"realized"}`, or
      `{"state":"failed","detail":"..."}`. `204`. It records; it never advances the stage.
   4. A `failed` deprovisioning is sent again with H once the provisioning system's owner has fixed
@@ -135,7 +143,7 @@ All are provider commands: `X-Administrative-Reason` and an `Idempotency-Key` ar
      first.
   5. **On a development server** no provisioning system runs, so the operator is its stand-in for
      step 3, with `scripts/dev-deprovisioning.ps1 -OffboardingId <id> -Realized` (or
-     `-Failed -Reason`). It refuses, sending nothing, unless the offboarding is in `release` and the
+     `-Failed -Reason`), which reports as the development provisioning reporter. It refuses, sending nothing, unless the offboarding is in `release` and the
      latest deprovisioning is `requested` or `unresolved`, and it never retires or resends
      (`deploy/dev/README.md` §Offboarding a Tenant on the development server).
 

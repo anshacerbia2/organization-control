@@ -101,7 +101,7 @@ if (Get-Command Get-DevOperatorTotp -ErrorAction SilentlyContinue) {
 }
 . (Join-Path $PSScriptRoot "dev-reporter.ps1")
 if ($null -eq (Get-ReporterEntry $s "provisioning")) {
-    Refuse "the wiring state names no development provisioning reporter; run scripts/dev-wire.ps1 (step 7 registers it)"
+    Refuse "the wiring state names no development provisioning reporter; run scripts/dev-wire.ps1 (step 6b registers it)"
 }
 $token = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
     -ClientId $s.caller_client_id -KeyFile $s.caller_key_file @operatorTotp

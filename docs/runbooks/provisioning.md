@@ -1,6 +1,6 @@
 # Runbook: stuck, unresolved and refused provisioning
 
-Version 1.2.0. Owner: Core Platform Team. Last reviewed 2026-10-19.
+Version 1.3.0. Owner: Core Platform Team. Last reviewed 2026-10-20.
 
 A Tenant is not `active` until the external system that owns its isolation boundary confirms the
 boundary exists (SAD-004 §5.1). This service records the desired state as a provisioning request,
@@ -93,7 +93,10 @@ and do not require it.
   before the next run: `POST /v1/provisioning/sweep-unresolved` `{"size": 100}` answers
   `{"affected": n}`. It sets requests older than the timeout to `unresolved`, in both directions
   (provisioning and offboarding's deprovisioning), and starts no retry.
-- **C. Report the outcome** on the provisioning system's behalf, with its confirmation in the reason:
+- **C. Report the outcome.** The provisioning system reports it itself, as its registered
+  `provisioning` reporter workload, with no reason header (1.3.0, `ADR-ORG-001 §5.11`, amended
+  2026-10-20; `GET /v1/reporters?reports=provisioning`). When it cannot, a provider reports on its
+  behalf, with its confirmation in the reason:
 
   ```sh
   curl -sS -X POST "$OC/v1/provisioning/realized" -H "Authorization: Bearer $TOKEN" \
@@ -116,7 +119,8 @@ and do not require it.
   **On a development server** no provisioning system runs, so the operator is its stand-in, with
   `scripts/dev-provisioning.ps1` (`deploy/dev/README.md` §Provisioning a Tenant on the development
   server). It reads the Tenant first, refuses unless the Tenant is `provisioning` with a latest request
-  `requested` or `unresolved`, and then sends the same report:
+  `requested` or `unresolved`, and then sends the same report as the development provisioning reporter
+  workload, with its own key:
 
   ```sh
   pwsh ./scripts/dev-provisioning.ps1 -IdentityRepo <identity-control checkout> -State <wiring state file> \

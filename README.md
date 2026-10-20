@@ -268,6 +268,7 @@ names, and `sub` is not read.
 | Tenant administrator | `subject_type` `human`, `tenant_id`, `acr` `aal2` or higher, `auth_time` | in that Tenant: an active Membership, the Tenant active, and a tenant administration grant (ADR-ORG-003) |
 | Provider | `subject_type` `human`, `acr`, `auth_time`, no `tenant_id` | a provider grant for the `principal_id` |
 | Projection consumer | `subject_type` `workload`, `workload_owner`, no `tenant_id` | an active consumer registered with the `principal_id` |
+| Reporter (2026-10-20) | `subject_type` `workload`, `workload_owner`, no `tenant_id`, on a report route | an active reporter registered with the `principal_id` for what the route reports: `provisioning` on the three provisioning reports, `obligation:<domain>` on that domain's `/resolve` (ADR-ORG-001 §5.11, `GET /v1/reporters`) |
 | Self | `subject_type` `human`, with or without `tenant_id`, on `GET /v1/principals/{own principal_id}/contexts` (ADR-ORG-005) or `POST /v1/invitations/accept` (ADR-ORG-007) | none: the route reaches the caller's own rows, and acceptance creates the caller's own Membership |
 
 A revoked grant, a retired consumer, a revoked Membership or a suspended Tenant stops at the next
@@ -564,8 +565,8 @@ routes cover the path:
 | :-- | :-- | :-- |
 | `POST /v1/tenants` | operator | Tenant in `requested`, a provisioning request, and `tenant.lifecycle.requested` — one transaction |
 | `POST /v1/tenants/{id}/provisioning` | operator | `requested → provisioning`, or a retry from `failed` with a new request row |
-| `POST /v1/provisioning/realized` | provisioning system | Marks the request `realized`. Does **not** activate |
-| `POST /v1/provisioning/failed` | provisioning system | Marks the request `failed` and moves the Tenant to `failed` |
+| `POST /v1/provisioning/realized` | provisioning system, as its registered reporter workload; or a provider on its behalf | Marks the request `realized`. Does **not** activate |
+| `POST /v1/provisioning/failed` | provisioning system, as above | Marks the request `failed` and moves the Tenant to `failed` |
 | `POST /v1/provisioning/sweep-unresolved` | operator; the same sweep runs in-process every reconcile interval | Ages unanswered requests to `unresolved`. Never retries |
 | `POST /v1/tenants/{id}/activate` | operator | `provisioning → active`, once realized and the sponsor is active |
 
@@ -602,7 +603,8 @@ still `requested` whose request timed out can still be dispatched: that records 
 (TDD-organization-control-003 1.15.0 §Resolving an `unresolved` Request).
 
 **On a development server the operator stands in for the provisioning system**, with
-`scripts/dev-provisioning.ps1` (`-Realized`, or `-Failed -Reason`), which calls the same two routes and
+`scripts/dev-provisioning.ps1` (`-Realized`, or `-Failed -Reason`), which calls the same two routes as
+the development provisioning reporter workload (`scripts/dev-wire.ps1` step 6b) and
 refuses a Tenant not in `provisioning` or a request that already has an outcome
 (TDD-organization-control-003 1.15.0 §The Provisioning System on a Development Server;
 `deploy/dev/README.md` §Provisioning a Tenant on the development server). `deploy-dev` runs it on every
@@ -613,8 +615,8 @@ Server). `scripts/dev-deprovisioning.ps1` (`-Realized`, or `-Failed -Reason`) re
 offboarding's deprovisioning through `POST /v1/offboardings/{id}/deprovisioning`, and refuses one not at
 `release` or whose latest deprovisioning already has an outcome. `scripts/dev-obligation.ps1`
 (`-Domain <domain>` and `-Completed`, `-Waived -Reason` or `-Failed -Reason`) resolves one obligation as
-the domain it was raised against, through `POST /v1/obligations/{id}/resolve`, and refuses another
-domain's or a final one. Neither retires, releases or resends, and Organization Experience offers no
+the domain it was raised against, through `POST /v1/obligations/{id}/resolve`, as that domain's
+development reporter, and refuses another domain's or a final one. No provider resolves an obligation. Neither retires, releases or resends, and Organization Experience offers no
 control for an obligation (TDD-organization-experience-003 §As Served). `deploy-dev` runs both on every
 change (`deploy/dev/README.md` §Offboarding a Tenant on the development server).
 

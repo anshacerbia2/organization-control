@@ -10,7 +10,7 @@
 #   4. Organization's emergency provider:identity-control grant and identity-control's consumer;
 #   5. delivery to identity-control;
 #   6. identity-control pointed here, and its provider-bootstrap run;
-#   7. the development reporters: a workload per stand-in of STD-GLB-009 rule 13, each with its own key,
+#   6b. the development reporters: a workload per stand-in of STD-GLB-009 rule 13, each with its own key,
 #      registered here for what it reports (ADR-ORG-001 §5.11, amended 2026-10-20): provisioning, and
 #      obligation:product, :hcm, :billing and :audit. scripts/dev-provisioning.ps1, dev-deprovisioning.ps1
 #      and dev-obligation.ps1 report as them.
@@ -204,7 +204,7 @@ $bootstrap | ForEach-Object { Write-Host "        $_" }
 if ($LASTEXITCODE -ne 0) { throw "provider-bootstrap failed" }
 if (-not ($bootstrap -match "memberships\s+\d+")) { throw "provider-bootstrap did not bootstrap the Tenant context" }
 
-Write-Host "7. the development reporters"
+Write-Host "6b. the development reporters"
 # Fresh tokens: steps 3 to 6 restart both services, and the first ones may have expired meanwhile.
 $identityToken = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
     -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp

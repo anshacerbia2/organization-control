@@ -866,6 +866,17 @@ outcome is unknown is how a Tenant gets provisioned twice, and EAD-004 §6.6 req
 critical mutations to define duplicate protection at the business boundary rather than
 at the transport.
 
+### Who Reports an Outcome (1.18.0)
+
+`ADR-ORG-001 §5.11`, amended 2026-10-20. The provisioning system is a registered reporter workload:
+one workload client, with its own key and an owner, registered here for `provisioning`
+(`TDD-organization-control-001` §Reporters). Its token reaches `POST /v1/provisioning/realized`,
+`POST /v1/provisioning/failed` and `POST /v1/offboardings/{offboarding_id}/deprovisioning` and nothing
+else, needs no `X-Administrative-Reason`, and is recorded as privileged access under the authority
+`reporter`, reviewed through its owner. Until 1.18.0 the routes admitted provider authority only, which
+a machine could hold only as a person's token. A provider still reports on the system's behalf, as a
+person's act with the system's confirmation in the reason (`docs/runbooks/provisioning.md` C).
+
 ### Resolving an `unresolved` Request (1.15.0)
 
 The algorithm above ends "reconciliation queries the provisioning system and resolves it", and
@@ -899,8 +910,11 @@ Until 1.15.0 only `scripts/dev-wiring-proof.ps1` reported one, inline, for the T
 
 **Decision: an operator script, `scripts/dev-provisioning.ps1`, stands in for it.** It reports
 `realized` or `failed` (with a reason) for one Tenant, named by its identifier or by its correlation
-identifier, through the two routes the provisioning system calls, with the operator's provider token
-from the wiring state file. Its rules:
+identifier, through the two routes the provisioning system calls. From 1.18.0 it reports as the
+development provisioning reporter, a workload registered for `provisioning` with its own key, as
+production's system is (`ADR-ORG-001 §5.11`, amended 2026-10-20; `STD-GLB-009` rule 13, 1.10.0), and
+reads the Tenant first with the operator's provider token, because a reporter reaches its report routes
+alone. Both come from the wiring state file `scripts/dev-wire.ps1` writes. Its rules:
 
 - It reads the Tenant first, and refuses, sending nothing, unless the Tenant is `provisioning` and its
   latest provisioning request is `requested` or `unresolved`. A Tenant still `requested` is refused
@@ -936,8 +950,8 @@ should be run in an identical environment as the regular long-running processes 
 this repository and calls the deployed service as any provider does. It also keeps development like
 production where it matters: "The twelve-factor developer resists the urge to use different backing
 services between development and production" [R8]. The routes, the authentication, the correlation
-and the state checks a development Tenant passes through are production's; only the caller of two
-routes differs.
+and the state checks a development Tenant passes through are production's, and from 1.18.0 so is the
+caller's kind: a registered reporter workload with its own key, not a person standing in.
 
 | Option | Why not |
 | :-- | :-- |
