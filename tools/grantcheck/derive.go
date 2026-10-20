@@ -66,7 +66,10 @@ var wrappers = map[string]string{
 	dbPkg + ".WithResolutionScope":  resolutionRole,
 	dbPkg + ".WithConsumerScope":    consumerRole,
 	dbPkg + ".WithConsumerSnapshot": consumerRole,
-	dbPkg + ".WithSelfRead":         selfRole,
+	// A consumer reconciling its own copy runs on the provider connections (ADR-ORG-001 §5.7).
+	dbPkg + ".WithConsumerReconciliation":         providerRole,
+	dbPkg + ".WithConsumerReconciliationSnapshot": providerRole,
+	dbPkg + ".WithSelfRead":                       selfRole,
 	// Invitation acceptance (ADR-ORG-007 §5.2): the token's row read as the self role, and the write
 	// in the invitation's Tenant as the tenant role.
 	dbPkg + ".WithSelfInvitation": selfRole,
@@ -102,6 +105,8 @@ var boundaries = map[string][]string{
 	// grants (ADR-ORG-002 §5.2).
 	"(*" + module + "/internal/authority.Reader).EmergencyGrants": {providerRole},
 	"(*" + module + "/internal/authority.Reader).ConsumerFor":     {providerRole},
+	// The reporter registration authentication reads on a report route (ADR-ORG-001 §5.11).
+	"(*" + module + "/internal/authority.Reader).ReporterFor": {providerRole},
 	// Read for each Tenant administrator's command: whether a provider has paused them.
 	"(*" + module + "/internal/authority.Reader).TenantAdministrationPaused": {providerRole},
 	// Each request an emergency grant authorizes records the grant's use, and the maintenance stage
@@ -133,6 +138,12 @@ var outOfScope = map[string]string{
 	// The dispatcher's own statements are foundation-platform's; this is the registration check it
 	// makes before starting. dispatch_role_integration_test.go measures that role's privileges.
 	module + "/internal/delivery.checkRegistered": "organization_dispatch_rt",
+	// The restore bump's publications run on the restore's own connection, the cluster superuser in
+	// deploy/dev/restore.sh, before the service serves and before any Tenant is bound
+	// (ADR-ORG-003 §5.5); internal/restore, which calls them, is not reached from the server, and its
+	// integration test runs them as the owner.
+	module + "/internal/tenant.PublishWithdrawn":          "the restore's connection",
+	module + "/internal/authority.PublishWithdrawnGrants": "the restore's connection",
 }
 
 func outsideScope(fn *ssa.Function) bool {

@@ -117,6 +117,14 @@ func WithProviderSnapshot(ctx context.Context, pool *ProviderPool, reason string
 	return withProviderScope(ctx, pool, reason, true, fn)
 }
 
+func WithConsumerReconciliation(ctx context.Context, pool *ProviderPool, reason string, fn Body) error {
+	return withRecordedScope(ctx, pool.tx, pool.recorder, fn)
+}
+
+func WithConsumerReconciliationSnapshot(ctx context.Context, pool *ProviderPool, reason string, fn Body) error {
+	return withRecordedScope(ctx, pool.tx, pool.recorder, fn)
+}
+
 func WithResolutionScope(ctx context.Context, pool *ResolutionPool, reason string, fn Body) error {
 	return withRecordedScope(ctx, pool.tx, pool.recorder, fn)
 }

@@ -18,6 +18,12 @@
 //
 //	organization-migrate -stage=maintenance   # partitions, retention, batch previews, the stale-incident count
 //
+// A fifth is run once, by deploy/dev/restore.sh, after a restore and before the service serves:
+//
+//	organization-migrate -stage=restore-bump  # every Tenant and grant version past what consumers hold
+//
+// restore.Bump says what it does (ADR-ORG-003 §5.5).
+//
 // It exits 3 when an unresolved dead letter is older than -stale-alert, after doing its work, so
 // the scheduler alerts on the one condition retention must never touch. controldb.RunMaintenance
 // says what each step does.
@@ -56,19 +62,21 @@ import (
 	"github.com/anshacerbia2/organization-control/internal/controldb"
 	"github.com/anshacerbia2/organization-control/internal/posture"
 	"github.com/anshacerbia2/organization-control/internal/projection"
+	"github.com/anshacerbia2/organization-control/internal/restore"
 )
 
 const (
 	stagePre         = "pre"
 	stagePost        = "post"
 	stageMaintenance = "maintenance"
+	stageRestoreBump = "restore-bump"
 )
 
 // errStale reports stale incidents after a maintenance run that otherwise succeeded.
 var errStale = errors.New("unresolved dead letters are older than the alert boundary")
 
 func main() {
-	stage := flag.String("stage", "", "pre (cluster roles), post (platform schema, Row-Level Security, privileges), or maintenance (partitions and retention, run on a schedule)")
+	stage := flag.String("stage", "", "pre (cluster roles), post (platform schema, Row-Level Security, privileges), maintenance (partitions and retention, run on a schedule), or restore-bump (after a restore, before the service serves)")
 	timeout := flag.Duration("timeout", 2*time.Minute, "upper bound on the whole run")
 	maintenance := controldb.DefaultMaintenance
 	flag.IntVar(&maintenance.PartitionsAhead, "partitions-ahead", maintenance.PartitionsAhead, "maintenance: days of outbox partitions created ahead")
@@ -92,8 +100,9 @@ func main() {
 }
 
 func run(stage string, timeout time.Duration, maintenance controldb.MaintenanceConfig, logger *slog.Logger) error {
-	if stage != stagePre && stage != stagePost && stage != stageMaintenance {
-		return fmt.Errorf("-stage must be %q, %q or %q, got %q", stagePre, stagePost, stageMaintenance, stage)
+	if stage != stagePre && stage != stagePost && stage != stageMaintenance && stage != stageRestoreBump {
+		return fmt.Errorf("-stage must be %q, %q, %q or %q, got %q", stagePre, stagePost, stageMaintenance,
+			stageRestoreBump, stage)
 	}
 
 	dsn := os.Getenv("ORGANIZATION_MIGRATION_DATABASE_URL")
@@ -129,6 +138,18 @@ func run(stage string, timeout time.Duration, maintenance controldb.MaintenanceC
 		return applyStage(ctx, pool, controldb.StageRoles, logger)
 	case stageMaintenance:
 		return runMaintenance(ctx, pool, maintenance, logger)
+	case stageRestoreBump:
+		report, err := restore.Bump(ctx, pool)
+		if err != nil {
+			return err
+		}
+		logger.Info("restore bump",
+			slog.Time("observed_at", report.ObservedAt), slog.Int64("margin", restore.Margin),
+			slog.Int64("tenants", report.Tenants), slog.Int64("grants", report.Grants),
+			slog.Int("tenants_published", report.TenantsPublished),
+			slog.Int("grants_published", report.GrantsPublished),
+			slog.Int64("consumers_requested", report.ConsumersRequested))
+		return nil
 	default:
 		// The platform schema first: grants.sql names its tables, and the RLS stage runs
 		// between them so a window where privileges exist without policies never opens.

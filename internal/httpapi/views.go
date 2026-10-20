@@ -410,6 +410,13 @@ type consumerView struct {
 	// LastReconciledExtraFindings is how many of the last run's findings were `extra`, access nothing
 	// granted; above 0 is a security incident (TDD-organization-control-002 1.15.0 §Reconciliation).
 	LastReconciledExtraFindings *int `json:"last_reconciled_extra_findings,omitempty"`
+
+	// ReconciliationIntervalSeconds is how often the consumer reconciles itself, as it declared
+	// (ADR-ORG-001 §5.7, TDD-organization-control-002 1.16.0 §Reconciliation Interval), and
+	// ReconciliationRequestedAt is when a restore asked every consumer to reconcile, null once this
+	// one has. Both always present.
+	ReconciliationIntervalSeconds int64      `json:"reconciliation_interval_seconds"`
+	ReconciliationRequestedAt     *time.Time `json:"reconciliation_requested_at"`
 }
 
 // viewConsumer renders a consumer as of now, the instant its reconciliation age is measured at.
@@ -422,6 +429,8 @@ func viewConsumer(c projection.Consumer, now time.Time) consumerView {
 		LastReportedAt: c.LastReportedAt, EventTypes: eventTypes(c.EventTypes),
 		LastReconciledAt: c.LastReconciledAt, LastReconciledMark: c.LastReconciledMark,
 		LastReconciledFindings: c.LastReconciledFindings, LastReconciledExtraFindings: c.LastReconciledExtraFindings,
+		ReconciliationIntervalSeconds: int64(c.ReconciliationInterval / time.Second),
+		ReconciliationRequestedAt:     c.ReconciliationRequestedAt,
 	}
 	if age := c.ReconciliationAge(now); age != nil {
 		seconds := int64(*age / time.Second)

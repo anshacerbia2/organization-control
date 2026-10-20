@@ -54,6 +54,40 @@ func acceptRoute(r *http.Request) bool {
 	return r.Method == http.MethodPost && r.URL.Path == "/v1/invitations/accept"
 }
 
+// The report routes a registered reporter workload reaches, and no other (ADR-ORG-001 §5.11, amended
+// 2026-10-20). reportProvisioning are the provisioning system's three; reportObligation is a domain's
+// resolution of its own obligation.
+const (
+	reportProvisioning = "provisioning"
+	reportObligation   = "obligation"
+)
+
+// reportRoute names the report a request is, by method and path exactly: POST
+// /v1/provisioning/realized or /failed, POST /v1/offboardings/{offboarding_id}/deprovisioning (not
+// its /resend, which is an operator's command), and POST /v1/obligations/{obligation_id}/resolve.
+// Every other request is no report, and a reporter's token on it is authorized as any workload's.
+func reportRoute(r *http.Request) (string, bool) {
+	if r.Method != http.MethodPost {
+		return "", false
+	}
+	path := r.URL.Path
+	switch path {
+	case "/v1/provisioning/realized", "/v1/provisioning/failed":
+		return reportProvisioning, true
+	}
+	if rest, ok := strings.CutPrefix(path, "/v1/offboardings/"); ok {
+		if segment, ok := strings.CutSuffix(rest, "/deprovisioning"); ok && segment != "" && !strings.Contains(segment, "/") {
+			return reportProvisioning, true
+		}
+	}
+	if rest, ok := strings.CutPrefix(path, "/v1/obligations/"); ok {
+		if segment, ok := strings.CutSuffix(rest, "/resolve"); ok && segment != "" && !strings.Contains(segment, "/") {
+			return reportObligation, true
+		}
+	}
+	return "", false
+}
+
 // TokenVerifier is the one thing authentication needs from a token library.
 //
 // An interface rather than *verify.Verifier so this package can be tested without an RSA key set or
@@ -103,6 +137,10 @@ type CallerRecords interface {
 	// ConsumerFor names the active projection consumer registered with the Principal, or "" when
 	// there is none.
 	ConsumerFor(ctx context.Context, principal id.UUID) (string, error)
+
+	// ReporterFor reads the active reporter registered with the Principal: its identifier and what it
+	// reports, or the nil identifier when there is none (ADR-ORG-001 §5.11).
+	ReporterFor(ctx context.Context, principal id.UUID) (id.UUID, authority.Reports, error)
 
 	// TenantStanding reads, in the Tenant, the Principal's Membership, the Tenant's status and its
 	// tenant administration grant (ADR-ORG-003 §5.3).
@@ -219,7 +257,8 @@ func Authenticate(verifier TokenVerifier, cfg AuthenticationConfig) (Middleware,
 				}
 				caller = Caller{Subject: presented.principal, Self: true}
 			} else {
-				caller, err = authorize(r.Context(), presented, cfg)
+				report, _ := reportRoute(r)
+				caller, err = authorize(r.Context(), presented, report, cfg)
 			}
 			switch {
 			case errors.Is(err, errRecords):
@@ -436,7 +475,7 @@ var errRecords = errors.New("httpapi: the caller records could not be read")
 // the token's subject_type decides which is read. A workload holding a provider grant gains nothing
 // from it — STD-IAM-002 §3.2 keeps provider authority off workload tokens — and a person registered
 // as a consumer is not one.
-func authorize(ctx context.Context, p presented, cfg AuthenticationConfig) (Caller, error) {
+func authorize(ctx context.Context, p presented, report string, cfg AuthenticationConfig) (Caller, error) {
 	if !p.tenant.IsNil() {
 		correlation, _ := observability.CorrelationID(ctx)
 		standing, err := cfg.Records.TenantStanding(ctx, p.principal, p.tenant, correlation)
@@ -447,6 +486,26 @@ func authorize(ctx context.Context, p presented, cfg AuthenticationConfig) (Call
 			return Caller{}, errors.New(notAdministrator)
 		}
 		return Caller{Subject: p.principal, Tenant: p.tenant}, nil
+	}
+
+	if p.workload && report != "" {
+		// A workload on a report route is a reporter or nobody: the record admits it to one kind of
+		// report and that kind's routes alone (ADR-ORG-001 §5.11). No scope in its token decides it.
+		reporter, reports, err := cfg.Records.ReporterFor(ctx, p.principal)
+		if err != nil {
+			return Caller{}, errors.Join(errRecords, err)
+		}
+		switch {
+		case reporter.IsNil():
+			return Caller{}, errors.New("the token names a workload, and no active reporter is registered with its principal_id")
+		case report == reportProvisioning && !reports.Provisioning():
+			return Caller{}, errors.New("the workload's reporter record admits it to report " + string(reports) +
+				", not provisioning")
+		case report == reportObligation && reports.Domain() == "":
+			return Caller{}, errors.New("the workload's reporter record admits it to report " + string(reports) +
+				", not an obligation")
+		}
+		return Caller{Subject: p.principal, Reporter: reporter, Reports: reports}, nil
 	}
 
 	if p.workload {

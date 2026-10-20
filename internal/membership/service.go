@@ -311,6 +311,57 @@ func (s *Service) transition(ctx context.Context, action Action, cmd Command) (R
 	return result, nil
 }
 
+// ProviderSuspend and ProviderRevoke withdraw one Membership inside the named Tenant, as a provider in
+// force (ADR-ORG-003 §5.6, decided 2026-10-20). They contain: a withdrawal a restore to an older point
+// lost, or a compromised member in a cross-tenant exposure. There is no provider restore and no
+// provider grant here: least privilege gives a provider the containment the task needs, and giving
+// access back stays the Tenant administrator's act.
+//
+// Each runs through db.WithProviderInTenant, so the privileged-access row names the Tenant and the
+// Tenant's administrators read it in GET /v1/provider-access, and through the same state machine,
+// version check, priority event and event record as the Tenant administrator's transition. The
+// reason is required for both, as on every provider act, and is recorded on the event row too.
+func (s *Service) ProviderSuspend(ctx context.Context, tenantID id.UUID, cmd Command) (Result, error) {
+	return s.providerTransition(ctx, tenantID, ActionSuspend, cmd)
+}
+
+// ProviderRevoke is ProviderSuspend's irreversible counterpart.
+func (s *Service) ProviderRevoke(ctx context.Context, tenantID id.UUID, cmd Command) (Result, error) {
+	return s.providerTransition(ctx, tenantID, ActionRevoke, cmd)
+}
+
+func (s *Service) providerTransition(ctx context.Context, tenantID id.UUID, action Action, cmd Command) (Result, error) {
+	switch {
+	case s.provider == nil:
+		return Result{}, errors.New("membership: a provider acts inside a Tenant only on a service built with the provider pool")
+	case action != ActionSuspend && action != ActionRevoke:
+		// Unreachable through the two methods above; refused so a third caller cannot widen it.
+		return Result{}, fmt.Errorf("%w: a provider suspends or revokes a Membership, and nothing else", ErrInvalid)
+	case tenantID.IsNil():
+		return Result{}, fmt.Errorf("%w: the Tenant is required", ErrInvalid)
+	case strings.TrimSpace(cmd.Reason) == "":
+		return Result{}, ErrReasonRequired
+	}
+	if err := cmd.validate(action); err != nil {
+		return Result{}, err
+	}
+
+	var result Result
+	if err := db.WithProviderInTenant(ctx, s.provider, s.pool, tenantID, strings.TrimSpace(cmd.Reason),
+		func(ctx context.Context, tx db.Tx) error {
+			var err error
+			// The Membership is read under the named Tenant's policy, so one in another Tenant is
+			// not found rather than acted on.
+			if result, err = s.TransitionWithin(ctx, tx, action, cmd); err != nil {
+				return err
+			}
+			return db.Respond(ctx, tx, result)
+		}); err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
 // TransitionWithin performs one Membership transition inside a transaction the caller owns.
 //
 // It exists for the offboarding freeze, which suspends every active Membership in a Tenant in

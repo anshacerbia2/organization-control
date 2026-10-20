@@ -94,6 +94,16 @@ type ConsumerSignal struct {
 	// ExtraFindings is how many `extra` findings its last reconciliation produced: access it serves
 	// that authority does not grant. Zero until a reconciliation has run, and after a clean one.
 	ExtraFindings int64
+
+	// ReconciliationAge is the seconds since its last reconciliation, or since registration when none
+	// has run, and ReconciliationInterval the interval it declared (ADR-ORG-001 §5.7, amended
+	// 2026-10-20): the alerts compare the two, a warning past one interval and critical past two.
+	ReconciliationAge      float64
+	ReconciliationInterval float64
+
+	// ReconciliationRequested is 1 while a restore's request that every consumer reconcile is
+	// unanswered by this one (ADR-ORG-003 §5.5), and 0 otherwise.
+	ReconciliationRequested float64
 }
 
 // SignalsReader reads Signals on the raw provider connections, as FrontierReader does: these tables
@@ -186,7 +196,10 @@ const consumerSignals = `SELECT consumer_id,
        extract(epoch FROM clock_timestamp() - coalesce(last_reported_at, registered_at))::double precision,
        extract(epoch FROM max_accepted_age)::double precision,
        last_verify_ratio,
-       coalesce(last_reconciled_extra_findings, 0)
+       coalesce(last_reconciled_extra_findings, 0),
+       extract(epoch FROM clock_timestamp() - coalesce(last_reconciled_at, registered_at))::double precision,
+       extract(epoch FROM reconciliation_interval)::double precision,
+       CASE WHEN reconciliation_requested_at IS NULL THEN 0 ELSE 1 END::double precision
   FROM projection.consumer
  WHERE retired_at IS NULL
  ORDER BY consumer_id`
@@ -259,7 +272,8 @@ func (r *SignalsReader) Read(ctx context.Context) (Signals, error) {
 		defer rows.Close()
 		for rows.Next() {
 			var c ConsumerSignal
-			if err := rows.Scan(&c.Consumer, &c.ReportAge, &c.MaxAcceptedAge, &c.VerifyRatio, &c.ExtraFindings); err != nil {
+			if err := rows.Scan(&c.Consumer, &c.ReportAge, &c.MaxAcceptedAge, &c.VerifyRatio, &c.ExtraFindings,
+				&c.ReconciliationAge, &c.ReconciliationInterval, &c.ReconciliationRequested); err != nil {
 				return fmt.Errorf("projection: reading a consumer's signals: %w", err)
 			}
 			s.Consumers = append(s.Consumers, c)

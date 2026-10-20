@@ -185,31 +185,48 @@ func (r *Reconciler) Reconcile(ctx context.Context, report Report) (Result, erro
 	authority := map[id.UUID]RepairedState{}
 	withdrawn := map[id.UUID]RepairedState{}
 
-	if err := db.WithProviderSnapshot(ctx, r.pool,
-		"reconcile projection for "+report.ConsumerID,
-		func(ctx context.Context, tx db.Tx) error {
-			var consumer Consumer
-			if err := load(ctx, tx, report.ConsumerID, &consumer); err != nil {
-				return err
-			}
-			if err := readStates(ctx, tx, authoritativeStatement, authority); err != nil {
-				return fmt.Errorf("projection: read authoritative set: %w", err)
-			}
+	scope, ok := db.ScopeFrom(ctx)
+	if !ok {
+		return Result{}, db.ErrNoScope
+	}
+	// A consumer reconciling itself runs on the same provider connections, recorded under its own
+	// authority (db.WithConsumerReconciliation); a provider's run is a provider access.
+	compare := func(ctx context.Context, tx db.Tx) error {
+		var consumer Consumer
+		if err := load(ctx, tx, report.ConsumerID, &consumer); err != nil {
+			return err
+		}
+		// A consumer reconciles its own copy alone (ADR-ORG-001 §5.7). The transport admits it
+		// for its own consumer_id; this holds the same rule where the record is read.
+		if scope.IsConsumer() && consumer.PrincipalID != scope.Actor() {
+			return fmt.Errorf("%w: %s", ErrNotRegistered, report.ConsumerID)
+		}
+		if err := readStates(ctx, tx, authoritativeStatement, authority); err != nil {
+			return fmt.Errorf("projection: read authoritative set: %w", err)
+		}
 
-			var unheld []string
-			for membershipID := range projected {
-				if _, held := authority[membershipID]; !held {
-					unheld = append(unheld, membershipID.String())
-				}
+		var unheld []string
+		for membershipID := range projected {
+			if _, held := authority[membershipID]; !held {
+				unheld = append(unheld, membershipID.String())
 			}
-			if len(unheld) == 0 {
-				return nil
-			}
-			if err := readStates(ctx, tx, withdrawnStatement, withdrawn, unheld); err != nil {
-				return fmt.Errorf("projection: read withdrawn Memberships: %w", err)
-			}
+		}
+		if len(unheld) == 0 {
 			return nil
-		}); err != nil {
+		}
+		if err := readStates(ctx, tx, withdrawnStatement, withdrawn, unheld); err != nil {
+			return fmt.Errorf("projection: read withdrawn Memberships: %w", err)
+		}
+		return nil
+	}
+	reason := "reconcile projection for " + report.ConsumerID
+	var err error
+	if scope.IsConsumer() {
+		err = db.WithConsumerReconciliationSnapshot(ctx, r.pool, reason, compare)
+	} else {
+		err = db.WithProviderSnapshot(ctx, r.pool, reason, compare)
+	}
+	if err != nil {
 		return Result{}, err
 	}
 
@@ -319,9 +336,12 @@ const ReconciledEventType = "com.scnehaux.organization.projection.repair.reconci
 // recordReconciliation stamps the consumer with the run, whatever it found, so its reconciliation
 // age is a fact rather than an inference from the event stream. A retired consumer matches nothing:
 // its record stays as it was when it was retired.
+//
+// It clears reconciliation_requested_at: the reconciliation a restore asked for has run
+// (ADR-ORG-003 §5.5).
 const recordReconciliation = `UPDATE projection.consumer
 SET last_reconciled_at = $2, last_reconciled_mark = $3, last_reconciled_findings = $4,
-    last_reconciled_extra_findings = $5
+    last_reconciled_extra_findings = $5, reconciliation_requested_at = NULL
 WHERE consumer_id = $1 AND retired_at IS NULL`
 
 // PublishReconciled records the sweep against its consumer and, when it found something, appends
@@ -341,11 +361,14 @@ WHERE consumer_id = $1 AND retired_at IS NULL`
 // large sweep delay exactly the events the lane is reserved for.
 func (r *Reconciler) PublishReconciled(ctx context.Context, result Result) error {
 	if len(result.Findings) == 0 {
-		return db.WithProviderScope(ctx, r.pool,
-			"record reconciliation for "+result.ConsumerID,
-			func(ctx context.Context, tx db.Tx) error {
-				return recordRun(ctx, tx, result)
-			})
+		record := func(ctx context.Context, tx db.Tx) error {
+			return recordRun(ctx, tx, result)
+		}
+		reason := "record reconciliation for " + result.ConsumerID
+		if consumerScope(ctx) {
+			return db.WithConsumerReconciliation(ctx, r.pool, reason, record)
+		}
+		return db.WithProviderScope(ctx, r.pool, reason, record)
 	}
 
 	eventType, err := event.ParseType(ReconciledEventType)
@@ -372,17 +395,26 @@ func (r *Reconciler) PublishReconciled(ctx context.Context, result Result) error
 		return fmt.Errorf("projection: build reconciled envelope: %w", err)
 	}
 
-	return db.WithProviderScope(ctx, r.pool,
-		"publish reconciliation for "+result.ConsumerID,
-		func(ctx context.Context, tx db.Tx) error {
-			if err := recordRun(ctx, tx, result); err != nil {
-				return err
-			}
-			if err := outbox.Append(ctx, tx, aggregate, envelope); err != nil {
-				return fmt.Errorf("projection: append reconciled event: %w", err)
-			}
-			return nil
-		})
+	publish := func(ctx context.Context, tx db.Tx) error {
+		if err := recordRun(ctx, tx, result); err != nil {
+			return err
+		}
+		if err := outbox.Append(ctx, tx, aggregate, envelope); err != nil {
+			return fmt.Errorf("projection: append reconciled event: %w", err)
+		}
+		return nil
+	}
+	reason := "publish reconciliation for " + result.ConsumerID
+	if consumerScope(ctx) {
+		return db.WithConsumerReconciliation(ctx, r.pool, reason, publish)
+	}
+	return db.WithProviderScope(ctx, r.pool, reason, publish)
+}
+
+// consumerScope is whether a registered consumer is reconciling itself (ADR-ORG-001 §5.7).
+func consumerScope(ctx context.Context) bool {
+	scope, ok := db.ScopeFrom(ctx)
+	return ok && scope.IsConsumer()
 }
 
 func recordRun(ctx context.Context, tx db.Tx, result Result) error {

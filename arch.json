@@ -26,7 +26,18 @@
       "maintenance stage logs (ADR-ORG-002 §5.2): the same statement the provider route reads, so",
       "the schedule and the route cannot disagree about which grant is overdue."
     ],
-    "cmd/organization-migrate": ["internal/authority", "internal/controldb", "internal/posture", "internal/projection"],
+    "_comment_migrate_restore": [
+      "It reaches internal/restore for the restore-bump stage that deploy/dev/restore.sh runs before the",
+      "service serves (ADR-ORG-003 §5.5)."
+    ],
+    "cmd/organization-migrate": ["internal/authority", "internal/controldb", "internal/posture", "internal/projection", "internal/restore"],
+
+    "_comment_restore": [
+      "internal/restore moves every Tenant and provider grant version past what consumers hold, and",
+      "publishes the withdrawn ones through the same event builders the transitions use, so a restored",
+      "withdrawal reaches a consumer as the event it already applies."
+    ],
+    "internal/restore": ["internal/authority", "internal/tenant"],
 
     "_comment_controldb": [
       "internal/controldb reaches internal/posture from its tests only: the stage SQL and the posture",

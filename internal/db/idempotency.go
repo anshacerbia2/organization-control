@@ -138,6 +138,13 @@ type pending struct {
 	// completed records that Respond stored the response inside the transaction that made the
 	// claim, so the HTTP surface owes the store nothing afterwards.
 	completed atomic.Bool
+
+	// withheld names the members of the response that are answered live and never recorded: a
+	// secret the command answers once (STD-GLB-001 1.7.0). Set before the scoped transaction runs,
+	// by WithholdFromRecord, and read by Respond and by StoredResponse. Both stores of a response
+	// read it from here, so the in-transaction record and the HTTP surface's late completion cannot
+	// disagree about what is withheld.
+	withheld atomic.Pointer[[]string]
 }
 
 type claimKey struct{}
@@ -281,6 +288,37 @@ func WithResponder(ctx context.Context, responder Responder) context.Context {
 	return context.WithValue(ctx, responderKey{}, responder)
 }
 
+// WithholdFromRecord names members of this request's response, as RFC 6901 JSON Pointers such as
+// "/token", that are answered to the caller live and never recorded for replay.
+//
+// STD-GLB-001 1.7.0: "A secret the command answers once is never in the idempotency record." A
+// retry with the same key then answers the same result without the secret, and a lost secret is
+// revoked and issued again (ADR-ORG-007 §5.5, amended 2026-10-20). It does nothing for a request
+// carrying no claim, which has no record to keep anything out of.
+func WithholdFromRecord(ctx context.Context, pointers ...string) {
+	held, ok := ctx.Value(claimKey{}).(*pending)
+	if !ok || len(pointers) == 0 {
+		return
+	}
+	names := append([]string(nil), pointers...)
+	held.withheld.Store(&names)
+}
+
+// StoredResponse is the body the claim in ctx records for replay: body without the members
+// WithholdFromRecord named, or body itself when none were named. It fails when a named member is
+// absent, so a secret renamed in the response is never recorded under its new name.
+func StoredResponse(ctx context.Context, body json.RawMessage) (json.RawMessage, error) {
+	held, ok := ctx.Value(claimKey{}).(*pending)
+	if !ok {
+		return body, nil
+	}
+	names := held.withheld.Load()
+	if names == nil || len(*names) == 0 {
+		return body, nil
+	}
+	return idempotency.Withhold(body, (*names)...)
+}
+
 // Respond records the response to the request's idempotency claim inside tx, the transaction that
 // made the claim, from the result the command is about to return.
 //
@@ -304,8 +342,18 @@ func Respond(ctx context.Context, tx Tx, result any) error {
 	if !ok || status < 200 || status > 299 {
 		return nil
 	}
-	if err := idempotency.Complete(ctx, tx, held.claim.Scope, held.claim.Key, held.claim.Digest,
-		status, body); err != nil {
+	// A response carrying a secret is recorded without it, and the caller is sent the secret live
+	// (WithholdFromRecord). A withheld member the response lacks fails the transaction: the
+	// effect is not committed with a record that might hold the secret under another name.
+	var err error
+	if names := held.withheld.Load(); names != nil && len(*names) > 0 {
+		err = idempotency.CompleteWithheld(ctx, tx, held.claim.Scope, held.claim.Key, held.claim.Digest,
+			status, body, (*names)...)
+	} else {
+		err = idempotency.Complete(ctx, tx, held.claim.Scope, held.claim.Key, held.claim.Digest,
+			status, body)
+	}
+	if err != nil {
 		return fmt.Errorf("db: record the response with the effect: %w", err)
 	}
 	held.completed.Store(true)
@@ -353,3 +401,10 @@ func (s *ClaimStore) Complete(ctx context.Context, claim Claim, status int, body
 // Exposed here so the HTTP surface does not import the foundation package directly for one call, and
 // so what goes into a digest is decided in one place.
 func Digest(parts ...[]byte) string { return idempotency.Digest(parts...) }
+
+// Withhold returns body without the members the JSON Pointers name: the response a replay may
+// answer. Exposed for the HTTP surface's own check of what it withholds; StoredResponse is what a
+// completion uses.
+func Withhold(body json.RawMessage, pointers ...string) (json.RawMessage, error) {
+	return idempotency.Withhold(body, pointers...)
+}

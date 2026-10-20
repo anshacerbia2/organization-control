@@ -324,8 +324,9 @@ CREATE POLICY membership_batch_item_purge ON membership.membership_batch_item
 --   current_setting(..., false), as in every tenant policy: an unbound connection raises rather than
 --   reading no Tenant's rows.
 --
---   Consumer rows are left out. A consumer is a workload acting on its own records, not provider
---   personnel, and its rows name no Tenant in any case.
+--   Consumer and reporter rows are left out. Each is a workload doing what its record admits it to
+--   do, not provider personnel, reviewed through its owner (ADR-ORG-001 §5.11), and a consumer's rows
+--   name no Tenant in any case.
 --
 -- Owned by the role this stage runs as, the one that applied the migrations and so owns the table: the
 -- view reads the table with its owner's privileges, and a different owner would hold none on it.
@@ -338,7 +339,7 @@ SELECT access_id, actor_id, authority, activation_id, tenant_id, operation, corr
        reason, occurred_at
   FROM audit.privileged_access
  WHERE tenant_id = current_setting('app.tenant_id', false)::uuid
-   AND authority <> 'consumer';
+   AND authority NOT IN ('consumer', 'reporter');
 COMMENT ON VIEW audit.tenant_provider_access IS
     'The provider access that named the bound Tenant, for its Tenant administrator. ADR-ORG-002 §5.6.';
 

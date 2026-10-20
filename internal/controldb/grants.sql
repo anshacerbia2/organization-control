@@ -28,6 +28,7 @@ BEGIN
               ('organization.provider_grant'),
               ('organization.provider_activation'),
               ('organization.provider_grant_event'),
+              ('organization.reporter'),
               ('organization.emergency_grant_use'),
               ('organization.tenant_administration_pause'),
               ('tenant.tenant'),
@@ -288,6 +289,13 @@ GRANT UPDATE (revoked_at, revoked_by, revoke_reason) ON organization.provider_gr
 -- §Provider Authority Projection). The history is written once and never rewritten.
 GRANT UPDATE (grant_version) ON organization.provider_grant TO organization_provider_rt;
 GRANT INSERT ON organization.provider_grant_event TO organization_provider_rt;
+
+-- organization.reporter -- provider only (ADR-ORG-001 §5.11, TDD-organization-control-001 §Reporters):
+-- SELECT for the read authentication makes on every report and for the registry's reads, INSERT for a
+-- registration, and UPDATE on the retirement columns and the version alone, which the retirement's
+-- FOR UPDATE lock needs too. No DELETE: a retired reporter stays as the record its owner's review reads.
+GRANT SELECT, INSERT ON organization.reporter TO organization_provider_rt;
+GRANT UPDATE (retired_at, retired_by, retire_reason, version) ON organization.reporter TO organization_provider_rt;
 
 -- organization.provider_activation -- provider only: SELECT for the authority read every request
 -- makes, INSERT for a request, and UPDATE on the decision and end columns alone (ADR-ORG-002). Who

@@ -9,11 +9,11 @@ and the commands this service serves.
 | Runbook | Answers |
 | :-- | :-- |
 | [Revocation not enforced within budget](revocation-not-enforced.md) | `AcceptToEnforcementOverBudget`, `AcceptToEnforcementCritical`, `PriorityOutboxLag*`, `SecurityDebt`, `ConsumerProjectionStale`, `EnforcementTelemetryAbsent`, an enforcement read of `over_budget` |
-| [Projection drift repair](projection-drift-repair.md) | `ReconciliationExtraFinding`, a reconciliation finding, a consumer serving the wrong context, a consumer ahead of authority |
+| [Projection drift repair](projection-drift-repair.md) | `ReconciliationExtraFinding`, `ReconciliationOverdueWarning`, `ReconciliationOverdueCritical`, a reconciliation finding, a consumer serving the wrong context, a consumer ahead of authority |
 | [Provider-access review](provider-access-review.md) | the scheduled review of provider authority, and each use of an emergency grant |
 | [Stuck offboarding](stuck-offboarding.md) | `OffboardingObligationOverdue`, `OffboardingReleaseAmbiguous*`, `OffboardingProlonged*`, `LifecycleTelemetryAbsent`, an offboarding that does not reach `retired` or `cancelled` |
 | [Dead-letter resolution](dead-letter-resolution.md) | `SecurityDebt`, `UnresolvedDeadLetterStale`, `organization-migrate -stage=maintenance` exiting 3 |
-| [Organization Database restore](organization-database-restore.md) | a lost or damaged Organization Database, and a restore to an older point |
+| [Organization Database restore](organization-database-restore.md) | `ReconciliationRequestedAfterRestore`, a lost or damaged Organization Database, and a restore to an older point |
 | [Unset-binding investigation](unset-binding.md) | `IsolationUnsetBindingWarning`, `IsolationUnsetBindingCritical` |
 | [`WITH CHECK` rejection triage](with-check-rejection.md) | `IsolationWithCheckRejection` |
 | [Suspected cross-tenant exposure](cross-tenant-exposure.md) | a posture failure behind readiness, an unexplained `WITH CHECK` rejection, a cross-Tenant `extra`, an escalated access review, a Tenant's report |

@@ -192,7 +192,7 @@ func TestATokenVerifiesAgainstKeysFetchedOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the verified claims map to no caller: %v", err)
 	}
-	caller, err := authorize(t.Context(), presented, testAuthConfig())
+	caller, err := authorize(t.Context(), presented, "", testAuthConfig())
 	if err != nil || !caller.Provider {
 		t.Errorf("the granted Principal did not resolve to a provider: %+v, %v", caller, err)
 	}

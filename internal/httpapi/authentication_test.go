@@ -45,12 +45,19 @@ type fakeRecords struct {
 	eligible  map[id.UUID]bool
 	emergency map[id.UUID]bool
 	consumers map[id.UUID]string
+	// reporters is each registered reporter workload's record.
+	reporters map[id.UUID]heldReporter
 	// standings is each Principal's standing in each Tenant; one absent stands nowhere.
 	standings map[[2]id.UUID]authority.TenantStanding
 	err       error
 	reads     int
 	paused    bool
 	pauseErr  error
+}
+
+type heldReporter struct {
+	id      id.UUID
+	reports authority.Reports
 }
 
 func (f *fakeRecords) ProviderStanding(_ context.Context, principal id.UUID) (authority.Standing, error) {
@@ -69,6 +76,15 @@ func (f *fakeRecords) ProviderStanding(_ context.Context, principal id.UUID) (au
 func (f *fakeRecords) ConsumerFor(_ context.Context, principal id.UUID) (string, error) {
 	f.reads++
 	return f.consumers[principal], f.err
+}
+
+func (f *fakeRecords) ReporterFor(_ context.Context, principal id.UUID) (id.UUID, authority.Reports, error) {
+	f.reads++
+	held, ok := f.reporters[principal]
+	if !ok {
+		return id.UUID{}, "", f.err
+	}
+	return held.id, held.reports, f.err
 }
 
 func (f *fakeRecords) TenantAdministrationPaused(context.Context) (bool, error) {

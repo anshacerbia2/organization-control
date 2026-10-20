@@ -67,3 +67,17 @@ func (g *Grants) Bootstrap(ctx context.Context) error {
 		return err
 	})
 }
+
+func (r *Reader) ReporterFor(ctx context.Context) error {
+	return r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT reporter_id, reports FROM organization.reporter WHERE principal_id = $1`)
+		return err
+	})
+}
+
+// PublishWithdrawnGrants mirrors the restore bump's grant publication: out of scope, on the restore's
+// own connection.
+func PublishWithdrawnGrants(ctx context.Context, tx db.Tx) error {
+	_, err := tx.Exec(ctx, `SELECT grant_id FROM organization.provider_grant WHERE revoked_at IS NOT NULL`)
+	return err
+}

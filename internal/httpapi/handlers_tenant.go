@@ -340,7 +340,9 @@ func (h *handlers) issueInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The token leaves here and nowhere else. `issuedView` is the only view that carries one, and
-	// `TestTokenAppearsOnlyOnIssue` asserts no other response can.
+	// `TestTokenAppearsOnlyOnIssue` asserts no other response can. It is answered live and withheld
+	// from the idempotency record, so a retry with the same key answers the invitation without it
+	// (ADR-ORG-007 §5.5, STD-GLB-001 1.7.0).
 	answer(w, r, http.StatusCreated, func(ctx stdcontext.Context) (invitation.Issued, error) {
 		return h.services.Invitations.Issue(ctx, invitation.IssueRequest{
 			TargetIdentifier: body.TargetIdentifier,
@@ -351,8 +353,12 @@ func (h *handlers) issueInvitation(w http.ResponseWriter, r *http.Request) {
 		})
 	}, func(issued invitation.Issued) issuedView {
 		return issuedView{Invitation: viewInvitation(issued.Invitation), Token: string(issued.Token)}
-	})
+	}, issuedTokenPointer)
 }
+
+// issuedTokenPointer is the member of the issue command's answer that is never recorded: the token,
+// answered once (ADR-ORG-007 §5.5).
+const issuedTokenPointer = "/token"
 
 func (h *handlers) getInvitation(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireTenant(w, r); !ok {

@@ -12,6 +12,9 @@
 #   consumer report age      critical past its budget      TDD-002 §Operational Notes
 #   verify ratio             warning 0.05, critical 0.5    TDD-002 §Configuration, ORGANIZATION_VERIFY_RATE_ALERT
 #   extra finding            critical at any occurrence    TDD-002 §Operational Notes
+#   reconciliation age       warning past 1 interval,      ADR-ORG-001 §5.7, TDD-002 §Reconciliation Interval
+#                            critical past 2
+#   reconciliation requested warning at any occurrence     ADR-ORG-003 §5.5, TDD-002 §After a Restore
 #   accept to enforcement    warning 10s, critical 20s     TDD-002 §Operational Notes, §Enforcement Budget
 #   obligation past due      warning at any occurrence     TDD-004 §Operational Notes
 #   ambiguous release        warning any, critical 24h     TDD-004 §Operational Notes
@@ -120,6 +123,36 @@ groups:
         annotations:
           summary: The consumer's last reconciliation found access it serves that authority does not grant.
           description: A security incident at any count. It holds until a reconciliation of this consumer finds none (docs/runbooks/projection-drift-repair.md).
+
+      # A consumer reconciles itself on the interval it declared (ADR-ORG-001 §5.7, amended
+      # 2026-10-20): a warning past one interval and critical past two. Prometheus: "This should
+      # generally be at least enough time for 2 full runs of the batch job." The interval is a series
+      # of its own, so no threshold is copied out of the registry into this file.
+      - alert: ReconciliationOverdueWarning
+        expr: organization_projection_consumer_reconciliation_age_seconds > organization_projection_consumer_reconciliation_interval_seconds
+        labels:
+          severity: warning
+        annotations:
+          summary: The consumer has not reconciled for longer than the interval it declared.
+          description: Its scheduler may have stopped, or its calls to POST /v1/projections/reconcile fail. An operator can run one as a provider (docs/runbooks/projection-drift-repair.md).
+
+      - alert: ReconciliationOverdueCritical
+        expr: organization_projection_consumer_reconciliation_age_seconds > 2 * organization_projection_consumer_reconciliation_interval_seconds
+        labels:
+          severity: critical
+        annotations:
+          summary: The consumer has not reconciled for longer than two of its declared intervals.
+          description: A lost event in its copy goes uncorrected. Run its reconciliation as a provider and find why its own stopped (docs/runbooks/projection-drift-repair.md).
+
+      # A restore to an older point asked every consumer to reconcile before normal operation
+      # (ADR-ORG-003 §5.5). It holds until this consumer's next recorded reconciliation.
+      - alert: ReconciliationRequestedAfterRestore
+        expr: organization_projection_consumer_reconciliation_requested > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A restore asked this consumer to reconcile, and it has not yet.
+          description: Until it does, its copy may hold versions the restore moved past (docs/runbooks/organization-database-restore.md).
 
       - alert: AcceptToEnforcementOverBudget
         expr: organization_enforcement_oldest_unapplied_age_seconds > 10

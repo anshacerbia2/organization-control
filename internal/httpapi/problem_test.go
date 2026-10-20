@@ -162,6 +162,11 @@ var registry = map[string]error{
 	"authority.ErrReviewInvalid":        authority.ErrReviewInvalid,
 	"authority.ErrSelfReview":           authority.ErrSelfReview,
 	"authority.ErrPauseInvalid":         authority.ErrPauseInvalid,
+	"authority.ErrReporterInvalid":      authority.ErrReporterInvalid,
+	"authority.ErrReporterRegistered":   authority.ErrReporterRegistered,
+	"authority.ErrReporterNotFound":     authority.ErrReporterNotFound,
+	"authority.ErrReporterRetired":      authority.ErrReporterRetired,
+	"authority.ErrReporterVersion":      authority.ErrReporterVersion,
 	"context.ErrNotRegistered":          context.ErrNotRegistered,
 	"context.ErrRequestRequired":        context.ErrRequestRequired,
 }

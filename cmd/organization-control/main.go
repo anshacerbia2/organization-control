@@ -374,6 +374,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("privileged-access review: %w", err)
 	}
+	// The reporter registry: the workload Principals admitted to the report routes (ADR-ORG-001 §5.11).
+	reporters, err := authority.NewReporters(providerPool)
+	if err != nil {
+		return fmt.Errorf("reporter registry: %w", err)
+	}
 
 	// A registered consumer's own routes, on its own connections and its own role. Built only when
 	// the consumer credential is configured, which is what enables consumer authority: without the
@@ -432,6 +437,7 @@ func run() error {
 			ProviderActivations:  providerActivations,
 			TenantAdministrators: tenantAdministrators,
 			AccessReview:         accessReview,
+			Reporters:            reporters,
 			Frontier:             frontier,
 			Consumer:             consumerServices,
 		},

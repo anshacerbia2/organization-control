@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -11,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/anshacerbia2/organization-control/internal/db"
 )
 
 // postRoutes reads routes.go for every POST the API mux registers, and whether it is a command.
@@ -84,14 +87,17 @@ func TestACommandWithoutAKeyIsRefusedBeforeTheDatabase(t *testing.T) {
 	commands, _ := postRoutes(t)
 	tenant, provider := tenantCaller(t), providerCaller(t)
 	self := Caller{Subject: mustID(t), Self: true}
+	// An obligation-owning domain's reporter is admitted to resolve alone (ADR-ORG-001 §5.11).
+	reporter := Caller{Subject: mustID(t), Reporter: mustID(t), Reports: "obligation:billing"}
 	tenantHandler, providerHandler, selfHandler := mounted(t, &tenant), mounted(t, &provider), mounted(t, &self)
+	reporterHandler := mounted(t, &reporter)
 
 	for _, route := range commands {
 		t.Run(route, func(t *testing.T) {
 			path := fill(t, route)
 			refusedForTheKey := 0
 			// A self caller is admitted to acceptance alone (ADR-ORG-007 §5.1), and refused elsewhere.
-			for _, handler := range []http.Handler{tenantHandler, providerHandler, selfHandler} {
+			for _, handler := range []http.Handler{tenantHandler, providerHandler, selfHandler, reporterHandler} {
 				recorder := post(t, handler, path, `{}`, map[string]string{
 					ReasonHeader: "an audit", IdempotencyHeader: "",
 				})
@@ -230,4 +236,23 @@ func handlerBodies(t *testing.T) map[string]string {
 		}
 	}
 	return bodies
+}
+
+// TestTheIssueCommandWithholdsItsToken: the invitation token is answered live and never recorded for
+// replay (STD-GLB-001 1.7.0, ADR-ORG-007 §5.5). internal/invitation's TestTheIssueRecordHoldsNoToken
+// proves the record and the replay against the engine with the pointer named here; this holds the
+// handler to naming it, and the pointer to the view's member.
+func TestTheIssueCommandWithholdsItsToken(t *testing.T) {
+	body := handlerBodies(t)["issueInvitation"]
+	if !strings.Contains(body, "issuedTokenPointer)") {
+		t.Fatal("issueInvitation does not pass issuedTokenPointer to answer, so the token would be recorded")
+	}
+	rendered, err := json.Marshal(issuedView{Token: "t"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	stored, err := db.Withhold(rendered, issuedTokenPointer)
+	if err != nil || strings.Contains(string(stored), `"token"`) {
+		t.Fatalf("withholding %s from %s gave %s, %v", issuedTokenPointer, rendered, stored, err)
+	}
 }
