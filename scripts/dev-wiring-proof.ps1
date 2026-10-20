@@ -29,14 +29,24 @@
 #      deprovisioning report (TDD-organization-control-004 1.13.0), carry step 8's Tenant through an
 #      offboarding to retirement: a report refused before release, an obligation refused to the wrong
 #      domain, one completed and one waived, a failed deprovisioning, a refusal of it, a resend, a
-#      realized report, and the retirement.
+#      realized report, and the retirement;
+#  10. the invited person accepts, signed in as themselves (ADR-ORG-007, TDD-organization-control-004
+#      1.14.0), against identity-control's real identifiers:match: the operator proves its creation
+#      address with the code the development mail catcher holds; an invitation to step 4's member is
+#      refused to the operator, another member of the Tenant who holds its token, and stays pending;
+#      an invitation to the operator's own address, into a Workspace, is accepted by the operator
+#      signed in with no Tenant, creates the Membership for the operator alone, and is refused a
+#      second time. Skipped, and said so, only when the identity-control checkout serves no
+#      identifiers:match at all.
 #
 # Environment and SECRETS: as dev-wire.ps1, plus the kernel's console administrator for steps 4 and 5,
 # which read the kernel's Organizations and delete a user the way identity-control's Proof B does:
 #   $env:KC_BOOTSTRAP_ADMIN_PASSWORD   the console administrator's password (the kernel's .env)
 #   $env:KC_BOOTSTRAP_ADMIN_USERNAME   optional, "admin"
 #   $env:KC_ADMIN_URL                  where /admin is reachable, http://localhost:8080 in CI
-# Nothing read from a key file or the environment is printed. Step 5 deletes a Keycloak user, so the
+# Step 10 reads the proof code from identity-control's mail catcher (Mailpit):
+#   $env:MAILPIT_URL                   optional, http://127.0.0.1:8025
+# Nothing read from a key file or the environment is printed, and no address or code is. Step 5 deletes a Keycloak user, so the
 # script is for a kernel a development server or a CI job owns.
 #
 #   pwsh ./scripts/dev-wiring-proof.ps1 -IdentityRepo /srv/identity-control `
@@ -583,6 +593,89 @@ try {
 } catch {
     Write-Host "  FAIL  $($_.Exception.Message)"
     $failures++
+}
+
+Write-Host ""
+Write-Host "10. the invited person accepts, signed in as themselves (ADR-ORG-007)"
+$matchServed = [bool](Select-String -Path (Join-Path $IdentityRepo "internal/httpapi/*.go") -Pattern "identifiers:match" -SimpleMatch -Quiet)
+if (-not $matchServed) {
+    # The checkout predates ADR-ORG-007: acceptance would answer 503 by design. Said, not hidden; once
+    # identity-control serves the route on main, this branch is never taken.
+    Write-Host "  SKIP  the identity-control checkout serves no identifiers:match (run with identity_ref carrying it)"
+} else {
+    try {
+        if ($null -eq $tenantId) { throw "step 4 left no Tenant to invite into" }
+        $mailpit = if ($env:MAILPIT_URL) { $env:MAILPIT_URL } else { "http://127.0.0.1:8025" }
+        # Read-Code is the newest 8-digit code the catcher holds for an address, received after $after.
+        function Read-Code([string] $address, [datetime] $after) {
+            $deadline = (Get-Date).AddSeconds(90)
+            do {
+                $listed = Invoke-RestMethod -Uri "$mailpit/api/v1/messages?limit=100" -TimeoutSec 5
+                foreach ($m in @($listed.messages)) {
+                    $to = @($m.To | ForEach-Object { $_.Address })
+                    if ($to -contains $address -and ([datetime]$m.Created).ToUniversalTime() -ge $after) {
+                        $message = Invoke-RestMethod -Uri "$mailpit/api/v1/message/$($m.ID)" -TimeoutSec 5
+                        if ($message.Text -match 'Your code is (\d{8})') { return $Matches[1] }
+                    }
+                }
+                Start-Sleep -Seconds 3
+            } while ((Get-Date) -lt $deadline)
+            return ""
+        }
+
+        # The operator proves its creation address, through identity-control's own commands
+        # (TDD-identity-control-008 1.7.0): the address counts only once proven (ADR-ORG-007 §5.3).
+        $own = Require "the operator's addresses read in identity-control" (Call "GET" "$identityApi/v1/me/notification-addresses" $null (Provider-Token) $null) 200
+        $creation = @($own.notification_addresses | Where-Object { $_.state -eq "active" }) | Select-Object -First 1
+        if ($null -eq $creation) { throw "the operator holds no active address" }
+        $operatorAddress = $creation.address
+        if ($null -eq (Get-Prop $creation "verified_at")) {
+            $sentAt = (Get-Date).ToUniversalTime().AddSeconds(-5)
+            $null = Require "a proof code sent to the creation address" (Call "POST" `
+                "$identityApi/v1/me/notification-addresses/$($creation.address_id):send-proof" $null (Provider-Token) "proof-accept-send") 200
+            $code = Read-Code $operatorAddress $sentAt
+            if ($code.Length -ne 8) { throw "the mail catcher holds no code for the creation address" }
+            $null = Require "the code proves it" (Call "POST" "$identityApi/v1/me/notification-addresses/$($creation.address_id):verify" `
+                (@{ code = $code }) (Provider-Token) "proof-accept-verify") 204
+        } else {
+            Write-Host "  ok    the creation address is proven already"
+        }
+
+        # Another member of the Tenant, holding an invitation's token, cannot accept it.
+        $other = Require "the administrator invites step 4's member's address" (Call "POST" "$organizationApi/v1/invitations" @{
+                target_identifier = "wiring.member.$run@scnehaux.local"; subject_type = "human"
+                reason = "deploy-dev: the wiring proof" } (Tenant-Token) "proof-invite-member") 201
+        $refused = Call "POST" "$organizationApi/v1/invitations/accept" @{ token = $other.token } (Provider-Token) "proof-accept-member"
+        Expect "the operator, another member holding its token, is refused" $refused.code 404
+        Expect "with the one refusal" (Get-Prop $refused.json "detail") "invitation: the invitation cannot be accepted"
+        $refused = Call "POST" "$organizationApi/v1/invitations/accept" @{ token = $other.token } (Tenant-Token) "proof-accept-member-tenant"
+        Expect "and so is the same person signed in for the Tenant" $refused.code 404
+        $still = Require "that invitation read" (Call "GET" "$organizationApi/v1/invitations/$($other.invitation.invitation_id)" $null (Tenant-Token) $null) 200
+        Expect "it is still pending, for nobody" "$($still.state) $(Get-Prop $still 'principal_id')" "pending "
+
+        # The invited person, signed in as themselves with no Tenant, accepts into a Workspace.
+        $workspace = Require "the administrator creates a Workspace" (Call "POST" "$organizationApi/v1/workspaces" @{
+                display_name = "Invitation proof $run"; type = "project" } (Tenant-Token) "proof-accept-workspace") 201
+        $mine = Require "the administrator invites the operator's own address into it" (Call "POST" "$organizationApi/v1/invitations" @{
+                target_identifier = $operatorAddress.ToUpperInvariant(); subject_type = "human"
+                workspace_id = $workspace.workspace_id; reason = "deploy-dev: the wiring proof" } (Tenant-Token) "proof-invite-operator") 201
+        $lookup = Invoke-RestMethod -Method Post -Uri "$organizationApi/v1/invitations/lookup" -ContentType "application/json" `
+            -Body (@{ token = $mine.token } | ConvertTo-Json -Compress)
+        Expect "the anonymous lookup says what comes next" $lookup.next "accept"
+        $accepted = Call "POST" "$organizationApi/v1/invitations/accept" @{ token = $mine.token } (Provider-Token) "proof-accept-operator"
+        Expect "the invited person accepts, with no Tenant in the token" $accepted.code 200
+        $granted = Get-Prop (Get-Prop $accepted.json "membership") "membership"
+        Expect "the Membership is the caller's own" (Get-Prop $granted "principal_id") $s.operator_principal_id
+        Expect "in the invitation's Tenant and Workspace" "$(Get-Prop $granted 'tenant_id') $(Get-Prop $granted 'workspace_id')" `
+            "$tenantId $($workspace.workspace_id)"
+        $closed = Require "the invitation read" (Call "GET" "$organizationApi/v1/invitations/$($mine.invitation.invitation_id)" $null (Tenant-Token) $null) 200
+        Expect "it is accepted, by the caller" "$($closed.state) $(Get-Prop $closed 'principal_id')" "accepted $($s.operator_principal_id)"
+        $again = Call "POST" "$organizationApi/v1/invitations/accept" @{ token = $mine.token } (Provider-Token) "proof-accept-again"
+        Expect "a second acceptance is the one refusal" $again.code 404
+    } catch {
+        Write-Host "  FAIL  $($_.Exception.Message)"
+        $failures++
+    }
 }
 
 if ($failures -gt 0) {

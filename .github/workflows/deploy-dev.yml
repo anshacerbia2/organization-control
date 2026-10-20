@@ -16,7 +16,9 @@ name: deploy-dev
 # scripts/dev-obligation.ps1 and scripts/dev-deprovisioning.ps1, its stand-ins for the domains that own
 # offboarding obligations and for the deprovisioning report, carry an offboarding to retirement
 # (TDD-identity-control-006, ADR-ORG-002, ADR-ORG-003, TDD-organization-control-003 1.16.0,
-# TDD-organization-control-004 1.13.0).
+# TDD-organization-control-004 1.13.0), and the invited person accepts an invitation signed in as
+# themselves, asked of identity-control's identifiers:match (ADR-ORG-007, TDD-organization-control-004
+# 1.14.0, step 10).
 #
 # The kernel and identity-control steps call their own repositories' scripts; the glue around them is
 # identity-control's deploy-dev's, kept the same. The daily run catches a change on either main that
@@ -107,6 +109,10 @@ jobs:
             echo "KC_BOOTSTRAP_ADMIN_PASSWORD=$kernel_password"
             echo "KERNEL_DEPLOY_DIR=$GITHUB_WORKSPACE/.kernel/deploy/dev"
             echo "KEYS_OWNER=$(id -u):$(id -g)"
+            # The development mail catcher, where a checkout runs one (TDD-identity-control-008 1.7.0):
+            # the wiring proof's step 10 reads the code that proves the operator's address from it
+            # (ADR-ORG-007 §5.3). An older checkout refuses the setting, so it is set only with Mailpit.
+            if grep -q mailpit compose.yaml; then echo "IDENTITY_NOTIFICATION_DELIVERY=smtp-catcher"; fi
           } > .env
           bash ./create-kernel-clients.sh >> .env
           bash ./create-registration-client.sh >> .env
