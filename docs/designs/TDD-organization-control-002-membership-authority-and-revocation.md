@@ -927,6 +927,15 @@ POST /v1/tenants/{tenant_id}/memberships/{membership_id}/revoke     {"expected_v
   that Tenant's policy, so one in another Tenant is `404`.
 - **No Tenant approval first, and usable at any time.** It only narrows access and is used in
   incidents; the pause of Tenant administration does not hold it.
+- **Planned, not built: a provider read of the one Membership** (1.17.0, recorded 2026-10-20).
+  `GET /v1/tenants/{tenant_id}/memberships/{membership_id}`, with the same authority as the two
+  commands: a provider in force, `X-Administrative-Reason`, through `db.WithProviderInTenant`, the
+  access recorded naming the Tenant, and a Membership of another Tenant `404`. It would answer the
+  shape of the Tenant administrator's `GET /v1/memberships/{membership_id}`, so the operator reads the
+  status and `expected_version` instead of typing them. organization-experience #22 found the gap: its
+  provider suspend and revoke screen asks for the Membership's identifier and version by hand.
+  `ADR-ORG-003 §5.6` names the two commands and no read, so the read waits for the architecture to
+  name it before it is built (ROADMAP backlog item 61).
 
 ### Published Events
 
