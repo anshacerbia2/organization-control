@@ -1,0 +1,36 @@
+# What `docker compose build` sends to the builder: this repository's source and nothing else.
+#
+# Docker: "You can use a `.dockerignore` file to exclude files or directories from the build context.
+# This helps avoid sending unwanted files and directories to the builder" (Build context, docs.docker.com,
+# accessed 2026-10-20). The build stage runs `COPY . .`, so anything left in the context reaches a
+# layer of the build image, and a secret in a layer persists like one passed as a build argument:
+# "Build arguments and environment variables are inappropriate for passing secrets to your build,
+# because they persist in the final image" (Build secrets, docs.docker.com, accessed 2026-10-20).
+#
+# The Dockerfile reads go.mod, go.sum, the Go source, atlas.hcl, schema.hcl, migrations/,
+# scripts/login-roles.sql and deploy/dev/migrate.sh. None of them is below.
+
+# Sibling checkouts the workflows place in this workspace: deploy-dev checks out identity-kernel into
+# .kernel/ and identity-control into .identity/. The kernel's deploy/dev/keys/signing holds its realm
+# keystore, readable by its owner alone, and the builder could not even read it.
+.kernel/
+.identity/
+.systemproof/
+foundation-reference/
+
+# Private keys and credentials, wherever a stack keeps them: a deploy directory's keys/, its .env, a
+# server's Compose override, and a local token.
+**/keys/
+**/*.pem
+**/.env
+**/compose.override.yaml
+.token
+
+# Version control and local output: never read by the build.
+.git
+.github/
+.image-scan/
+.atlas
+coverage
+cov-src
+*.out
