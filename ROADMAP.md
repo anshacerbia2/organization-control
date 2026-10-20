@@ -501,7 +501,14 @@ Items 11 to 18 were recorded as P1 in the review record but were missing from th
 | 45 | ✅ A Tenant can be provisioned on the development server | Done (TDD-003 1.15.0, provisioning runbook 1.2.0, 2026-10-19). Reported from the development server: a Tenant requested from Organization Experience stayed `requested`, because no provisioning system runs there and nothing reports an outcome; only the wiring proof reported one, inline. Now `scripts/dev-provisioning.ps1` stands in for the provisioning system: `-Realized`, or `-Failed -Reason`, for a Tenant named by its identifier or correlation identifier, through the same two routes with the operator's provider token. It refuses, sending nothing, unless the Tenant is `provisioning` and its latest request has no outcome (`requested` or `unresolved`), never activates and never retries. `deploy/dev/README.md` §Provisioning a Tenant on the development server is the procedure (start provisioning in the console, run the script, activate in the console), and TDD-003 §Resolving an `unresolved` Request gathers how an `unresolved` request is resolved: by reporting its outcome. `deploy-dev` runs the script on every change (`dev-wiring-proof.ps1` steps 4 and 8). The console's Start provisioning and Retry provisioning are organization-experience's (TDD-organization-experience-002 1.6.0) | The Twelve-Factor App XII, X; STD-GLB-009 1.3.0 |
 | 46 | ✅ An offboarding can reach retirement on the development server | Done (TDD-004 1.13.0 §Offboarding on a Development Server, TDD-003 1.16.0, TDD-005 2.7.0, stuck-offboarding runbook 1.3.0, 2026-10-19). Found by an audit of every operator and external transition: on the development server nothing resolves an obligation and nothing reports a deprovisioning outcome, so an offboarding with an obligation never released, and a released one aged to `unresolved` with Retire disabled for good. Now `scripts/dev-obligation.ps1` stands in for the owning domain (`-Domain`, and `-Completed`, `-Waived -Reason` or `-Failed -Reason`, through `POST /v1/obligations/{id}/resolve`, refusing another domain's or a final obligation), and `scripts/dev-deprovisioning.ps1` for the provisioning system's deprovisioning report (`-Realized`, or `-Failed -Reason`, through `POST /v1/offboardings/{id}/deprovisioning`, refusing unless the offboarding is in `release` with a `requested` or `unresolved` deprovisioning). Neither releases, retires or resends. Obligations get no console control, as organization-experience TDD-003 decided; the console sends the resend, the release and the retirement. `deploy/dev/README.md` §Offboarding a Tenant on the development server is the procedure, and §One-off tasks says how to check that the daily `maintenance` cron line is installed and runs. `deploy-dev` runs both scripts on every change (`dev-wiring-proof.ps1` step 9), to retirement | The Twelve-Factor App XII, X; STD-GLB-009 1.3.0 |
 | 47 | ✅ The invited person accepts, signed in as themselves | Done (TDD-004 1.14.0, TDD-001 1.26.0, TDD-003 1.17.0, TDD-005 2.8.0, invitation-token-enumeration runbook 1.1.0, 2026-10-19). No invitation could be accepted: acceptance waited for a `verify-identity` fact nothing produced, and it was Tenant-scoped, so it needed a Tenant token the invitee could not hold. **It was also not bound to the caller**: any member of the Tenant holding the token could accept, for whichever Principal a verification recorded. Now `POST /v1/invitations/accept` admits the self caller alone (any human token, with or without `tenant_id`; a workload is `403`). The token selects one row through `organization_self_rt` under a new policy keyed on `app.invitation_token_hash` (`db.WithSelfInvitation`); the Identity Control API is asked whether the caller holds the invited address as a proven address (`POST /v1/principals/{caller}/identifiers:match`, through `internal/identity`, with the dispatchers' workload token); and one transaction in the invitation's Tenant (`db.WithSelfInTenant`) reloads the row by its token hash, checks the Tenant and existing Memberships, creates the Membership for the caller, and publishes `invitation.accepted` and `membership.lifecycle.granted`. Every failed lookup and a mismatch answer one `404`; a refused Tenant or an existing Membership `409`; identity-control unreachable or unconfigured `503`. Refusals are counted (`organization.invitation.acceptances_refused`) and logged with the caller. `POST /v1/invitations/verify-identity` and the `identity_verified` state are removed (migration `20261019120000`); the lookup's `next` is `accept`. `deploy-dev` proves it against the real Identity Control API (`dev-wiring-proof.ps1` step 10). Consumer: organization-experience drops `verify-identity` from its guard and builds the acceptance page in the same change set | ADR-ORG-007; OWASP IDOR Prevention, Forgot Password cheat sheets; WSTG-IDNT-04 |
-| 48 | A problem type of its own for a refused acceptance | Open (2026-10-19). `ADR-ORG-007 §5.4` names the one refusal `invitation-not-acceptable`. foundation-platform's problem types are a closed registry with no such type, so the refusal is `not-found` with one constant detail (TDD-004 1.14.0 §API / Interface). It needs a foundation-platform release; nothing here depends on the type name | ADR-ORG-007 §5.4 |
+| 48 | ✅ A problem type of its own for a refused acceptance | Done 2026-10-20 (TDD-004 1.15.0 §API / Interface). foundation-platform v0.5.0 registers `invitation-not-acceptable` (`STD-GLB-001` 1.7.0), and every failed acceptance answers it, `404` with one constant detail. A client branches on the type, not on the status; organization-experience branches on `404` today, which still holds, and moves to the type with its own change | ADR-ORG-007 §5.4 |
+| 49 | ✅ Completed idempotency keys expire after 7 days | Done (TDD-003 1.18.0 §Completed Keys Are Kept 7 Days, Then Purged, 2026-10-20). Nothing removed a key, so every recorded response was kept for ever. The daily maintenance stage now calls foundation-platform v0.5.0's `idempotency.PurgeCompleted` with `-idempotency-retention` (default 7 days, the owner's window): within Adyen's 7 to 14 days and above Stripe's 24-hour floor. An uncompleted key is never purged; a retry after the window is a new command. Only the migration role purges: no runtime role holds `DELETE` on the table or `EXECUTE` on the function, asserted from the catalog | STD-GLB-001 1.7.0; draft-ietf-httpapi-idempotency-key-header-07 §2.3 |
+| 50 | ✅ Audit records are kept 7 years, then purged | Done (TDD-001 1.27.0 §Privileged Access Review, runbook 1.2.0, 2026-10-20). `audit.privileged_access`, `privileged_access_review` and `organization.emergency_grant_use` were never purged. The maintenance stage now deletes each record older than 7 years on the database clock, and a `BEFORE DELETE` trigger on each table refuses any younger row, with a `BEFORE TRUNCATE` trigger refusing every truncation, for every role, superusers included. A trigger rather than a row-level security policy: a policy binds no superuser and no `TRUNCATE`, and would need a policy for every reader and writer. Retiring a Tenant deletes none of its records (STD-GLB-007 check 4) | STD-GLB-007 1.1.0; ADR-ORG-002 §5.6 (amended 2026-10-20) |
+| 51 | ✅ The invitation token is never in the idempotency record | Done 2026-10-20 (TDD-004 1.15.0, `STD-GLB-001` 1.7.0). The issue command records its answer without `/token` and answers the token live; a retry with the same key answers the invitation alone. `TestTheIssueRecordHoldsNoToken` and the db suite prove the record and the replay | ADR-ORG-007 §5.5 |
+| 52 | ✅ Reporters: the provisioning system and the obligation-owning domains are registered workloads | Done 2026-10-20 (TDD-001 1.27.0 §Reporters, TDD-003 1.18.0, TDD-004 1.15.0). `organization.reporter` and `/v1/reporters`; a workload is admitted on its own report routes alone, from its record; no provider resolves an obligation; the development stand-ins report as development reporters (`scripts/dev-wire.ps1` step 6b). Production needs each external system's workload and owner | ADR-ORG-001 §5.11 |
+| 53 | ✅ Consumers reconcile themselves on a declared interval | Done here 2026-10-20 (TDD-002 1.16.0 §Reconciliation Interval): `reconciliation_interval_seconds` at registration (default one day), the consumer admitted on `POST /v1/projections/reconcile` for itself, the age and interval gauges, warning past one interval and critical past two. The schedulers are identity-control's and foundation-reference's, not built yet | ADR-ORG-001 §5.7 |
+| 54 | ✅ A restore bumps Tenant and provider grant versions | Done 2026-10-20 (TDD-002 1.16.0 §After a Restore to an Older Point): `organization-migrate -stage=restore-bump`, run by `deploy/dev/restore.sh`, adds 10^9, publishes withdrawals only and asks every consumer to reconcile; the drill proves it, identity-control applying a bumped version included | ADR-ORG-003 §5.5 |
+| 55 | ✅ A provider suspends or revokes one Membership inside a Tenant | Done 2026-10-20 (TDD-002 1.16.0 §A Provider Withdraws One Membership): `POST /v1/tenants/{tenant_id}/memberships/{membership_id}/suspend\|revoke`, a provider in force, reason, key and expected version, recorded naming the Tenant; never restore or grant | ADR-ORG-003 §5.6 |
 
 ## Waiting on nothing
 
@@ -509,6 +516,30 @@ No item above waits on the Keycloak proof-of-concept. The three questions that t
 this domain — projected context representation, session removal granularity, context
 switch mechanism — are answered in `identity-kernel` and consumed by `identity-control`.
 They change how Membership reaches Keycloak, not what Membership is.
+
+## API specification (ADR-GLB-010 §5.1)
+
+✅ `api/openapi.yaml` is this service's published HTTP contract, an OpenAPI 3.1 document kept by hand
+beside `internal/httpapi/routes.go` (2026-10-20). ADR-GLB-010 §5.1, accepted 2026-10-20, asks that
+"Each served API SHALL publish its specification (OpenAPI for HTTP) as a versioned artifact".
+
+- **Published as a versioned artifact in this repository.** A consumer pins it by commit. It is not
+  served by the deployable: nothing reads it at run time, and serving it would add an unauthenticated
+  route.
+- **`info.version`** follows ADR-GLB-006: major for a change that breaks a client, minor for an
+  addition, patch for a correction of the text. It is bumped in the commit that changes the routes.
+- **Each operation names its mux pattern** in `x-mux-pattern`, exactly as routes.go writes it, and
+  its caller in `x-route-class`: probe, anonymous, tenant, provider, eligible, consumer-or-provider,
+  self, provider-or-reporter:provisioning and reporter:obligation.
+- **Checked in CI, twice.** `internal/httpapi/openapi_test.go` fails when routes.go registers a route
+  no operation names, or an operation names a route routes.go does not register or a path that route
+  does not serve. The verify job's step "the API specification lints" runs Redocly CLI 2.55.0, pinned
+  by digest, with every rule of its recommended set an error (`api/redocly.yaml`).
+- **Not checked yet: the schemas against the handlers.** The request and response schemas are read
+  from the handlers and `views.go` by hand. A contract test that sends each documented body to the
+  handler is a later item.
+- **The BFF's client is organization-experience's.** ADR-GLB-010 §5.1 has a hand-written client
+  contract-tested in CI against this document; that test lives in organization-experience.
 
 ## Not this service
 
@@ -554,16 +585,19 @@ against 900 s. Two gaps stay recorded, not claimed:
 - **RPO.** A daily `pg_dump` loses up to 24 hours, against PAD-PLT-002's 1 minute, which needs WAL
   archiving with point-in-time recovery on the production platform.
 - **A restore to an older point** is reconciled for Memberships and contained by a pause of Tenant
-  administration (backlog item 41, `docs/runbooks/organization-database-restore.md`). Tenant security
-  versions and provider grant versions are not, and the drill exercises neither part.
+  administration (backlog item 41, `docs/runbooks/organization-database-restore.md`). From 2026-10-20
+  Tenant security versions and provider grant versions are bumped by 10^9 before the service serves
+  (`ADR-ORG-003 §5.5`, `organization-migrate -stage=restore-bump`, run by `deploy/dev/restore.sh`), and
+  the drill proves the bump; the Membership advance is still proven by integration tests, not by the
+  drill, which restores to the instant of its own backup.
 - **The provisioning system is still external** (2026-10-19, backlog item 45). No system that builds
   a Tenant's isolation boundary and reports `realized` or `failed` exists yet; on the development
   server an operator stands in for it with `scripts/dev-provisioning.ps1`, which production never
-  runs. Production needs that system and its owner. It also needs a way for that system to authenticate
-  to the two report routes, which today admit provider authority only, and provider authority is a
-  person's (ADR-ORG-002 §5.1). That is open, for the owner and the provisioning system's design
-  (TDD-organization-control-003 §The Provisioning System on a Development Server). This
-  repository does not build it: physical Tenant provisioning is out of scope (§Not this service).
+  runs. Production needs that system and its owner. How it authenticates is decided (2026-10-20,
+  `ADR-ORG-001 §5.11`): as a reporter workload registered for `provisioning`, with its own key, admitted
+  on the report routes alone (`TDD-organization-control-001` §Reporters); the development stand-ins
+  already report that way. This repository does not build the system: physical Tenant provisioning is
+  out of scope (§Not this service).
 - **The invitation link is not delivered to the invited address** (2026-10-19, backlog item 47).
   `ADR-ORG-007 §5.5` has the Notification Platform deliver the link when an invitation is issued, so
   the administrator never handles the token, and makes that delivery a production gate. No
@@ -574,33 +608,64 @@ against 900 s. Two gaps stay recorded, not claimed:
 - **The domains that own offboarding obligations are external too** (2026-10-19, backlog item 46).
   Product, HCM, billing and audit resolve their obligations through `POST /v1/obligations/{id}/resolve`
   naming themselves, and the provisioning system reports deprovisioning through `POST
-  /v1/offboardings/{id}/deprovisioning`. Both routes admit provider authority only, so a domain can
-  resolve today only through a person acting for it with its confirmation in the reason, as the
-  stuck-offboarding runbook says, and on the development server through `scripts/dev-obligation.ps1`
-  and `scripts/dev-deprovisioning.ps1`. How a domain's workload authenticates to the resolution route,
-  and is bound to the domain it names, is open with the provisioning system's question above.
+  /v1/offboardings/{id}/deprovisioning`. Decided 2026-10-20 (`ADR-ORG-001 §5.11`): each domain is a
+  reporter workload registered for `obligation:<domain>`, bound to that domain by its record, and the
+  only caller of `/resolve`; no provider resolves an obligation. Production needs each domain's
+  workload and owner; on the development server `scripts/dev-obligation.ps1` and
+  `scripts/dev-deprovisioning.ps1` report as development reporters.
+
+## Repository governance
+
+**2026-10-20: `ee98ec4` reached `main` without a pull request, and stays in history.** STD-GLB-009
+1.10.0 §Security & Access Governance asks a commit that reached a default branch otherwise to be
+"recorded and dispositioned, never rewritten", in its repository's ROADMAP. This is that record.
+
+- **What it changed.** `ee98ec4`, committed 2026-10-07 16:08 UTC, "systemproof: pin
+  foundation-reference at the proof that names the version", changed one line of
+  `systemproof/foundation-reference.rev`, from `3d20d84` to `20fdd6a`. It is on `main`'s
+  first-parent history, between the merges of #56 and #57, not inside a pull request's merge.
+- **What superseded it.** Pull request #60 replaced that line the same day: its commit `179316d`
+  (19:38 UTC) changed `20fdd6a` to `4a93d9d`, and the pull request merged at 19:48 UTC. `e559ac3`
+  replaced it again on 2026-10-15 (`de3619a`). None of its content is on `main`: `20fdd6a` appears in
+  no file there.
+- **When the ruleset took effect.** Ruleset 24664127, "main via PR only", was created at 16:32 UTC
+  that day, 24 minutes after the commit. It targets the default branch with `deletion`,
+  `non_fast_forward` and `pull_request`, and has no bypass actors (GitHub API, read 2026-10-20).
+- **Why it is neither rewritten nor reverted.** History is not rewritten: "Rebasing (or any other
+  form of rewriting) a branch that others have based work on is a bad idea: anyone downstream of it is
+  forced to manually fix their history". A revert is used only when the content is still there to
+  undo, because "git revert is used to record some new commits to reverse the effect of some earlier
+  commits", and here nothing of it is left. The record is what NIST CM-3 asks: "Document
+  configuration change decisions associated with the system", including "unscheduled or unauthorized
+  changes" (all three as STD-GLB-009 quotes them).
 
 ## Debt, named rather than implied
 
-Two items, and one purchase clears both.
+One item. Until 2026-10-20 there were two; the first was never debt, and is folded into the one
+below.
 
-### `atlas migrate lint` is Atlas Pro only since v0.38
+### RLS outside HCL (Pro only)
 
-`ADR-GLB-004` requires the pipeline to block a destructive plan rather than report it, and names
-that command as the mechanism. On the free CLI it aborts. CI stands in with `atlas migrate
-validate` — which checks directory integrity and nothing about destructiveness — plus a
-text-level grep for `DROP TABLE`, `RENAME`, `TRUNCATE` and their neighbours.
+Recorded first as "`atlas migrate lint` is Atlas Pro only since v0.38", retitled 2026-10-20.
 
-The grep fails, which is the property that matters. It is also cruder than the analyzer it
-replaces: it reads text rather than a parsed plan, so it cannot tell a destructive statement from
-the same words inside a comment, and a reviewer can silence it with an annotation. Recorded here
-rather than presented as equivalent.
+**The lint half was never debt, and is not a waiver.** `ADR-GLB-004` §5.1 (amended 2026-08-18 and
+2026-10-20) states the destructive gate as a property, met by `atlas migrate validate`, a
+destructive-statement gate and the synchronisation check: "A pipeline that implements items 1 and 2
+meets this gate. It is not a waiver, and a ROADMAP does not describe it as one." CI runs all three.
+The destructive-statement gate is squawk v2.70.0, pinned by version and checksum, over every
+migration after `20261019120000_remove_identity_verified` (`.squawk.toml`). squawk parses each
+statement, so a word in a comment is not flagged, and a reviewed approval is a rule-scoped
+`-- squawk-ignore <rule>` comment on the line before the statement. The reviewed text match stays
+over the migrations up to that cutover, whose `atlas:destructive-approved` lines cannot be edited
+without breaking `atlas.sum`, and keeps `TRUNCATE` after it, which squawk does not flag. CI pins the
+Atlas CLI to v1.3.4, the migrate image's release (§5.4).
 
-### Row-Level Security is outside the declarative schema
-
-Atlas OSS models neither `ENABLE`/`FORCE ROW LEVEL SECURITY` nor `CREATE POLICY` — verified
-against v1.3.2, whose `schema inspect` emits no trace of either. The policies therefore live in
-`internal/controldb/rls.sql`.
+**What stays Pro-only is the title.** Atlas models RLS policies in HCL only for Atlas Pro users:
+"Policies are available only to Atlas Pro users. To use this feature, run: atlas login" (`ADR-GLB-002`
+§6, amended 2026-10-20). This repository declares RLS policies, so they live outside HCL, in
+`internal/controldb/rls.sql`, which `organization-migrate -stage=post` applies after
+`atlas migrate apply`. The free CLI shows the same: v1.3.2's `schema inspect` emits no trace of
+`ENABLE`/`FORCE ROW LEVEL SECURITY` or `CREATE POLICY`.
 
 **What this does not cost.** A runtime role cannot remove a policy: neither holds DDL and neither
 owns a table. Drift heals on deploy, because `rls.sql` recreates every policy on every run and
@@ -619,12 +684,10 @@ behind `GET /readyz` (TDD-organization-control-001 1.19.0 §Verifying the Postur
 weakenings are tested and each is detected, and every one of them leaves the schema matching its
 declared state — which is why a schema tool would not have caught them.
 
-### Resolving both
+### Resolving it
 
-An Atlas Pro login with a CI token supplies the destructive analyzer and RLS in HCL. The
-alternative for the first item alone is an amendment to `ADR-GLB-004` naming a different
-mechanism; there is no alternative for the second short of writing a policy differ, which is not
-work this repository should own.
-
-Until then, neither is presented as satisfied. `ADR-GLB-004`'s destructive gate has a waiver in
-effect by substitution, and that is the honest description.
+Buying Atlas Pro stays `ADR-GLB-004`'s preferred upgrade ("not rejected, deferred", its
+Alternative C). It moves the policies into `schema.hcl`, and supplies `atlas migrate lint` (§5.1
+item 4), whose configuration `atlas.hcl` keeps. Short of it, the alternative is writing a policy
+differ, which is not work this repository should own. Until then the policies are applied by an
+idempotent stage and checked at runtime, without a diff, and that is the honest description.

@@ -25,6 +25,13 @@
 #
 #    The drill (scripts/dev-restore-drill.sh) leaves it unset, because it compares every table with
 #    the source's and a pause row would be a difference it made itself.
+# 6. Bumps every Tenant and provider grant version past what consumers hold, before anything can serve
+#    (ADR-ORG-003 §5.5): it builds the migrate image, applies any newer migration, and runs
+#    `organization-migrate -stage=restore-bump`, which adds 10^9 to each version, publishes the
+#    withdrawn Tenants and grants and no active one, and asks every consumer to reconcile. A restore
+#    to an older point gives back versions consumers have already seen superseded, and a consumer
+#    discards a lower version as already applied. RESTORE_BUMP=0 skips it, for the drill alone, which
+#    compares every table with the source's first and runs the bump after (step 8 there).
 #
 # The migrate job that `docker compose up` runs next finds the schema at its revision, applies
 # anything newer, and re-asserts RLS, the privileges and the five login roles' passwords from .env.
@@ -78,6 +85,13 @@ if [ -n "${PAUSE_REASON:-}" ]; then
 INSERT INTO organization.tenant_administration_pause (pause_id, paused, reason)
 VALUES (gen_random_uuid(), true, :'reason');
 SQL
+fi
+
+if [ "${RESTORE_BUMP:-1}" != "0" ]; then
+	echo "[bump] every Tenant and provider grant version"
+	docker compose build migrate
+	docker compose run --rm migrate
+	docker compose --profile restore-bump run --rm restore-bump
 fi
 
 echo "restored $database; next: docker compose up -d --build"

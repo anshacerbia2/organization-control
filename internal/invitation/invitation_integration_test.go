@@ -13,6 +13,7 @@ package invitation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1083,5 +1084,70 @@ func TestTheListIsAKeysetPageOfTheBoundTenant(t *testing.T) {
 	}
 	if _, err := f.service.List(ctx, ListQuery{Limit: -1}); !errors.Is(err, ErrInvalid) {
 		t.Errorf("limit -1: error = %v, want ErrInvalid", err)
+	}
+}
+
+// TestTheIssueRecordHoldsNoToken is STD-GLB-001 1.7.0's test for the issue command (ADR-ORG-007 §5.5,
+// amended 2026-10-20): its idempotency record holds the invitation and no token, and a retry with the
+// same key answers the invitation issued without one. The responder renders the answer as the HTTP
+// surface does, the token at "/token", which the surface names to db.WithholdFromRecord.
+func TestTheIssueRecordHoldsNoToken(t *testing.T) {
+	f := newFixture(t)
+	tenantID := f.seedTenant(t, "active")
+
+	claim := db.Claim{Scope: "tenant:" + tenantID.String() + ":" + f.actor.String(), Key: mustID(t).String(),
+		Digest: db.Digest([]byte("POST"), []byte("/v1/invitations"), []byte(`{"target_identifier":"x"}`))}
+	t.Cleanup(func() {
+		f.exec(t, `DELETE FROM platform.idempotency_key WHERE scope = $1 AND key = $2`, claim.Scope, claim.Key)
+	})
+	render := func(result any) (int, json.RawMessage, bool) {
+		issued, ok := result.(Issued)
+		if !ok {
+			return 0, nil, false
+		}
+		body, err := json.Marshal(map[string]any{
+			"invitation": map[string]any{"invitation_id": issued.Invitation.InvitationID.String()},
+			"token":      string(issued.Token),
+		})
+		return 201, body, err == nil
+	}
+	ctx := db.WithResponder(db.WithClaim(f.scopeFor(tenantID), claim), render)
+	db.WithholdFromRecord(ctx, "/token")
+
+	request := IssueRequest{TargetIdentifier: "withheld@example.com", SubjectType: "human",
+		Reason: "asserted by the invitation suite"}
+	issued, err := f.service.Issue(ctx, request)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if issued.Token == "" || !db.ClaimCompleted(ctx) {
+		t.Fatalf("the first answer carries token %q and completed=%v; want a token, recorded with the effect",
+			issued.Token, db.ClaimCompleted(ctx))
+	}
+
+	var stored string
+	if err := f.setup.InTx(context.Background(), func(ctx context.Context, tx fdb.Tx) error {
+		return tx.QueryRow(ctx, `SELECT response_body::text FROM platform.idempotency_key
+		WHERE scope = $1 AND key = $2`, claim.Scope, claim.Key).Scan(&stored)
+	}); err != nil {
+		t.Fatalf("read the record: %v", err)
+	}
+	if strings.Contains(stored, string(issued.Token)) || strings.Contains(stored, `"token"`) {
+		t.Fatalf("the idempotency record holds the token: %s", stored)
+	}
+	if !strings.Contains(stored, issued.Invitation.InvitationID.String()) {
+		t.Fatalf("the idempotency record lost the invitation: %s", stored)
+	}
+
+	retry := db.WithResponder(db.WithClaim(f.scopeFor(tenantID), claim), render)
+	db.WithholdFromRecord(retry, "/token")
+	_, err = f.service.Issue(retry, request)
+	var replayed *db.Replayed
+	if !errors.As(err, &replayed) {
+		t.Fatalf("the retry returned %v, want a replay", err)
+	}
+	if replayed.Status != 201 || strings.Contains(string(replayed.Body), string(issued.Token)) ||
+		!strings.Contains(string(replayed.Body), issued.Invitation.InvitationID.String()) {
+		t.Errorf("the replay is %d %s, want 201 with the invitation and without the token", replayed.Status, replayed.Body)
 	}
 }

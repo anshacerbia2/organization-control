@@ -92,6 +92,9 @@ func TestAReviewCoversTheAccessOfItsPeriodAndOnlyThat(t *testing.T) {
 	f.seed(t, actor, db.AuthorityEmergency, nil, "3 days")
 	f.seed(t, actor, db.AuthorityActivation, nil, "2 days")
 	f.seed(t, actor, db.AuthorityConsumer, nil, "1 hour")
+	// A reporter's row is a workload's, reviewed through its owner, and never due here (ADR-ORG-001
+	// §5.11).
+	f.seed(t, actor, db.AuthorityReporter, nil, "2 hours")
 
 	asReviewer := actingAs(t, f.base, reviewer)
 	report, err := f.review.Unreviewed(asReviewer, "weekly review", time.Now())
@@ -236,6 +239,7 @@ func TestATenantListsTheProviderAccessThatNamedIt(t *testing.T) {
 	f.seed(t, actor, db.AuthorityEmergency, &mine, "2 days")
 	f.seed(t, actor, db.AuthorityActivation, &mine, "1 day")
 	f.seed(t, actor, db.AuthorityConsumer, &mine, "1 hour")
+	f.seed(t, actor, db.AuthorityReporter, &mine, "1 hour")
 	f.seed(t, actor, db.AuthorityEmergency, &theirs, "1 hour")
 
 	scope, err := db.TenantScope(mine, newID(t), newID(t))
@@ -251,7 +255,8 @@ func TestATenantListsTheProviderAccessThatNamedIt(t *testing.T) {
 		t.Fatalf("the Tenant reads %d rows, want its 2 provider rows", len(page.Accesses))
 	}
 	for _, access := range page.Accesses {
-		if access.Tenant == nil || *access.Tenant != mine || access.Authority == db.AuthorityConsumer {
+		if access.Tenant == nil || *access.Tenant != mine || access.Authority == db.AuthorityConsumer ||
+			access.Authority == db.AuthorityReporter {
 			t.Errorf("the Tenant read %+v", access)
 		}
 	}
@@ -264,6 +269,7 @@ func TestATenantListsTheProviderAccessThatNamedIt(t *testing.T) {
 		"a Tenant":   {Tenant: theirs},
 		"an actor":   {Actor: actor},
 		"a consumer": {Authority: db.AuthorityConsumer},
+		"a reporter": {Authority: db.AuthorityReporter},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			if _, err := f.review.TenantList(asTenant, query); !errors.Is(err, ErrAccessQueryInvalid) {

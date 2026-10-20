@@ -10,6 +10,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/observability"
 
+	"github.com/anshacerbia2/organization-control/internal/authority"
 	"github.com/anshacerbia2/organization-control/internal/db"
 )
 
@@ -60,6 +61,13 @@ type Caller struct {
 	// Activation is the activation in force that makes a non-emergency Provider one. The
 	// privileged-access record names it (ADR-ORG-002 §5.6).
 	Activation id.UUID
+
+	// Reporter is the registered reporter workload this caller is, and the nil identifier for every
+	// other caller (ADR-ORG-001 §5.11, amended 2026-10-20). Authentication sets it on the report
+	// routes alone, from the reporter registry by the token's principal_id, and Reports says what the
+	// record admits it to report: provisioning, or obligation:<domain>.
+	Reporter id.UUID
+	Reports  authority.Reports
 
 	// Self is a person acting for themselves alone: a human token on
 	// GET /v1/principals/{principal_id}/contexts whose principal_id is the path's (ADR-ORG-005 §5.1),
@@ -149,12 +157,21 @@ func ResolveScope(next http.Handler) http.Handler {
 // resolve is the caller-to-scope rule, separated so it can be exercised directly.
 func resolve(caller Caller, correlation id.UUID) (db.Scope, error) {
 	if caller.Self {
-		if caller.Provider || caller.Eligible || caller.Consumer != "" || !caller.Tenant.IsNil() {
+		if caller.Provider || caller.Eligible || caller.Consumer != "" || !caller.Tenant.IsNil() || !caller.Reporter.IsNil() {
 			return db.Scope{}, errors.New("httpapi: a self caller carries no other authority")
 		}
 		// The Principal is the caller's own, and the scope opens only the self read: no Tenant, no
 		// provider pool, no record of provider access (ADR-ORG-005 §5.1).
 		return db.SelfScope(caller.Subject, correlation)
+	}
+	if !caller.Reporter.IsNil() {
+		if caller.Provider || caller.Eligible || caller.Consumer != "" || !caller.Tenant.IsNil() {
+			return db.Scope{}, errors.New("httpapi: a reporter caller carries no other authority")
+		}
+		// A reporter opens the provider scope, whose role writes what the reports change, under an
+		// authority its access record names as a reporter's. The routes it reaches are its own
+		// alone: authentication admitted it on them, and each refuses anyone else's reporter.
+		return db.ProviderScope(caller.Subject, correlation, db.ReporterAuthority())
 	}
 	if caller.Consumer != "" {
 		if caller.Provider || !caller.Tenant.IsNil() {

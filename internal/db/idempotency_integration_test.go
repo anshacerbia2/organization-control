@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	fdb "github.com/anshacerbia2/foundation-platform/db"
@@ -555,5 +556,97 @@ func TestRespondIsANoOpWithoutAClaimOrAResponder(t *testing.T) {
 	}
 	if _, completed := f.keyState(f.claim); completed {
 		t.Error("a claim with no responder was completed")
+	}
+}
+
+// TestASecretAnsweredOnceIsNeverInTheRecord is STD-GLB-001 1.7.0's test: a member named by
+// WithholdFromRecord is not in the stored response, and a replay answers the same result without it
+// (ADR-ORG-007 §5.5, amended 2026-10-20).
+func TestASecretAnsweredOnceIsNeverInTheRecord(t *testing.T) {
+	f := newClaimFixture(t)
+
+	membershipID := mustUUIDValue(t)
+	t.Cleanup(func() { f.forgetMembership(membershipID) })
+	live := json.RawMessage(`{"invitation":{"invitation_id":"` + membershipID.String() + `"},"token":"the-secret"}`)
+
+	ctx := db.WithResponder(db.WithClaim(f.ctx, f.claim), responder(201, live))
+	db.WithholdFromRecord(ctx, "/token")
+	if err := db.WithTenantScope(ctx, f.pool, func(ctx context.Context, tx db.Tx) error {
+		if err := f.grantMembership(ctx, tx, membershipID); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, membershipID)
+	}); err != nil {
+		t.Fatalf("the first attempt failed: %v", err)
+	}
+
+	var stored string
+	if err := db.WithTenantScope(f.ctx, f.pool, func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx, `SELECT response_body::text FROM platform.idempotency_key
+		WHERE scope = $1 AND key = $2`, f.claim.Scope, f.claim.Key).Scan(&stored)
+	}); err != nil {
+		t.Fatalf("read the record: %v", err)
+	}
+	if strings.Contains(stored, "the-secret") || strings.Contains(stored, `"token"`) {
+		t.Fatalf("the record holds the secret: %s", stored)
+	}
+	if !strings.Contains(stored, membershipID.String()) {
+		t.Fatalf("the record lost the result: %s", stored)
+	}
+
+	err := db.WithTenantScope(db.WithClaim(f.ctx, f.claim), f.pool,
+		func(context.Context, db.Tx) error { return nil })
+	var replayed *db.Replayed
+	if !errors.As(err, &replayed) {
+		t.Fatalf("the retry returned %v, want a replay", err)
+	}
+	if replayed.Status != 201 || strings.Contains(string(replayed.Body), "the-secret") ||
+		!strings.Contains(string(replayed.Body), membershipID.String()) {
+		t.Errorf("the replay is %d %s, want 201 with the invitation and no token", replayed.Status, replayed.Body)
+	}
+}
+
+// TestAWithheldMemberTheResponseLacksFailsTheEffect: a secret renamed in the response, and not in
+// the pointer, would be recorded under its new name. The record is refused instead, and the effect
+// rolls back with it.
+func TestAWithheldMemberTheResponseLacksFailsTheEffect(t *testing.T) {
+	f := newClaimFixture(t)
+
+	membershipID := mustUUIDValue(t)
+	t.Cleanup(func() { f.forgetMembership(membershipID) })
+	ctx := db.WithResponder(db.WithClaim(f.ctx, f.claim), responder(201, json.RawMessage(`{"secret":"x"}`)))
+	db.WithholdFromRecord(ctx, "/token")
+	err := db.WithTenantScope(ctx, f.pool, func(ctx context.Context, tx db.Tx) error {
+		if err := f.grantMembership(ctx, tx, membershipID); err != nil {
+			return err
+		}
+		return db.Respond(ctx, tx, membershipID)
+	})
+	if !errors.Is(err, idempotency.ErrNotWithheld) {
+		t.Fatalf("the attempt returned %v, want idempotency.ErrNotWithheld", err)
+	}
+	if f.membershipExists(membershipID) {
+		t.Error("the effect committed without its record")
+	}
+	if exists, _ := f.keyState(f.claim); exists {
+		t.Error("the key survived a rolled-back effect")
+	}
+}
+
+// TestStoredResponseWithholdsForTheLateCompletion: the HTTP surface's completion after the handler
+// reads the same names.
+func TestStoredResponseWithholdsForTheLateCompletion(t *testing.T) {
+	ctx := db.WithClaim(context.Background(), db.Claim{Scope: "s", Key: "k", Digest: "d"})
+	body := json.RawMessage(`{"a":1,"token":"t"}`)
+	if got, err := db.StoredResponse(ctx, body); err != nil || string(got) != string(body) {
+		t.Fatalf("with nothing withheld StoredResponse = %s, %v", got, err)
+	}
+	db.WithholdFromRecord(ctx, "/token")
+	got, err := db.StoredResponse(ctx, body)
+	if err != nil || strings.Contains(string(got), "token") {
+		t.Fatalf("StoredResponse = %s, %v; want the body without its token", got, err)
+	}
+	if _, err := db.StoredResponse(ctx, json.RawMessage(`{"a":1}`)); !errors.Is(err, idempotency.ErrNotWithheld) {
+		t.Fatalf("a body without the member gave %v, want ErrNotWithheld", err)
 	}
 }

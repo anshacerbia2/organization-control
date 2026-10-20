@@ -1,9 +1,12 @@
 # The development server's stand-in for the provisioning system (TDD-organization-control-003 1.15.0
 # §The Provisioning System on a Development Server). No provisioning system runs on a development
-# server, so nothing reports a Tenant's outcome there. This script reports it, as an operator acting
-# for that system, through the two routes the system itself calls: POST /v1/provisioning/realized and
-# POST /v1/provisioning/failed. Same routes, same authentication, same correlation identifier; only the
-# caller differs. Production has a real provisioning system and never runs this.
+# server, so nothing reports a Tenant's outcome there. This script reports it through the two routes
+# the system itself calls, POST /v1/provisioning/realized and POST /v1/provisioning/failed, as the
+# development provisioning reporter: a workload registered as production's provisioning system is,
+# with its own key (ADR-ORG-001 §5.11, STD-GLB-009 rule 13, 1.10.0). Same routes, same authentication,
+# same correlation identifier. It reads the Tenant first as the operator, a provider, because a
+# reporter reaches its report routes alone. Production has a real provisioning system and never runs
+# this.
 #
 # deploy/dev/README.md §Provisioning a Tenant on the development server is the procedure:
 #   1. Start provisioning in Organization Experience (or POST /v1/tenants/{id}/provisioning);
@@ -18,9 +21,9 @@
 # Exit codes: 0 reported (or the same outcome was already recorded: a replay); 2 refused, nothing sent;
 # 1 any other failure.
 #
-# Environment and SECRETS: as dev-wiring-proof.ps1. The token is the operator's dev-provider-caller,
-# from the wiring state file dev-wire.ps1 wrote. Nothing read from a key file or the environment is
-# printed.
+# Environment and SECRETS: as dev-wiring-proof.ps1. The reads use the operator's dev-provider-caller,
+# and the report the provisioning reporter's key, both from the wiring state file dev-wire.ps1 wrote.
+# Nothing read from a key file or the environment is printed.
 #   $env:IDENTITY_CALLER_PASSWORD      the bootstrap operator's password
 #   $env:IDENTITY_OPERATOR_TOTP_FILE   optional, the operator's TOTP file (identity-control's dev-env.ps1
 #                                      finds deploy/dev/keys/operator-totp.json in its checkout)
@@ -60,7 +63,7 @@ param(
 
     # The X-Administrative-Reason recorded as provider-access evidence. Plain ASCII: anything else is
     # refused 400 (STD-GLB-001 §Request Header Values).
-    [string] $AdministrativeReason = "development server: no provisioning system, outcome reported by dev-provisioning.ps1"
+    [string] $AdministrativeReason = "development server: no provisioning system, outcome reported by dev-provisioning.ps1 as the development provisioning reporter"
 )
 
 $ErrorActionPreference = "Stop"
@@ -96,16 +99,21 @@ if (Get-Command Get-DevOperatorTotp -ErrorAction SilentlyContinue) {
 } else {
     $operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
 }
+. (Join-Path $PSScriptRoot "dev-reporter.ps1")
+if ($null -eq (Get-ReporterEntry $s "provisioning")) {
+    Refuse "the wiring state names no development provisioning reporter; run scripts/dev-wire.ps1 (step 6b registers it)"
+}
 $token = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
     -ClientId $s.caller_client_id -KeyFile $s.caller_key_file @operatorTotp
 $client = New-Object System.Net.Http.HttpClient
 
-# Call sends one request with the administrative reason every provider route requires. The two reports
-# honour an Idempotency-Key and do not require one (TDD-003 §The Idempotency-Key Is Required on
-# Commands): a duplicate is answered as a replay by its correlation identifier, so none is sent.
-function Call([string] $method, [string] $path, $body) {
+# Call sends one request with the administrative reason: every provider route requires it, and the
+# reporter's access record carries it. The two reports honour an Idempotency-Key and do not require one
+# (TDD-003 §The Idempotency-Key Is Required on Commands): a duplicate is answered as a replay by its
+# correlation identifier, so none is sent. $bearer is the operator's token unless given.
+function Call([string] $method, [string] $path, $body, [string] $bearer = $token) {
     $request = New-Object System.Net.Http.HttpRequestMessage($method, "$organizationApi$path")
-    $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $token)
+    $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $bearer)
     $request.Headers.Add("X-Administrative-Reason", $AdministrativeReason)
     if ($null -ne $body) {
         $json = $body | ConvertTo-Json -Compress -Depth 4
@@ -169,7 +177,8 @@ if ($request.state -ne "requested" -and $request.state -ne "unresolved") {
 
 $body = @{ correlation_id = $request.correlation_id }
 if (-not [string]::IsNullOrWhiteSpace($Reason)) { $body.detail = $Reason.Trim() }
-$r = Call "POST" "/v1/provisioning/$outcome" $body
+# The report itself, as the provisioning reporter workload.
+$r = Call "POST" "/v1/provisioning/$outcome" $body (Get-ReporterToken $s "provisioning")
 if ($r.code -ne 200) { throw "POST /v1/provisioning/$outcome answered $($r.code): $($r.text)" }
 $now = Get-Prop $r.json "tenant"
 Write-Host "reported   $outcome$(if ($body.Contains('detail')) { ": $($body.detail)" })"

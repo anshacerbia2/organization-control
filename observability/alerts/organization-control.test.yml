@@ -189,6 +189,59 @@ tests:
             exp_annotations:
               summary: A security event accepted over 20s ago, twice the budget, is not yet applied by this consumer.
 
+  # A consumer's reconciliation age against the interval it declared (ADR-ORG-001 §5.7): the interval is
+  # 600s; the age crosses one interval at the second sample and two at the fourth. The restore's request
+  # holds for two samples and clears with the consumer's next run.
+  - name: reconciliation interval
+    interval: 30s
+    input_series:
+      - series: 'organization_projection_consumer_reconciliation_interval_seconds{consumer="identity-control"}'
+        values: '600 600 600 600 600'
+      - series: 'organization_projection_consumer_reconciliation_age_seconds{consumer="identity-control"}'
+        values: '300 900 1100 1300 30'
+      - series: 'organization_projection_consumer_reconciliation_requested{consumer="identity-control"}'
+        values: '0 1 1 0 0'
+    alert_rule_test:
+      - eval_time: 0s
+        alertname: ReconciliationOverdueWarning
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: ReconciliationOverdueWarning
+        exp_alerts:
+          - exp_labels: { severity: warning, consumer: identity-control }
+            exp_annotations:
+              summary: The consumer has not reconciled for longer than the interval it declared.
+              description: Its scheduler may have stopped, or its calls to POST /v1/projections/reconcile fail. An operator can run one as a provider (docs/runbooks/projection-drift-repair.md).
+      - eval_time: 60s
+        alertname: ReconciliationOverdueCritical
+        exp_alerts: []
+      - eval_time: 90s
+        alertname: ReconciliationOverdueCritical
+        exp_alerts:
+          - exp_labels: { severity: critical, consumer: identity-control }
+            exp_annotations:
+              summary: The consumer has not reconciled for longer than two of its declared intervals.
+              description: A lost event in its copy goes uncorrected. Run its reconciliation as a provider and find why its own stopped (docs/runbooks/projection-drift-repair.md).
+      - eval_time: 120s
+        alertname: ReconciliationOverdueWarning
+        exp_alerts: []
+      - eval_time: 120s
+        alertname: ReconciliationOverdueCritical
+        exp_alerts: []
+      - eval_time: 0s
+        alertname: ReconciliationRequestedAfterRestore
+        exp_alerts: []
+      - eval_time: 60s
+        alertname: ReconciliationRequestedAfterRestore
+        exp_alerts:
+          - exp_labels: { severity: warning, consumer: identity-control }
+            exp_annotations:
+              summary: A restore asked this consumer to reconcile, and it has not yet.
+              description: Until it does, its copy may hold versions the restore moved past (docs/runbooks/organization-database-restore.md).
+      - eval_time: 90s
+        alertname: ReconciliationRequestedAfterRestore
+        exp_alerts: []
+
   - name: offboarding and provisioning
     interval: 30s
     input_series:

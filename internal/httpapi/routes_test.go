@@ -116,6 +116,8 @@ func testSurface(t *testing.T) Surface {
 	must(err, "tenant administration")
 	accessReview, err := authority.NewAccessReview(providerPool, tenantPool)
 	must(err, "privileged-access review")
+	reporters, err := authority.NewReporters(providerPool)
+	must(err, "reporters")
 	// The raw transactor, as production wires it: the frontier reads outbox aggregates carrying no
 	// tenant column, so it takes no scope and writes no privileged-access record per poll.
 	frontier, err := projection.NewFrontierReader(transactor)
@@ -129,7 +131,7 @@ func testSurface(t *testing.T) Surface {
 			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 			ContextList: contextList, Replayer: replayer, Resolver: resolver, DeadLetters: deadLetters,
 			Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
-			TenantAdministrators: tenantAdministrators, AccessReview: accessReview,
+			TenantAdministrators: tenantAdministrators, AccessReview: accessReview, Reporters: reporters,
 		},
 		Database: okProber{},
 	})
@@ -555,6 +557,7 @@ func testSurfaceServices(t *testing.T) Services {
 	providerActivations, _ := authority.NewActivations(providerPool, authority.ActivationPolicy{Max: 8 * time.Hour, ApprovalRequired: true})
 	tenantAdministrators, _ := authority.NewTenantAdministration(providerPool, tenantPool, memberships)
 	accessReview, _ := authority.NewAccessReview(providerPool, tenantPool)
+	reporters, _ := authority.NewReporters(providerPool)
 	// The raw transactor, as production wires it: the frontier reads outbox aggregates that carry no
 	// tenant column, so it takes no scope and writes no privileged-access record per poll.
 	frontier, _ := projection.NewFrontierReader(transactor)
@@ -566,7 +569,7 @@ func testSurfaceServices(t *testing.T) Services {
 		Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 		ContextList: contextList, Replayer: replayer, Resolver: resolver, DeadLetters: deadLetters,
 		Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
-		TenantAdministrators: tenantAdministrators, AccessReview: accessReview,
+		TenantAdministrators: tenantAdministrators, AccessReview: accessReview, Reporters: reporters,
 	}
 }
 

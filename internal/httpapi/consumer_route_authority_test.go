@@ -30,6 +30,8 @@ var consumerRoutes = map[string]bool{
 	"GET /v1/projections/frontier":                           true,
 	"POST /v1/context/verify":                                true,
 	"POST /v1/context/switch-eligible":                       true,
+	// Its own reconciliation, on the interval it declared (ADR-ORG-001 §5.7, amended 2026-10-20).
+	"POST /v1/projections/reconcile": true,
 }
 
 var apiRoute = regexp.MustCompile(`api\.HandleFunc\("([A-Z]+) ([^"]+)"`)

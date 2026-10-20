@@ -16,3 +16,10 @@ func (s *ScheduledSweep) SweepUnresolved(ctx context.Context) error {
 		return err
 	})
 }
+
+// PublishWithdrawn mirrors the restore bump's Tenant publication: out of scope, on the restore's own
+// connection.
+func PublishWithdrawn(ctx context.Context, tx db.Tx) error {
+	_, err := tx.Exec(ctx, `SELECT tenant_id FROM tenant.tenant WHERE status = 'suspended'`)
+	return err
+}

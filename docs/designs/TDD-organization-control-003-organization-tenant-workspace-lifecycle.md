@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.17.0
+  version: 1.18.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-19
+  last_reviewed: 2026-10-20
   parent_sad: SAD-004
 ---
 
@@ -536,6 +536,48 @@ a person's command:
 command in `command`; a test fails on a `POST` that is in neither. A key is refused on a `GET` or
 `HEAD`, as before, because a key spent on a read would answer the caller's later command.
 
+#### Completed Keys Are Kept 7 Days, Then Purged
+
+(1.18.0.) Until 1.18.0 nothing removed a key, so every response a command recorded was kept for ever.
+The IETF draft asks for an expiry, published: "The resource MAY require time based idempotency keys
+to be able to purge or delete a key upon its expiry. The resource SHOULD define such expiration
+policy and publish it in the documentation" (§2.3) [R9]. `STD-GLB-001` 1.7.0 makes it a rule. This is
+the policy:
+
+- **A completed key is kept 7 days after it completed, then purged.** The daily maintenance stage,
+  `organization-migrate -stage=maintenance`, calls foundation-platform's `idempotency.PurgeCompleted`
+  with `-idempotency-retention`, default `168h`. The boundary is computed on the database clock,
+  which wrote `completed_at`.
+- **The replay window ends then.** A retry within 7 days of completion is answered with the first
+  result (§The Response Is Recorded with the Effect). A retry after 7 days finds no key and is a new
+  command, executed again. Stripe states the same consequence of its own pruning: "We generate a new
+  request if a key is reused after the original is pruned" [R10].
+- **An uncompleted key is never purged.** Its effect may have committed without its response, and a
+  retry that found no key would execute the command twice. foundation-platform's purge deletes only
+  keys with `completed_at` set.
+
+Why 7 days:
+
+- **It is at least as long as any client retries.** A key purged while a client still retries
+  executes the command again. 7 days covers a retry after a weekend, or after an outage of a day or
+  two, which a shorter window would turn into a second execution.
+- **It is within Adyen's window:** "Idempotency keys are valid for a period of 7 to 14 days after
+  first submission" [R11]. Adyen counts from submission and this window from completion, which is
+  later, so the window here is never the shorter.
+- **It is above Stripe's floor,** keys removed "after they’re at least 24 hours old" [R10], and above
+  foundation-platform's `MinimumRetention` of 24 hours, which `PurgeCompleted` and the database
+  function both refuse to go below.
+
+**Privilege.** The purge runs as the migration role, which owns `platform.idempotency_key`. No
+runtime role holds `DELETE` on the table or `EXECUTE` on `platform.purge_idempotency_keys`:
+`grants.sql` grants neither, and revokes every `platform` function from `PUBLIC`. A request path
+able to delete a key could make a retry of a completed command execute it again.
+
+**Tests.** `TestNoRuntimeRoleCanPurgeIdempotencyKeys` reads both privileges for each of the six
+runtime roles from the catalog. `TestMaintenancePurgesCompletedIdempotencyKeysAfterSevenDays` runs
+the stage over a key completed 8 days ago, which goes, one completed 6 days ago and an uncompleted
+one claimed 30 days ago, which both stay.
+
 ### The Response Is Recorded with the Effect
 
 (1.11.0.) The claim on a key has always committed with the effect it guards: `internal/db` makes it
@@ -824,6 +866,17 @@ outcome is unknown is how a Tenant gets provisioned twice, and EAD-004 §6.6 req
 critical mutations to define duplicate protection at the business boundary rather than
 at the transport.
 
+### Who Reports an Outcome (1.18.0)
+
+`ADR-ORG-001 §5.11`, amended 2026-10-20. The provisioning system is a registered reporter workload:
+one workload client, with its own key and an owner, registered here for `provisioning`
+(`TDD-organization-control-001` §Reporters). Its token reaches `POST /v1/provisioning/realized`,
+`POST /v1/provisioning/failed` and `POST /v1/offboardings/{offboarding_id}/deprovisioning` and nothing
+else, needs no `X-Administrative-Reason`, and is recorded as privileged access under the authority
+`reporter`, reviewed through its owner. Until 1.18.0 the routes admitted provider authority only, which
+a machine could hold only as a person's token. A provider still reports on the system's behalf, as a
+person's act with the system's confirmation in the reason (`docs/runbooks/provisioning.md` C).
+
 ### Resolving an `unresolved` Request (1.15.0)
 
 The algorithm above ends "reconciliation queries the provisioning system and resolves it", and
@@ -857,8 +910,11 @@ Until 1.15.0 only `scripts/dev-wiring-proof.ps1` reported one, inline, for the T
 
 **Decision: an operator script, `scripts/dev-provisioning.ps1`, stands in for it.** It reports
 `realized` or `failed` (with a reason) for one Tenant, named by its identifier or by its correlation
-identifier, through the two routes the provisioning system calls, with the operator's provider token
-from the wiring state file. Its rules:
+identifier, through the two routes the provisioning system calls. From 1.18.0 it reports as the
+development provisioning reporter, a workload registered for `provisioning` with its own key, as
+production's system is (`ADR-ORG-001 §5.11`, amended 2026-10-20; `STD-GLB-009` rule 13, 1.10.0), and
+reads the Tenant first with the operator's provider token, because a reporter reaches its report routes
+alone. Both come from the wiring state file `scripts/dev-wire.ps1` writes. Its rules:
 
 - It reads the Tenant first, and refuses, sending nothing, unless the Tenant is `provisioning` and its
   latest provisioning request is `requested` or `unresolved`. A Tenant still `requested` is refused
@@ -894,8 +950,8 @@ should be run in an identical environment as the regular long-running processes 
 this repository and calls the deployed service as any provider does. It also keeps development like
 production where it matters: "The twelve-factor developer resists the urge to use different backing
 services between development and production" [R8]. The routes, the authentication, the correlation
-and the state checks a development Tenant passes through are production's; only the caller of two
-routes differs.
+and the state checks a development Tenant passes through are production's, and from 1.18.0 so is the
+caller's kind: a registered reporter workload with its own key, not a person standing in.
 
 | Option | Why not |
 | :-- | :-- |
@@ -1178,6 +1234,7 @@ three.
 | Follows | The Twelve-Factor App, XII Admin processes and X Dev/prod parity — the development server's provisioning stand-in is a script in this repository calling the real routes (1.15.0) |
 | Conforms to | STD-GLB-009 1.3.0 §Development Server Deployment — a procedure step is a script CI runs (1.15.0) |
 | Follows | The Twelve-Factor App, XII Admin processes and X Dev/prod parity — the deprovisioning report's stand-in, `scripts/dev-deprovisioning.ps1`, calls the real route (1.16.0) |
+| Conforms to | STD-GLB-001 1.7.0 and draft-ietf-httpapi-idempotency-key-header-07 §2.3 — completed keys are kept 7 days, then purged, and the window is published (1.18.0) |
 
 | # | Source |
 | :-- | :-- |
@@ -1189,3 +1246,6 @@ three.
 | R6 | PostgreSQL 17, *Row Security Policies*, <https://www.postgresql.org/docs/17/ddl-rowsecurity.html>, accessed 2026-10-09: "Superusers and roles with the BYPASSRLS attribute always bypass the row security system when accessing a table." |
 | R7 | The Twelve-Factor App, *XII. Admin processes*, <https://12factor.net/admin-processes>, accessed 2026-10-19: "One-off admin processes should be run in an identical environment as the regular long-running processes of the app." and "Admin code must ship with application code to avoid synchronization issues." |
 | R8 | The Twelve-Factor App, *X. Dev/prod parity*, <https://12factor.net/dev-prod-parity>, accessed 2026-10-19: "Keep development, staging, and production as similar as possible" and "The twelve-factor developer resists the urge to use different backing services between development and production" |
+| R9 | IETF HTTPAPI Working Group, *The Idempotency-Key HTTP Header Field*, draft-ietf-httpapi-idempotency-key-header-07, <https://www.ietf.org/archive/id/draft-ietf-httpapi-idempotency-key-header-07.txt>, accessed 2026-10-20. §2.3 Idempotency Key Validity and Expiry: "The resource MAY require time based idempotency keys to be able to purge or delete a key upon its expiry. The resource SHOULD define such expiration policy and publish it in the documentation." |
+| R10 | Stripe, *Idempotent requests*, <https://docs.stripe.com/api/idempotent_requests>, accessed 2026-10-20: "For API v1, you can remove keys from the system automatically after they’re at least 24 hours old. We generate a new request if a key is reused after the original is pruned." |
+| R11 | Adyen, *API idempotency*, §Key scope and validity time, <https://docs.adyen.com/development-resources/api-idempotency>, accessed 2026-10-20: "Idempotency keys are valid for a period of 7 to 14 days after first submission." |

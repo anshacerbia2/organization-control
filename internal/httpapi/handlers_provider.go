@@ -164,7 +164,10 @@ func (h *handlers) failProvisioning(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) provisioningOutcome(w http.ResponseWriter, r *http.Request,
 	apply func(*http.Request, tenant.Outcome) (tenant.Resolution, error)) {
-	if _, ok := requireProvider(w, r); !ok {
+	// The provisioning system's registered reporter workload, or a provider reporting for it
+	// (ADR-ORG-001 §5.11, amended 2026-10-20).
+	_, given, ok := requireProvisioningReport(w, r)
+	if !ok {
 		return
 	}
 	body, ok := decode[provisioningOutcomeRequest](w, r)
@@ -174,7 +177,7 @@ func (h *handlers) provisioningOutcome(w http.ResponseWriter, r *http.Request,
 	resolution, err := apply(r, tenant.Outcome{
 		CorrelationID: body.CorrelationID,
 		Detail:        body.Detail,
-		Reason:        reason(r),
+		Reason:        given,
 	})
 	if err != nil {
 		writeError(w, r, err)
@@ -641,7 +644,10 @@ type resolveObligationRequest struct {
 }
 
 func (h *handlers) resolveObligation(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireProvider(w, r); !ok {
+	// The obligation-owning domain's registered reporter alone (ADR-ORG-001 §5.11, amended
+	// 2026-10-20). Its domain comes from its record, so a domain in the body must be that one.
+	domain, ok := requireObligationReporter(w, r)
+	if !ok {
 		return
 	}
 	obligationID, ok := pathUUID(w, r, "obligation_id")
@@ -652,10 +658,15 @@ func (h *handlers) resolveObligation(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if named := strings.TrimSpace(body.Domain); named != "" && named != domain {
+		platform.Problem(w, r, platform.Forbidden, fmt.Sprintf(
+			"The body names domain %q, and the caller is registered to resolve %q's obligations", named, domain))
+		return
+	}
 	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (offboarding.Obligation, error) {
 		return h.services.Offboardings.Resolve(ctx, offboarding.Resolution{
 			ObligationID: obligationID,
-			Domain:       body.Domain,
+			Domain:       domain,
 			State:        offboarding.ObligationState(body.State),
 			Detail:       body.Detail,
 		})
@@ -668,7 +679,9 @@ type deprovisioningRequest struct {
 }
 
 func (h *handlers) recordDeprovisioning(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireProvider(w, r); !ok {
+	// The provisioning system's registered reporter workload, or a provider reporting for it
+	// (ADR-ORG-001 §5.11, amended 2026-10-20).
+	if _, _, ok := requireProvisioningReport(w, r); !ok {
 		return
 	}
 	offboardingID, ok := pathUUID(w, r, "offboarding_id")
@@ -696,6 +709,11 @@ type registerConsumerRequest struct {
 	ProjectionVersion     string  `json:"projection_version"`
 	MaxAcceptedAgeSeconds seconds `json:"max_accepted_age_seconds"`
 	StaleBehavior         string  `json:"stale_behavior"`
+
+	// ReconciliationIntervalSeconds is how often the consumer reconciles itself (ADR-ORG-001 §5.7,
+	// amended 2026-10-20). Optional: absent takes one day, so a registration written before the field
+	// existed still registers.
+	ReconciliationIntervalSeconds seconds `json:"reconciliation_interval_seconds,omitempty"`
 
 	// EventTypes is the subscription: the event types the consumer applies, each one the registry
 	// offers. Required (TDD-organization-control-002 §Consumer Registry).
@@ -729,6 +747,8 @@ func (h *handlers) registerConsumer(w http.ResponseWriter, r *http.Request) {
 			MaxAcceptedAge:    body.MaxAcceptedAgeSeconds.Duration(),
 			StaleBehavior:     projection.StaleBehavior(body.StaleBehavior),
 			EventTypes:        body.EventTypes,
+
+			ReconciliationInterval: body.ReconciliationIntervalSeconds.Duration(),
 		})
 	}, func(record projection.Consumer) consumerView { return viewConsumer(record, time.Now()) })
 }
@@ -1039,16 +1059,31 @@ func (h *handlers) frontier(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// reconcile compares a consumer's report with authority and publishes the repair. A registered
+// consumer runs it for its own consumer_id, on the interval it declared, and needs no reason
+// (ADR-ORG-001 §5.7, amended 2026-10-20); a provider runs it as the drift runbook's manual path, with
+// one.
 func (h *handlers) reconcile(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireProvider(w, r); !ok {
+	scope, own, ok := requireConsumerSelfOrProvider(w, r, "")
+	if !ok {
 		return
 	}
 	body, ok := decode[reconcileRequest](w, r)
 	if !ok {
 		return
 	}
+	consumer := body.ConsumerID
+	if scope.IsConsumer() {
+		// A consumer reconciles itself alone: the body names it or nobody.
+		if named := strings.TrimSpace(body.ConsumerID); named != "" && named != own {
+			platform.Problem(w, r, platform.Forbidden,
+				"The request names a different consumer than the token; a consumer may only act as itself")
+			return
+		}
+		consumer = own
+	}
 	result, err := h.services.Reconciler.Reconcile(r.Context(), projection.Report{
-		ConsumerID: body.ConsumerID,
+		ConsumerID: consumer,
 		Mark:       body.Mark,
 		Rows:       body.Rows,
 	})

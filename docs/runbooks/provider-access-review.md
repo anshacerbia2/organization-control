@@ -1,6 +1,6 @@
 # Runbook: provider-access review
 
-Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-08.
+Version 1.2.0. Owner: Core Platform Team. Last reviewed 2026-10-20.
 
 Provider authority crosses every Tenant. This runbook reviews who holds it, who used it, and why,
 and removes what is no longer needed. It has three forms: the weekly review of what each provider
@@ -21,9 +21,10 @@ access with `403`, and the database refuses one inserted directly. Two providers
   `organization-migrate -stage=maintenance` logs each Principal with an overdue access at WARN:
   `a provider's access has gone unreviewed for more than 7 days; ...`, with `principal_id`,
   `unreviewed`, `emergency`, `oldest_at` and `due_at`.
-- **Every 90 days: who holds it.** The period this service already uses for emergency grant
-  validation (TDD-organization-control-001 §Emergency Grant Validation). NIST leaves the frequency to
-  the organization [R1]; Microsoft validates emergency accounts "at least every 90 days" [R4].
+- **Every 90 days: who holds it.** ADR-ORG-002 §5.6 sets the period, citing CIS Safeguard 5.1, and
+  it is the one this service uses for emergency grant validation (TDD-organization-control-001
+  §Emergency Grant Validation). NIST leaves the frequency to the organization [R1]; Microsoft
+  validates emergency accounts "at least every 90 days" [R4].
 - **Each emergency use:** the service log line `a provider acted on an emergency grant` (WARN, with
   `principal_id`, `method`, `route`). Each one is reviewed [R4].
 - **Overdue validation:** the daily `organization-migrate -stage=maintenance` logs
@@ -93,12 +94,24 @@ All reads are provider reads with `X-Administrative-Reason`, and each writes an 
      -H "Authorization: Bearer $TOKEN" -H "X-Administrative-Reason: weekly provider-access review"
    ```
 
-   Each access: `access_id`, `actor_id`, `authority` (`emergency`, `activation`, `eligible` or
-   `consumer`), `activation_id`, `tenant_id` (the one Tenant it named, or null), `operation` (the
+   Each access: `access_id`, `actor_id`, `authority` (`emergency`, `activation`, `eligible`,
+   `consumer` or `reporter`), `activation_id`, `tenant_id` (the one Tenant it named, or null), `operation` (the
    method and route), `correlation_id`, `reason`, `occurred_at`. Follow `next` until it is null.
    Narrow with `authority=emergency`, `tenant_id=...` or `correlation_id=...` (a provider-mode window
    in the administrative experience carries one correlation). The row does not record the outcome:
-   join `correlation_id` to the request logs for the status.
+   join `correlation_id` to the request logs for the status. `consumer` and `reporter` rows are
+   workloads acting on what their records admit (ADR-ORG-001 §5.11): they are never due in this
+   review and a Tenant's view leaves them out. Each workload's owner reviews its rows, and a
+   registration no owner vouches for is retired (`POST /v1/projections/consumers/{id}/retire`,
+   `POST /v1/reporters/{id}/retire`).
+
+   A row records a Tenant only when the access named one. A list across Tenants, or a record
+   addressed by its own identifier such as an offboarding, has a null `tenant_id`. Read those rows by
+   `operation` and `correlation_id`.
+
+   The record keeps 7 years. The daily maintenance stage purges older rows, and older reviews, and
+   nothing purges a younger one, a retired Tenant's included (STD-GLB-007 1.1.0,
+   TDD-organization-control-001 §Privileged Access Review). A period older than that reads empty.
 
 6. **Record the review**, one per Principal and period:
 
@@ -169,15 +182,6 @@ All reads are provider reads with `X-Administrative-Reason`, and each writes an 
 
 - Suspected misuse: security lead, at once.
 - Unable to keep two emergency grants: the service owner. It is a lockout risk.
-
-## Gaps
-
-- The 90-day cadence of the grant review is set here. No design names one for it; the weekly review
-  of what was done is ADR-ORG-002 §5.6's.
-- A row records the Tenant only when the access named one: a list across Tenants, or a record
-  addressed by its own identifier such as an offboarding, records none. Read those by `operation`
-  and `correlation_id`.
-- The record is not purged. Until a retention standard names a period it grows without bound.
 
 ## References
 

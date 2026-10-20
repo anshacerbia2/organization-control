@@ -77,6 +77,9 @@ type Services struct {
 	// AccessReview reads the privileged-access record and records its review (ADR-ORG-002 §5.6).
 	AccessReview *authority.AccessReview
 
+	// Reporters registers, retires and lists the reporter workloads (ADR-ORG-001 §5.11).
+	Reporters *authority.Reporters
+
 	// Consumer serves a registered consumer acting as itself, as organization_consumer_rt. Nil only
 	// when consumer authority is not configured, in which case authentication admits no consumer
 	// caller for it to serve.
@@ -252,6 +255,10 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// A provider's read of one Membership's enforcement evidence, inside the Tenant the path names
 	// (TDD-organization-control-002 1.15.0 §Enforcement Evidence).
 	api.HandleFunc("GET /v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement", h.tenantMembershipEnforcement)
+	// A provider suspends or revokes one Membership inside the Tenant the path names, never restores
+	// or grants one (ADR-ORG-003 §5.6, TDD-organization-control-002 1.16.0).
+	api.HandleFunc("POST /v1/tenants/{tenant_id}/memberships/{membership_id}/suspend", command(h.providerSuspendMembership))
+	api.HandleFunc("POST /v1/tenants/{tenant_id}/memberships/{membership_id}/revoke", command(h.providerRevokeMembership))
 
 	// The provisioning correlation surface.
 	//
@@ -290,6 +297,13 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/provider-grants", command(h.grantProvider))
 	api.HandleFunc("POST /v1/provider-grants/{grant_id}/revoke", command(h.revokeProvider))
 	api.HandleFunc("GET /v1/provider-grants:emergency-validation", h.emergencyValidation)
+
+	// The reporter registry (ADR-ORG-001 §5.11, TDD-organization-control-001 1.27.0 §Reporters): the
+	// workload Principals admitted to the provisioning reports and to one domain's obligations.
+	api.HandleFunc("GET /v1/reporters", h.listReporters)
+	api.HandleFunc("POST /v1/reporters", command(h.registerReporter))
+	api.HandleFunc("GET /v1/reporters/{reporter_id}", h.getReporter)
+	api.HandleFunc("POST /v1/reporters/{reporter_id}/retire", command(h.retireReporter))
 
 	// The privileged-access record and its review (ADR-ORG-002 §5.6). Literal paths: the report and
 	// the reviews cannot collide with the list, and the Tenant's read is its own path.
@@ -397,6 +411,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the tenant administration is required")
 	case s.AccessReview == nil:
 		return errors.New("httpapi: the privileged-access review is required")
+	case s.Reporters == nil:
+		return errors.New("httpapi: the reporter registry is required")
 	case s.Consumer != nil && (s.Consumer.Access == nil || s.Consumer.Checks == nil || s.Consumer.Frontier == nil):
 		return errors.New("httpapi: the consumer services are incomplete")
 	}

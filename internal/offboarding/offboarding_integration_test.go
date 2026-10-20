@@ -931,6 +931,67 @@ func TestRetirementRechecksTheGatesAtTheMomentOfTheAct(t *testing.T) {
 	}
 }
 
+// TestRetirementLeavesTheTenantsPrivilegedAccessRecord is STD-GLB-007 1.1.0 compliance check 4, second
+// half: a Tenant's decommissioning leaves its audit records. Provider access to the Tenant, from today,
+// 6 years ago and 8 years ago, survives its retirement; only the maintenance stage purges a record, and
+// only one older than 7 years. There is no decommissioning purge yet, so this proves that retirement
+// deletes none, and fails the day one is added that does.
+func TestRetirementLeavesTheTenantsPrivilegedAccessRecord(t *testing.T) {
+	f := newFixture(t)
+	tenantID, _ := f.seed(t, 1)
+	for _, age := range []string{"0 seconds", "6 years", "8 years"} {
+		f.exec(t, `INSERT INTO audit.privileged_access
+		    (access_id, actor_id, correlation_id, reason, authority, tenant_id, operation, occurred_at)
+		    VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'offboarding suite', 'emergency', $1,
+		            'POST /v1/tenants/{tenant_id}/suspend', now() - $2::interval)`, tenantID.String(), age)
+	}
+	// The rows are audit records the database refuses to delete before they are 7 years old, so the
+	// cleanup turns triggers off for its own transaction, as the superuser this connection is.
+	t.Cleanup(func() {
+		if err := f.setup.InTx(context.Background(), func(ctx context.Context, tx fdb.Tx) error {
+			if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `DELETE FROM audit.privileged_access WHERE tenant_id = $1`, tenantID.String())
+			return err
+		}); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	})
+
+	record := f.begin(t, tenantID, false)
+	f.freezeAll(t, tenantID, 10)
+	if _, err := f.service.CompleteFreeze(f.providerCtx, record.OffboardingID); err != nil {
+		t.Fatalf("CompleteFreeze: %v", err)
+	}
+	if _, err := f.service.Release(f.providerCtx, record.OffboardingID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if err := f.service.RecordDeprovisioning(f.providerCtx, DeprovisioningOutcome{
+		OffboardingID: record.OffboardingID, State: "realized",
+	}); err != nil {
+		t.Fatalf("RecordDeprovisioning: %v", err)
+	}
+	_, version, _ := f.tenantRow(t, tenantID)
+	if _, err := f.service.Retire(f.providerCtx, record.OffboardingID, version); err != nil {
+		t.Fatalf("Retire: %v", err)
+	}
+	if status, _, _ := f.tenantRow(t, tenantID); status != string(tenant.StateRetired) {
+		t.Fatalf("tenant status = %s, want retired", status)
+	}
+
+	var kept int
+	if err := f.setup.InTx(context.Background(), func(ctx context.Context, tx fdb.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM audit.privileged_access WHERE tenant_id = $1`,
+			tenantID.String()).Scan(&kept)
+	}); err != nil {
+		t.Fatalf("counting the record: %v", err)
+	}
+	if kept != 3 {
+		t.Errorf("the retired Tenant keeps %d of its 3 privileged-access rows; decommissioning purges no audit record", kept)
+	}
+}
+
 // TestObligationsCanOnlyBeRaisedInTheObligationsStage. Raising during the freeze would let an
 // obligation exist against a Tenant whose Memberships are still active; raising after release would
 // ask a domain for something whose subject is already deprovisioned.

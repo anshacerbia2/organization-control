@@ -105,6 +105,7 @@ every other consumer uses; sharing a foundation grants no privileged interface.
 | `internal/projection/` | Snapshots, consumer registry, reconciliation |
 | `tools/grantcheck/` | Derives which role runs which statement and has PostgreSQL judge the grants; `make grantcheck` |
 | `docs/designs/` | Technical Design Documents |
+| `api/` | `openapi.yaml`, the published HTTP contract (ADR-GLB-010 §5.1), and its lint configuration |
 
 Outbox, dispatcher, event envelope, deduplication, idempotency, problem details, and
 telemetry are imported from `foundation-platform` rather than reimplemented here.
@@ -185,7 +186,7 @@ same migration role:
 go run ./cmd/organization-migrate -stage=maintenance
 ```
 
-It does six things, each in its own transaction and each timed from the database clock:
+It does eight things, each in its own transaction and each timed from the database clock:
 
 - creates the outbox partitions for today and the next seven days;
 - drops published partitions older than 30 days;
@@ -197,6 +198,13 @@ It does six things, each in its own transaction and each timed from the database
   items (`-batch-preview-retention`; TDD-organization-control-002 §Membership Batches). The two
   tables are under `FORCE ROW LEVEL SECURITY`, so the migration role reaches only expired previews,
   through the purge policies `rls.sql` gives it;
+- purges idempotency keys completed more than 7 days ago (`-idempotency-retention`, at least 24h).
+  An uncompleted key is never purged, and a retry after the window is a new command
+  (TDD-organization-control-003 §Completed Keys Are Kept 7 Days, Then Purged);
+- purges audit records older than 7 years: `audit.privileged_access`, `audit.privileged_access_review`
+  and `organization.emergency_grant_use`. The period is STD-GLB-007's and has no flag. A trigger on
+  each table refuses the delete of any younger record, and every `TRUNCATE`, for every role
+  (TDD-organization-control-001 §Privileged Access Review);
 - counts unresolved dead letters older than 24 hours.
 
 It exits 3 when that count is not zero, after the rest of its work is done, so the scheduler
@@ -260,6 +268,7 @@ names, and `sub` is not read.
 | Tenant administrator | `subject_type` `human`, `tenant_id`, `acr` `aal2` or higher, `auth_time` | in that Tenant: an active Membership, the Tenant active, and a tenant administration grant (ADR-ORG-003) |
 | Provider | `subject_type` `human`, `acr`, `auth_time`, no `tenant_id` | a provider grant for the `principal_id` |
 | Projection consumer | `subject_type` `workload`, `workload_owner`, no `tenant_id` | an active consumer registered with the `principal_id` |
+| Reporter (2026-10-20) | `subject_type` `workload`, `workload_owner`, no `tenant_id`, on a report route | an active reporter registered with the `principal_id` for what the route reports: `provisioning` on the three provisioning reports, `obligation:<domain>` on that domain's `/resolve` (ADR-ORG-001 §5.11, `GET /v1/reporters`) |
 | Self | `subject_type` `human`, with or without `tenant_id`, on `GET /v1/principals/{own principal_id}/contexts` (ADR-ORG-005) or `POST /v1/invitations/accept` (ADR-ORG-007) | none: the route reaches the caller's own rows, and acceptance creates the caller's own Membership |
 
 A revoked grant, a retired consumer, a revoked Membership or a suspended Tenant stops at the next
@@ -556,8 +565,8 @@ routes cover the path:
 | :-- | :-- | :-- |
 | `POST /v1/tenants` | operator | Tenant in `requested`, a provisioning request, and `tenant.lifecycle.requested` — one transaction |
 | `POST /v1/tenants/{id}/provisioning` | operator | `requested → provisioning`, or a retry from `failed` with a new request row |
-| `POST /v1/provisioning/realized` | provisioning system | Marks the request `realized`. Does **not** activate |
-| `POST /v1/provisioning/failed` | provisioning system | Marks the request `failed` and moves the Tenant to `failed` |
+| `POST /v1/provisioning/realized` | provisioning system, as its registered reporter workload; or a provider on its behalf | Marks the request `realized`. Does **not** activate |
+| `POST /v1/provisioning/failed` | provisioning system, as above | Marks the request `failed` and moves the Tenant to `failed` |
 | `POST /v1/provisioning/sweep-unresolved` | operator; the same sweep runs in-process every reconcile interval | Ages unanswered requests to `unresolved`. Never retries |
 | `POST /v1/tenants/{id}/activate` | operator | `provisioning → active`, once realized and the sponsor is active |
 
@@ -594,7 +603,8 @@ still `requested` whose request timed out can still be dispatched: that records 
 (TDD-organization-control-003 1.15.0 §Resolving an `unresolved` Request).
 
 **On a development server the operator stands in for the provisioning system**, with
-`scripts/dev-provisioning.ps1` (`-Realized`, or `-Failed -Reason`), which calls the same two routes and
+`scripts/dev-provisioning.ps1` (`-Realized`, or `-Failed -Reason`), which calls the same two routes as
+the development provisioning reporter workload (`scripts/dev-wire.ps1` step 6b) and
 refuses a Tenant not in `provisioning` or a request that already has an outcome
 (TDD-organization-control-003 1.15.0 §The Provisioning System on a Development Server;
 `deploy/dev/README.md` §Provisioning a Tenant on the development server). `deploy-dev` runs it on every
@@ -605,8 +615,8 @@ Server). `scripts/dev-deprovisioning.ps1` (`-Realized`, or `-Failed -Reason`) re
 offboarding's deprovisioning through `POST /v1/offboardings/{id}/deprovisioning`, and refuses one not at
 `release` or whose latest deprovisioning already has an outcome. `scripts/dev-obligation.ps1`
 (`-Domain <domain>` and `-Completed`, `-Waived -Reason` or `-Failed -Reason`) resolves one obligation as
-the domain it was raised against, through `POST /v1/obligations/{id}/resolve`, and refuses another
-domain's or a final one. Neither retires, releases or resends, and Organization Experience offers no
+the domain it was raised against, through `POST /v1/obligations/{id}/resolve`, as that domain's
+development reporter, and refuses another domain's or a final one. No provider resolves an obligation. Neither retires, releases or resends, and Organization Experience offers no
 control for an obligation (TDD-organization-experience-003 §As Served). `deploy-dev` runs both on every
 change (`deploy/dev/README.md` §Offboarding a Tenant on the development server).
 
@@ -746,10 +756,12 @@ narrower than it first looks: reconciliation happens at deploy time, and `rls.sq
 converges at deploy time. What a declarative tool would add is a **diff** — the ability to review
 a policy change as a schema change and to detect drift without applying anything.
 
-Closing that half requires Atlas Pro, which also supplies `atlas migrate lint` — the destructive
-gate `ADR-GLB-004` mandates and that CI currently stands in for with a text-level grep. One
-purchase clears both, and both are recorded as debt in [ROADMAP.md](ROADMAP.md) rather than
-presented as equivalent to the mandated mechanism.
+Closing that half requires Atlas Pro, which models policies in HCL only for its users
+(`ADR-GLB-002` §6). It is recorded as debt in [ROADMAP.md](ROADMAP.md), "RLS outside HCL (Pro
+only)". The destructive gate of `ADR-GLB-004` §5.1 is not part of it: CI meets that gate without
+Atlas Pro, with `atlas migrate validate`, squawk over the new migrations (`.squawk.toml`) and the
+synchronisation check, and "It is not a waiver". Atlas Pro would add `atlas migrate lint`, the
+preferred upgrade.
 
 ### The safety gap is closed without any vendor
 

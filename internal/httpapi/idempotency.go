@@ -134,8 +134,21 @@ func Idempotent(store ClaimCompleter, telemetry *observability.Telemetry) (Middl
 			if !json.Valid(captured.body) {
 				return
 			}
+			// A secret the command answered once is withheld here too (db.WithholdFromRecord), so a
+			// response completed after the handler is recorded as one completed with the effect is.
+			// A body that lacks a withheld member is not recorded at all: the key stays claimed and a
+			// retry is refused as in progress, the safe direction.
+			stored, err := db.StoredResponse(ctx, captured.body)
+			if err != nil {
+				if telemetry != nil {
+					telemetry.Logger(r.Context()).WarnContext(r.Context(),
+						"the idempotency response was not recorded: a withheld member is missing",
+						slog.String("error", err.Error()), slog.Int("status", captured.status))
+				}
+				return
+			}
 
-			if err := store.Complete(ctx, claim, captured.status, captured.body); err != nil {
+			if err := store.Complete(ctx, claim, captured.status, stored); err != nil {
 				// Logged, never surfaced. The mutation has committed and the caller has its
 				// response; turning a bookkeeping failure into an error would tell the client the
 				// work did not happen. The cost is that later retries of this key are refused as in
@@ -230,8 +243,13 @@ func (c *capturingWriter) Write(p []byte) (int, error) {
 // The body is rendered once. When the service recorded it, the same bytes are written to the caller,
 // so what a retry replays is what the first caller was sent; otherwise, for a request without a key,
 // it is rendered here as respond does.
+//
+// withheld names members, as JSON Pointers, that the caller is sent live and the record never holds:
+// a secret the command answers once (STD-GLB-001 1.7.0). A replay of the key answers the same result
+// without them. The issue command's "/token" is the one today (ADR-ORG-007 §5.5).
 func answer[T, V any](w http.ResponseWriter, r *http.Request, status int,
-	call func(stdcontext.Context) (T, error), view func(T) V) {
+	call func(stdcontext.Context) (T, error), view func(T) V, withheld ...string) {
+	db.WithholdFromRecord(r.Context(), withheld...)
 	var recorded json.RawMessage
 	ctx := db.WithResponder(r.Context(), func(result any) (int, json.RawMessage, bool) {
 		value, ok := result.(T)

@@ -175,7 +175,7 @@ LIMIT $5`
 const recordReviewStatement = `WITH counted AS (
     SELECT count(*) AS accesses, count(*) FILTER (WHERE authority = 'emergency') AS emergency
     FROM audit.privileged_access
-    WHERE actor_id = $2 AND authority <> 'consumer'
+    WHERE actor_id = $2 AND authority NOT IN ('consumer', 'reporter')
       AND occurred_at >= $3::timestamptz AND occurred_at < $4::timestamptz),
 inserted AS (
     INSERT INTO audit.privileged_access_review
@@ -200,11 +200,12 @@ ORDER BY review_id
 LIMIT $4`
 
 // unreviewedStatement is each Principal's provider access that no review of it covers, oldest
-// first. Consumer rows are never due: a consumer is a workload, reviewed through its owner.
+// first. Consumer and reporter rows are never due: each is a workload, reviewed through its owner
+// (ADR-ORG-001 §5.11).
 const unreviewedStatement = `SELECT a.actor_id::text, count(*), count(*) FILTER (WHERE a.authority = 'emergency'),
        min(a.occurred_at)
 FROM audit.privileged_access a
-WHERE a.authority <> 'consumer'
+WHERE a.authority NOT IN ('consumer', 'reporter')
   AND NOT EXISTS (
         SELECT 1 FROM audit.privileged_access_review r
         WHERE r.actor_id = a.actor_id
@@ -232,8 +233,9 @@ func (a *AccessReview) List(ctx context.Context, query AccessQuery, reason strin
 	if err != nil {
 		return AccessPage{}, fmt.Errorf("%w: %w", ErrAccessQueryInvalid, err)
 	}
-	if query.Authority != "" && !providerAuthorities[query.Authority] && query.Authority != db.AuthorityConsumer {
-		return AccessPage{}, fmt.Errorf("%w: authority must be emergency, activation, eligible or consumer",
+	if query.Authority != "" && !providerAuthorities[query.Authority] && query.Authority != db.AuthorityConsumer &&
+		query.Authority != db.AuthorityReporter {
+		return AccessPage{}, fmt.Errorf("%w: authority must be emergency, activation, eligible, consumer or reporter",
 			ErrAccessQueryInvalid)
 	}
 	if err := checkWindow(query.From, query.To); err != nil {

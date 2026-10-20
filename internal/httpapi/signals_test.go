@@ -114,6 +114,11 @@ func TestARefusedAcceptanceIsCountedAndAnswersOneDetail(t *testing.T) {
 	if recorder.Code != 404 || !strings.Contains(recorder.Body.String(), `"detail":"invitation: the invitation cannot be accepted"`) {
 		t.Errorf("a refusal answered %d %s", recorder.Code, recorder.Body.String())
 	}
+	// Its own problem type, not not-found: a client branches on the type (STD-GLB-001 1.7.0,
+	// ADR-ORG-007 §5.4), and a 404 is what any route answers for a record it does not hold.
+	if !strings.Contains(recorder.Body.String(), `"type":"https://problems.scnehaux.com/invitation-not-acceptable"`) {
+		t.Errorf("a refusal is not typed invitation-not-acceptable: %s", recorder.Body.String())
+	}
 
 	unavailable := acceptanceError(request, caller, fmt.Errorf("%w: %w", invitation.ErrIdentityUnavailable,
 		errors.New("Post http://identity-control:8090/v1/principals/x/identifiers:match: connection refused")))

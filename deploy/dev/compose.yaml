@@ -93,6 +93,22 @@ services:
         condition: service_healthy
     networks: [internal]
 
+  # The restore bump (ADR-ORG-003 §5.5): after a restore and before the service serves, every Tenant and
+  # provider grant version gains 10^9, the withdrawn ones are published, and every consumer is asked to
+  # reconcile. deploy/dev/restore.sh runs it; never run it on a database that was not just restored.
+  restore-bump:
+    image: scnehaux-organization-control-dev-migrate
+    # The image the migrate service builds; never pulled from a registry.
+    pull_policy: never
+    profiles: ["restore-bump"]
+    entrypoint: ["organization-migrate", "-stage=restore-bump"]
+    environment:
+      ORGANIZATION_MIGRATION_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/organization_control?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
   organization-control:
     build:
       context: ../..

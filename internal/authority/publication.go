@@ -133,10 +133,18 @@ func publish(ctx context.Context, tx db.Tx, grantID id.UUID, eventType event.Typ
 		return nil
 	}
 
-	state := GrantState{GrantID: grantID, GrantStatus: GrantActive}
-	if err := tx.QueryRow(ctx, bumpVersionStatement, grantID.String()).Scan(&state.GrantVersion); err != nil {
+	var version int64
+	if err := tx.QueryRow(ctx, bumpVersionStatement, grantID.String()).Scan(&version); err != nil {
 		return fmt.Errorf("authority: advancing the version of grant %s: %w", grantID, err)
 	}
+	_, err := publishAt(ctx, tx, grantID, eventType, version)
+	return err
+}
+
+// publishAt appends the grant's state now, at version, as eventType, and records the event's
+// version. It reports whether the grant was revoked.
+func publishAt(ctx context.Context, tx db.Tx, grantID id.UUID, eventType event.Type, version int64) (bool, error) {
+	state := GrantState{GrantID: grantID, GrantStatus: GrantActive, GrantVersion: version}
 	var (
 		principal, activationID string
 		revoked                 bool
@@ -144,11 +152,11 @@ func publish(ctx context.Context, tx db.Tx, grantID id.UUID, eventType event.Typ
 	)
 	if err := tx.QueryRow(ctx, grantStateStatement, grantID.String()).Scan(
 		&principal, &state.Scope, &state.Kind, &revoked, &activationID, &endsAt); err != nil {
-		return fmt.Errorf("authority: reading the state of grant %s: %w", grantID, err)
+		return false, fmt.Errorf("authority: reading the state of grant %s: %w", grantID, err)
 	}
 	parsed, err := id.Parse(principal)
 	if err != nil {
-		return fmt.Errorf("authority: grant %s names principal_id %q: %w", grantID, principal, err)
+		return false, fmt.Errorf("authority: grant %s names principal_id %q: %w", grantID, principal, err)
 	}
 	state.PrincipalID = parsed
 	if revoked {
@@ -157,25 +165,84 @@ func publish(ctx context.Context, tx db.Tx, grantID id.UUID, eventType event.Typ
 	if activationID != "" && endsAt != nil {
 		activation, err := id.Parse(activationID)
 		if err != nil {
-			return fmt.Errorf("authority: grant %s has activation %q: %w", grantID, activationID, err)
+			return false, fmt.Errorf("authority: grant %s has activation %q: %w", grantID, activationID, err)
 		}
 		state.Activation = &ActivationState{ActivationID: activation, EndsAt: endsAt.UTC()}
 	}
 
 	envelope, err := event.New(system.Source, eventType, time.Now().UTC(), state)
 	if err != nil {
-		return fmt.Errorf("authority: building the %s event: %w", eventType, err)
+		return false, fmt.Errorf("authority: building the %s event: %w", eventType, err)
 	}
 	var opts []outbox.Option
 	if eventType == EventEnded || eventType == EventRevoked {
 		opts = append(opts, outbox.Priority())
 	}
 	if err := outbox.Append(ctx, tx, grantID, envelope, opts...); err != nil {
-		return fmt.Errorf("authority: appending the %s event: %w", eventType, err)
+		return false, fmt.Errorf("authority: appending the %s event: %w", eventType, err)
 	}
 	if _, err := tx.Exec(ctx, recordGrantEventStatement, envelope.ID.String(), grantID.String(),
 		state.GrantVersion, string(eventType)); err != nil {
-		return fmt.Errorf("authority: recording the %s event's version: %w", eventType, err)
+		return false, fmt.Errorf("authority: recording the %s event's version: %w", eventType, err)
 	}
-	return nil
+	return revoked, nil
+}
+
+// withdrawnGrantsStatement reads, after a restore, the published-scope grants that confer nothing
+// now: revoked ones, and eligible ones with no approved activation in force. An emergency grant, and
+// an eligible one with an activation in force, confers authority, and is not published: a restore
+// never widens access (ADR-ORG-003 §5.5).
+const withdrawnGrantsStatement = `SELECT g.grant_id::text, g.grant_version, g.revoked_at IS NOT NULL
+  FROM organization.provider_grant g
+ WHERE g.scope = ANY ($1::text[])
+   AND (g.revoked_at IS NOT NULL
+        OR (g.kind = 'eligible' AND NOT EXISTS (
+              SELECT 1 FROM organization.provider_activation a
+               WHERE a.grant_id = g.grant_id
+                 AND a.decision = 'approved' AND a.ended_at IS NULL AND now() < a.ends_at)))
+ ORDER BY g.grant_id`
+
+// PublishWithdrawnGrants appends, inside tx, the state of each published-scope grant that confers
+// nothing now, at the version it holds after a restore's margin (ADR-ORG-003 §5.5): revoked, or
+// ended. It returns how many it published. tx is the restore's own connection.
+func PublishWithdrawnGrants(ctx context.Context, tx db.Tx) (int, error) {
+	rows, err := tx.Query(ctx, withdrawnGrantsStatement, PublishedScopes)
+	if err != nil {
+		return 0, fmt.Errorf("authority: reading the withdrawn grants: %w", err)
+	}
+	type withdrawn struct {
+		grantID id.UUID
+		version int64
+		revoked bool
+	}
+	var grants []withdrawn
+	for rows.Next() {
+		var (
+			raw string
+			w   withdrawn
+		)
+		if err := rows.Scan(&raw, &w.version, &w.revoked); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("authority: reading a withdrawn grant: %w", err)
+		}
+		if w.grantID, err = id.Parse(raw); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("authority: stored grant %q: %w", raw, err)
+		}
+		grants = append(grants, w)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("authority: reading the withdrawn grants: %w", err)
+	}
+	for _, w := range grants {
+		eventType := EventEnded
+		if w.revoked {
+			eventType = EventRevoked
+		}
+		if _, err := publishAt(ctx, tx, w.grantID, eventType, w.version); err != nil {
+			return 0, err
+		}
+	}
+	return len(grants), nil
 }

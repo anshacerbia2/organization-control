@@ -1,0 +1,5182 @@
+openapi: 3.1.0
+info:
+  title: Organization Control API
+  version: 1.0.0
+  summary: The authority for Organizations, Tenants, Workspaces, Memberships and provider authority (SAD-004).
+  description: |
+    The HTTP contract of organization-control, published as a versioned artifact under ADR-GLB-010
+    §5.1: "Each served API SHALL publish its specification (OpenAPI for HTTP) as a versioned
+    artifact". It is hand-maintained beside `internal/httpapi/routes.go`, and
+    `internal/httpapi/openapi_test.go` fails the build when a route is registered without an operation
+    here, or an operation names a route that is not registered.
+
+    **Versioning.** `info.version` is this document's version, bumped in the same commit as the code
+    it describes, under ADR-GLB-006's compatibility rules: the major version for a change that breaks
+    a client (a route, field, value or status removed or renamed, or a field becoming required), the
+    minor version for an addition (a route, an optional field, a new value of an open set), and the
+    patch version for a correction of the description alone. The repository commit pins it for a
+    consumer.
+
+    **Mux patterns.** Every operation names the Go `net/http` mux pattern that serves it in
+    `x-mux-pattern`, exactly as `routes.go` writes it. Here each pattern is its own path.
+
+    **Route classes** (`x-route-class`, TDD-organization-control-001 §Caller Authority). Who a caller
+    is comes from the token and this service's own records, read for each request; never from a path,
+    query or body.
+    - `probe`: no authentication.
+    - `anonymous`: no authentication; the one route is the invitation lookup, which reads nothing.
+    - `tenant`: a Tenant administrator. A person's token with `tenant_id`, `acr` `aal2` or higher and
+      `auth_time`, whose Principal holds an active Membership in that active Tenant and a tenant
+      administration grant (ADR-ORG-003 §5.3). The Tenant is the token's; no path names it. Anyone
+      else is answered `403`. While a provider pauses Tenant administration, a Tenant administrator's
+      command is answered `503`; reads continue.
+    - `provider`: provider authority in force: an emergency grant, or an approved activation of an
+      eligible grant that has not ended (ADR-ORG-001 §5.11, ADR-ORG-002). `X-Administrative-Reason`
+      is required, and the access is recorded with it. A Tenant administrator, a consumer, a reporter
+      and an eligible holder with nothing in force are answered `403`.
+    - `eligible`: the activation routes. A provider grant holder with nothing in force, or a provider
+      in force; `X-Administrative-Reason` is required. An eligible holder reaches these routes and no
+      other.
+    - `consumer-or-provider`: a registered projection consumer acting as itself (its workload token's
+      principal_id is the consumer's; no reason header), or a provider with a reason. A consumer that
+      names another consumer is answered `403`.
+    - `self`: a person acting for themselves alone, with no record read: `GET
+      /v1/principals/{principal_id}/contexts` for the caller's own principal_id (a provider with a
+      reason reads anyone's), and `POST /v1/invitations/accept` for any human token (ADR-ORG-005 §5.1,
+      ADR-ORG-007 §5.1).
+    - `provider-or-reporter:provisioning`: a registered reporter workload for `provisioning`
+      (subject_type `workload`; `X-Administrative-Reason` optional), or a provider (reason required)
+      reporting on the system's behalf.
+    - `reporter:obligation`: a registered reporter workload for `obligation:<domain>`, and only for an
+      obligation raised against that domain; the body's `domain` must be the reporter's. Anyone else,
+      a provider included, is answered `403`.
+
+    **Commands** (STD-GLB-001 §Commands Require an Idempotency-Key, TDD-organization-control-003
+    §The Idempotency-Key Is Required on Commands). Every POST is classified in
+    `internal/httpapi/commands.go`: a command without an `Idempotency-Key` is answered `400`; a
+    key-optional route honours one that is sent. A retry with the same key, method, path and body
+    answers the first answer, with `Idempotent-Replay: true`; the same key with a different request
+    is `409` `idempotency-key-conflict`, and one still running is `409` `request-in-progress`. A
+    refusal is not recorded, so a corrected retry with the same key runs. A key on a GET is answered
+    `400`. Completed keys are kept 7 days and then purged; a retry after that runs as a new command.
+
+    **Reasons.** `X-Administrative-Reason` must be visible US-ASCII (RFC 9110 §5.5); other octets are
+    answered `400` on every route. It is cut at 1000 characters.
+
+    **Lists** take `after`, the last identifier of the previous page, and `limit`, 1 to 100 (50 when
+    absent), and answer `next`, null on the last page (STD-GLB-001 §Pagination). An unknown or
+    repeated query parameter is answered `400`.
+
+    **Bodies** are one JSON document of at most 64 KiB. An unknown field is answered `400`.
+
+    **Errors** are RFC 9457 problem details from foundation-platform's closed registry. A client
+    branches on `type`, never on `detail`.
+  contact:
+    name: Core Platform Team
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Scnehaux-Proprietary
+servers:
+  - url: http://127.0.0.1:8099
+    description: The development loopback port `make run` serves on (README.md).
+security:
+  - bearer: []
+tags:
+  - name: probes
+    description: "Liveness and readiness, unauthenticated."
+  - name: memberships
+    description: "A Tenant's Memberships (TDD-organization-control-002)."
+  - name: membership-batches
+    description: "Bulk Membership actions, previewed and then executed (ADR-ORG-004)."
+  - name: workspaces
+    description: "A Tenant's Workspaces."
+  - name: invitations
+    description: "Invitations, their lookup and their acceptance (TDD-organization-control-004, ADR-ORG-007)."
+  - name: organizations
+    description: "The Organization registry."
+  - name: tenants
+    description: "Tenant lifecycle (TDD-organization-control-003)."
+  - name: tenant-administrators
+    description: "Who administers a Tenant (ADR-ORG-003)."
+  - name: provisioning
+    description: "The provisioning correlation surface (TDD-organization-control-003)."
+  - name: offboardings
+    description: "Tenant offboarding and its obligations (TDD-organization-control-004)."
+  - name: provider-grants
+    description: "Provider authority grants (ADR-ORG-001 §5.11, ADR-ORG-002 §5.2)."
+  - name: provider-activations
+    description: "Provider activations of eligible grants (ADR-ORG-002)."
+  - name: privileged-access
+    description: "The privileged-access record and its review (ADR-ORG-002 §5.6)."
+  - name: projections
+    description: "The consumer registry, snapshots, the frontier and reconciliation (TDD-organization-control-002)."
+  - name: dead-letters
+    description: "Dead-lettered deliveries: replay, resolution and waiver (TDD-organization-control-005)."
+  - name: contexts
+    description: "Operating contexts and the authoritative fresh check."
+  - name: recovery
+    description: "Recovery after a restore to an older point (TDD-organization-control-001, -002)."
+  - name: reporters
+    description: "Registered reporter workloads: the provisioning system and the domains owning offboarding obligations."
+paths:
+  "/healthz":
+    get:
+      operationId: liveness
+      summary: Liveness. Touches no dependency.
+      tags: [probes]
+      x-route-class: probe
+      x-mux-pattern: "GET /healthz"
+      security: []
+      responses:
+        "200":
+          description: The process serves.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: "ok\n"
+  "/readyz":
+    get:
+      operationId: readiness
+      summary: Readiness. Answers whether the control database is reachable.
+      tags: [probes]
+      x-route-class: probe
+      x-mux-pattern: "GET /readyz"
+      security: []
+      responses:
+        "200":
+          description: The replica can serve.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: "ready\n"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/memberships":
+    get:
+      operationId: listMemberships
+      summary: List the Tenant's Memberships.
+      tags: [memberships]
+      x-route-class: tenant
+      x-mux-pattern: "GET /v1/memberships"
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/MembershipStatus"
+        - name: workspace_id
+          in: query
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: principal_id
+          in: query
+          schema:
+            $ref: "#/components/schemas/UUID"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [memberships, next]
+                properties:
+                  memberships:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Membership"
+                  next:
+                    $ref: "#/components/schemas/Next"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: grantMembership
+      summary: Grant a Membership in the Tenant.
+      tags: [memberships]
+      x-route-class: tenant
+      x-mux-pattern: "POST /v1/memberships"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [principal_id, subject_type, provenance, valid_from]
+              properties:
+                principal_id:
+                  $ref: "#/components/schemas/UUID"
+                workspace_id:
+                  $ref: "#/components/schemas/UUID"
+                subject_type:
+                  $ref: "#/components/schemas/SubjectType"
+                provenance:
+                  type: string
+                  minLength: 1
+                  description: How the Membership came to exist (PAD-PLT-002 §3.2).
+                valid_from:
+                  $ref: "#/components/schemas/Timestamp"
+                valid_until:
+                  $ref: "#/components/schemas/Timestamp"
+      responses:
+        "201":
+          $ref: "#/components/responses/MembershipResultAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/memberships/{membership_id}":
+    get:
+      operationId: getMembership
+      summary: Read one Membership.
+      tags: [memberships]
+      x-route-class: tenant
+      x-mux-pattern: "GET /v1/memberships/{membership_id}"
+      parameters:
+        - $ref: "#/components/parameters/MembershipID"
+      responses:
+        "200":
+          description: The Membership.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Membership"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/memberships/{membership_id}/suspend":
+    post:
+      operationId: suspendMembership
+      summary: Suspend a Membership.
+      description: The reason is recorded when sent.
+      tags: [memberships]
+      x-route-class: tenant
+      x-mux-pattern: "POST /v1/memberships/{membership_id}/suspend"
+      parameters:
+        - $ref: "#/components/parameters/MembershipID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/MembershipResultAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/memberships/{membership_id}/restore":
+    post:
+      operationId: restoreMembership
+      summary: Restore a suspended Membership.
+      description: The reason is recorded when sent.
+      tags: [memberships]
+      x-route-class: tenant
+      x-mux-pattern: "POST /v1/memberships/{membership_id}/restore"
+      parameters:
+        - $ref: "#/components/parameters/MembershipID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/MembershipResultAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/memberships/{membership_id}/revoke":
+    post:
+      operationId: revokeMembership
+      summary: Revoke a Membership. Irreversible, so a reason is required.
+      tags: [memberships]
+      x-route-class: tenant
+      x-mux-pattern: "POST /v1/memberships/{membership_id}/revoke"
+      parameters:
+        - $ref: "#/components/parameters/MembershipID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/MembershipResultAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/memberships/{membership_id}/enforcement":
+    get:
+      operationId: getMembershipEnforcement
+      summary: The enforcement evidence for a Membership's latest transition (TDD-organization-control-002).
+      tags: [memberships]
+      x-route-class: tenant
+      x-mux-pattern: "GET /v1/memberships/{membership_id}/enforcement"
+      parameters:
+        - $ref: "#/components/parameters/MembershipID"
+      responses:
+        "200":
+          $ref: "#/components/responses/EnforcementAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/membership-batches":
+    post:
+      operationId: previewMembershipBatch
+      summary: Preview a bulk action on Memberships (ADR-ORG-004 §5.1).
+      description: A revocation batch requires X-Administrative-Reason; the reason is recorded for the others when sent.
+      tags: [membership-batches]
+      x-route-class: tenant
+      x-mux-pattern: "POST /v1/membership-batches"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action, membership_ids]
+              properties:
+                action:
+                  type: string
+                  enum: [suspend, restore, revoke]
+                membership_ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    $ref: "#/components/schemas/UUID"
+                continues:
+                  $ref: "#/components/schemas/UUID"
+      responses:
+        "201":
+          $ref: "#/components/responses/BatchAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/membership-batches/{batch_id}":
+    get:
+      operationId: getMembershipBatch
+      summary: Read a batch and its items.
+      tags: [membership-batches]
+      x-route-class: tenant
+      x-mux-pattern: "GET /v1/membership-batches/{batch_id}"
+      parameters:
+        - $ref: "#/components/parameters/BatchID"
+      responses:
+        "200":
+          $ref: "#/components/responses/BatchAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/membership-batches/{batch_id}/execute":
+    post:
+      operationId: executeMembershipBatch
+      summary: Execute a previewed batch, or resume one left executing.
+      description: The body is optional; absent, every item is attempted. 200 whatever the items' outcomes, which the body carries one by one.
+      tags: [membership-batches]
+      x-route-class: tenant
+      x-mux-pattern: "POST /v1/membership-batches/{batch_id}/execute"
+      parameters:
+        - $ref: "#/components/parameters/BatchID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                fail_on_errors:
+                  type: [integer, "null"]
+                  minimum: 0
+                  description: Stop attempting items once this many have failed; null or absent attempts every item.
+      responses:
+        "200":
+          $ref: "#/components/responses/BatchAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/workspaces":
+    get:
+      operationId: listWorkspaces
+      summary: List the Tenant's Workspaces.
+      tags: [workspaces]
+      x-route-class: tenant
+      x-mux-pattern: "GET /v1/workspaces"
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/WorkspaceStatus"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workspaces, next]
+                properties:
+                  workspaces:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Workspace"
+                  next:
+                    $ref: "#/components/schemas/Next"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createWorkspace
+      summary: Create a Workspace in the Tenant.
+      tags: [workspaces]
+      x-route-class: tenant
+      x-mux-pattern: "POST /v1/workspaces"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [display_name, type]
+              properties:
+                display_name:
+                  type: string
+                type:
+                  type: string
+      responses:
+        "201":
+          $ref: "#/components/responses/WorkspaceAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/workspaces/{workspace_id}":
+    get:
+      operationId: getWorkspace
+      summary: Read one Workspace.
+      tags: [workspaces]
+      x-route-class: tenant
+      x-mux-pattern: "GET /v1/workspaces/{workspace_id}"
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceID"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkspaceAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/workspaces/{workspace_id}/archive":
+    post:
+      operationId: archiveWorkspace
+      summary: Archive a Workspace.
+      tags: [workspaces]
+      x-route-class: tenant
+      x-mux-pattern: "POST /v1/workspaces/{workspace_id}/archive"
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkspaceAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/workspaces/{workspace_id}/restore":
+    post:
+      operationId: restoreWorkspace
+      summary: Restore an archived Workspace.
+      tags: [workspaces]
+      x-route-class: tenant
+      x-mux-pattern: "POST /v1/workspaces/{workspace_id}/restore"
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkspaceAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/workspaces/{workspace_id}/retire":
+    post:
+      operationId: retireWorkspace
+      summary: Retire a Workspace. Refused 412 while Memberships are present.
+      tags: [workspaces]
+      x-route-class: tenant
+      x-mux-pattern: "POST /v1/workspaces/{workspace_id}/retire"
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkspaceAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/invitations":
+    get:
+      operationId: listInvitations
+      summary: List the Tenant's invitations. No item carries the invited address or its hash.
+      tags: [invitations]
+      x-route-class: tenant
+      x-mux-pattern: "GET /v1/invitations"
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+        - name: state
+          in: query
+          schema:
+            $ref: "#/components/schemas/InvitationState"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [invitations, next]
+                properties:
+                  invitations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Invitation"
+                  next:
+                    $ref: "#/components/schemas/Next"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: issueInvitation
+      summary: Issue an invitation. The live answer carries its token, once.
+      description: |
+        The token is never stored, only its hash, so it is answered live only. A replay with the same
+        Idempotency-Key answers the invitation without `token`; a caller that lost it revokes and
+        issues again.
+      tags: [invitations]
+      x-route-class: tenant
+      x-mux-pattern: "POST /v1/invitations"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [target_identifier, subject_type]
+              properties:
+                target_identifier:
+                  type: string
+                  minLength: 1
+                  description: The invited address. Tier-2 PII (STD-GLB-007); never answered back.
+                workspace_id:
+                  $ref: "#/components/schemas/UUID"
+                subject_type:
+                  $ref: "#/components/schemas/SubjectType"
+                reason:
+                  type: string
+                ttl_seconds:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  maximum: 2592000
+                  description: Seconds until it expires; absent or 0 is 7 days, at most 30 days.
+      responses:
+        "201":
+          description: The invitation, and its token on the live answer.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [invitation]
+                properties:
+                  invitation:
+                    $ref: "#/components/schemas/Invitation"
+                  token:
+                    type: string
+                    description: The invitation token. On the live answer only; a replay omits it.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/invitations/{invitation_id}":
+    get:
+      operationId: getInvitation
+      summary: Read one invitation.
+      tags: [invitations]
+      x-route-class: tenant
+      x-mux-pattern: "GET /v1/invitations/{invitation_id}"
+      parameters:
+        - $ref: "#/components/parameters/InvitationID"
+      responses:
+        "200":
+          $ref: "#/components/responses/InvitationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/invitations/{invitation_id}/revoke":
+    post:
+      operationId: revokeInvitation
+      summary: Revoke a pending invitation. No body.
+      tags: [invitations]
+      x-route-class: tenant
+      x-mux-pattern: "POST /v1/invitations/{invitation_id}/revoke"
+      parameters:
+        - $ref: "#/components/parameters/InvitationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          $ref: "#/components/responses/InvitationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/invitations/lookup":
+    post:
+      operationId: lookupInvitation
+      summary: Check a token's shape. Answers the same for every well-formed token.
+      description: |
+        Reads no record (SAD-004 §5.5): an absent, expired, revoked, accepted and valid token are
+        answered alike. A malformed token is answered 400.
+      tags: [invitations]
+      x-route-class: anonymous
+      x-mux-pattern: "POST /v1/invitations/lookup"
+      security: []
+      requestBody:
+        $ref: "#/components/requestBodies/InvitationToken"
+      responses:
+        "200":
+          description: The token is well formed; sign in and accept.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted, next]
+                properties:
+                  accepted:
+                    type: boolean
+                    const: true
+                    description: The token is well formed. Not a statement that the invitation exists.
+                  next:
+                    type: string
+                    const: accept
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  "/v1/invitations/accept":
+    post:
+      operationId: acceptInvitation
+      summary: Accept an invitation as the invited person, signed in as themselves (ADR-ORG-007).
+      description: |
+        Any human token, with or without `tenant_id`; a workload is answered 403. The caller must hold
+        the invited address as a proven address at the Identity Control API. The Membership created is
+        the caller's own. Every failed lookup and an address mismatch answer one 404 of type
+        `invitation-not-acceptable`, with a constant detail; a client branches on `type`. A Tenant that
+        is not active, or an existing Membership, is 409; the Identity Control API unreachable is 503.
+      tags: [invitations]
+      x-route-class: self
+      x-mux-pattern: "POST /v1/invitations/accept"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        $ref: "#/components/requestBodies/InvitationToken"
+      responses:
+        "200":
+          description: The invitation, accepted, and the Membership it created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [invitation, membership]
+                properties:
+                  invitation:
+                    $ref: "#/components/schemas/Invitation"
+                  membership:
+                    $ref: "#/components/schemas/MembershipResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/InvitationNotAcceptable"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/invitations/expire-lapsed":
+    post:
+      operationId: expireLapsedInvitations
+      summary: Expire one batch of invitations past their expiry. A sweep.
+      tags: [invitations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/invitations/expire-lapsed"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/BatchSize"
+      responses:
+        "200":
+          $ref: "#/components/responses/AffectedAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/organizations":
+    get:
+      operationId: listOrganizations
+      summary: List Organizations. Each page records the access.
+      tags: [organizations]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/organizations"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, suspended, retired]
+        - name: classification
+          in: query
+          schema:
+            $ref: "#/components/schemas/OrganizationClassification"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [organizations, next]
+                properties:
+                  organizations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Organization"
+                  next:
+                    $ref: "#/components/schemas/Next"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: registerOrganization
+      summary: Register an Organization.
+      tags: [organizations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/organizations"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [display_name, classification]
+              properties:
+                display_name:
+                  type: string
+                classification:
+                  $ref: "#/components/schemas/OrganizationClassification"
+                parent_id:
+                  $ref: "#/components/schemas/UUID"
+      responses:
+        "201":
+          $ref: "#/components/responses/OrganizationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/organizations/{organization_id}":
+    get:
+      operationId: getOrganization
+      summary: Read one Organization.
+      tags: [organizations]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/organizations/{organization_id}"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationID"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/OrganizationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/organizations/{organization_id}/suspend":
+    post:
+      operationId: suspendOrganization
+      summary: Suspend an Organization.
+      tags: [organizations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/organizations/{organization_id}/suspend"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/OrganizationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/organizations/{organization_id}/restore":
+    post:
+      operationId: restoreOrganization
+      summary: Restore a suspended Organization.
+      tags: [organizations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/organizations/{organization_id}/restore"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/OrganizationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/organizations/{organization_id}/retire":
+    post:
+      operationId: retireOrganization
+      summary: Retire an Organization. Refused 412 until its Tenants are retired.
+      tags: [organizations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/organizations/{organization_id}/retire"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/OrganizationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/tenants":
+    get:
+      operationId: listTenants
+      summary: List Tenants. Each page records the access.
+      tags: [tenants]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/tenants"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/TenantStatus"
+        - name: organization_id
+          in: query
+          schema:
+            $ref: "#/components/schemas/UUID"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenants, next]
+                properties:
+                  tenants:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TenantRecord"
+                  next:
+                    $ref: "#/components/schemas/Next"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: requestTenant
+      summary: Request a Tenant. It starts `requested`, with a provisioning request whose correlation_id the outcome reports name.
+      tags: [tenants]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/tenants"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [organization_id, display_name, isolation_profile]
+              properties:
+                organization_id:
+                  $ref: "#/components/schemas/UUID"
+                display_name:
+                  type: string
+                isolation_profile:
+                  $ref: "#/components/schemas/IsolationProfile"
+                residency_region:
+                  type: string
+      responses:
+        "201":
+          description: The Tenant and its provisioning request.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenant, provisioning_request_id, correlation_id, accepted_at]
+                properties:
+                  tenant:
+                    $ref: "#/components/schemas/TenantRecord"
+                  provisioning_request_id:
+                    $ref: "#/components/schemas/UUID"
+                  correlation_id:
+                    $ref: "#/components/schemas/UUID"
+                  accepted_at:
+                    $ref: "#/components/schemas/Timestamp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/tenants/{tenant_id}":
+    get:
+      operationId: getTenant
+      summary: Read one Tenant, with its offboarding, active Membership count and latest provisioning request.
+      tags: [tenants]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/tenants/{tenant_id}"
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          description: The Tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/tenants/{tenant_id}/activate":
+    post:
+      operationId: activateTenant
+      summary: Activate a provisioned Tenant. Refused 412 until provisioning is realized.
+      tags: [tenants]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/tenants/{tenant_id}/activate"
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/TenantResultAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/tenants/{tenant_id}/suspend":
+    post:
+      operationId: suspendTenant
+      summary: Suspend a Tenant.
+      tags: [tenants]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/tenants/{tenant_id}/suspend"
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/TenantResultAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/tenants/{tenant_id}/restore":
+    post:
+      operationId: restoreTenant
+      summary: Restore a suspended Tenant.
+      tags: [tenants]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/tenants/{tenant_id}/restore"
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/TenantResultAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/tenants/{tenant_id}/administrators":
+    get:
+      operationId: listTenantAdministrators
+      summary: List the Tenant's administration grants.
+      tags: [tenant-administrators]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/tenants/{tenant_id}/administrators"
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          description: Every grant, active and revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [grants]
+                properties:
+                  grants:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TenantAdministrationGrant"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: grantTenantAdministrator
+      summary: Grant tenant administration to a Principal, creating its Membership when it has none.
+      tags: [tenant-administrators]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/tenants/{tenant_id}/administrators"
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/PrincipalReference"
+      responses:
+        "201":
+          description: The grant and the Membership it stands on.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/TenantAdministrationGrant"
+                  - type: object
+                    required: [membership_id, membership_created]
+                    properties:
+                      membership_id:
+                        $ref: "#/components/schemas/UUID"
+                      membership_created:
+                        type: boolean
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/tenants/{tenant_id}/administrators/{grant_id}/revoke":
+    post:
+      operationId: revokeTenantAdministrator
+      summary: Revoke a tenant administration grant. No body.
+      tags: [tenant-administrators]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/tenants/{tenant_id}/administrators/{grant_id}/revoke"
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/GrantID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          description: The grant, revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantAdministrationGrant"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement":
+    get:
+      operationId: getTenantMembershipEnforcement
+      summary: A provider's read of a Membership's enforcement evidence, in the Tenant the path names.
+      description: Recorded as privileged access naming the Tenant, which its administrator reads in GET /v1/provider-access.
+      tags: [memberships]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement"
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/MembershipID"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/EnforcementAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/tenants/{tenant_id}/memberships/{membership_id}/suspend":
+    post:
+      operationId: suspendTenantMembership
+      summary: A provider suspends a Membership in the Tenant the path names.
+      description: |
+        A provider in force, by an activation or an emergency grant. Recorded as privileged access
+        naming the Tenant, which its administrator reads in GET /v1/provider-access. Answers what
+        `POST /v1/memberships/{membership_id}/suspend` answers. A provider never grants or restores a
+        Membership.
+      tags: [memberships]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/tenants/{tenant_id}/memberships/{membership_id}/suspend"
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/MembershipID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/MembershipResultAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/tenants/{tenant_id}/memberships/{membership_id}/revoke":
+    post:
+      operationId: revokeTenantMembership
+      summary: A provider revokes a Membership in the Tenant the path names.
+      description: |
+        A provider in force, by an activation or an emergency grant. Recorded as privileged access
+        naming the Tenant, which its administrator reads in GET /v1/provider-access. Answers what
+        `POST /v1/memberships/{membership_id}/revoke` answers. A provider never grants or restores a
+        Membership.
+      tags: [memberships]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/tenants/{tenant_id}/memberships/{membership_id}/revoke"
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/MembershipID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/MembershipResultAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/tenants/{tenant_id}/provisioning":
+    post:
+      operationId: provisionTenant
+      summary: Record that the desired state has left, or retry a failed attempt.
+      tags: [provisioning]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/tenants/{tenant_id}/provisioning"
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/TenantResultAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/provisioning/realized":
+    post:
+      operationId: reportProvisioningRealized
+      summary: The provisioning system reports a Tenant's isolation boundary built.
+      description: 200 on a replay too; `replay` says which.
+      tags: [provisioning]
+      x-route-class: provider-or-reporter:provisioning
+      x-mux-pattern: "POST /v1/provisioning/realized"
+      security:
+        - workloadBearer: []
+        - bearer: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        $ref: "#/components/requestBodies/ProvisioningOutcome"
+      responses:
+        "200":
+          $ref: "#/components/responses/ProvisioningResolutionAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/provisioning/failed":
+    post:
+      operationId: reportProvisioningFailed
+      summary: The provisioning system reports an attempt failed.
+      description: 200 on a replay too; `replay` says which.
+      tags: [provisioning]
+      x-route-class: provider-or-reporter:provisioning
+      x-mux-pattern: "POST /v1/provisioning/failed"
+      security:
+        - workloadBearer: []
+        - bearer: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        $ref: "#/components/requestBodies/ProvisioningOutcome"
+      responses:
+        "200":
+          $ref: "#/components/responses/ProvisioningResolutionAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/provisioning/sweep-unresolved":
+    post:
+      operationId: sweepUnresolvedProvisioning
+      summary: Age one batch of provisioning requests with no outcome to `unresolved`. A sweep.
+      tags: [provisioning]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/provisioning/sweep-unresolved"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/BatchSize"
+      responses:
+        "200":
+          $ref: "#/components/responses/AffectedAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/offboardings":
+    get:
+      operationId: listOffboardings
+      summary: List offboardings. Each page records the access.
+      tags: [offboardings]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/offboardings"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+        - name: stage
+          in: query
+          schema:
+            $ref: "#/components/schemas/OffboardingStage"
+        - name: tenant_id
+          in: query
+          schema:
+            $ref: "#/components/schemas/UUID"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [offboardings, next]
+                properties:
+                  offboardings:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Offboarding"
+                  next:
+                    $ref: "#/components/schemas/Next"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: beginOffboarding
+      summary: Begin a Tenant's offboarding.
+      tags: [offboardings]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/offboardings"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [tenant_id, expected_version]
+              properties:
+                tenant_id:
+                  $ref: "#/components/schemas/UUID"
+                expected_version:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  description: The Tenant's version, as the caller was shown it.
+                legal_hold:
+                  type: boolean
+                  default: false
+      responses:
+        "201":
+          $ref: "#/components/responses/OffboardingAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/offboardings/{offboarding_id}":
+    get:
+      operationId: getOffboarding
+      summary: Read one offboarding.
+      tags: [offboardings]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/offboardings/{offboarding_id}"
+      parameters:
+        - $ref: "#/components/parameters/OffboardingID"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/OffboardingAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/offboardings/{offboarding_id}/freeze":
+    post:
+      operationId: freezeOffboarding
+      summary: Freeze one batch of the Tenant's Memberships, and answer how many.
+      description: One batch per call; the caller drives the loop. Refused 409 outside the freeze stage.
+      tags: [offboardings]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/offboardings/{offboarding_id}/freeze"
+      parameters:
+        - $ref: "#/components/parameters/OffboardingID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/BatchSize"
+      responses:
+        "200":
+          $ref: "#/components/responses/AffectedAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/offboardings/{offboarding_id}/complete-freeze":
+    post:
+      operationId: completeOffboardingFreeze
+      summary: Move a frozen offboarding to its obligations stage. No body.
+      tags: [offboardings]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/offboardings/{offboarding_id}/complete-freeze"
+      parameters:
+        - $ref: "#/components/parameters/OffboardingID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/OffboardingAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/offboardings/{offboarding_id}/release":
+    post:
+      operationId: releaseOffboarding
+      summary: Release an offboarding, sending deprovisioning. Refused 412 while obligations are outstanding or a legal hold stands. No body.
+      tags: [offboardings]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/offboardings/{offboarding_id}/release"
+      parameters:
+        - $ref: "#/components/parameters/OffboardingID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/OffboardingAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/offboardings/{offboarding_id}/retire":
+    post:
+      operationId: retireOffboarding
+      summary: Retire the Tenant. Irreversible; refused 412 until deprovisioning is realized.
+      tags: [offboardings]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/offboardings/{offboarding_id}/retire"
+      parameters:
+        - $ref: "#/components/parameters/OffboardingID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/TenantExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/OffboardingAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/offboardings/{offboarding_id}/cancel":
+    post:
+      operationId: cancelOffboarding
+      summary: Cancel an offboarding before release (ADR-ORG-006). The reason is the cancellation's.
+      tags: [offboardings]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/offboardings/{offboarding_id}/cancel"
+      parameters:
+        - $ref: "#/components/parameters/OffboardingID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/TenantExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/OffboardingAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/offboardings/{offboarding_id}/legal-hold":
+    post:
+      operationId: setOffboardingLegalHold
+      summary: Set or lift the offboarding's legal hold.
+      tags: [offboardings]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/offboardings/{offboarding_id}/legal-hold"
+      parameters:
+        - $ref: "#/components/parameters/OffboardingID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [hold]
+              properties:
+                hold:
+                  type: boolean
+      responses:
+        "200":
+          $ref: "#/components/responses/OffboardingAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/offboardings/{offboarding_id}/obligations":
+    get:
+      operationId: listOffboardingObligations
+      summary: The obligation board. `outstanding` names the domains still owing; `obligations` is every row.
+      tags: [offboardings]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/offboardings/{offboarding_id}/obligations"
+      parameters:
+        - $ref: "#/components/parameters/OffboardingID"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          description: The board.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [outstanding, obligations]
+                properties:
+                  outstanding:
+                    type: array
+                    items:
+                      type: string
+                  obligations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Obligation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: raiseOffboardingObligation
+      summary: Raise an obligation against a domain.
+      tags: [offboardings]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/offboardings/{offboarding_id}/obligations"
+      parameters:
+        - $ref: "#/components/parameters/OffboardingID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [domain, type]
+              properties:
+                domain:
+                  type: string
+                  description: The owing domain, such as product, hcm, billing or audit.
+                type:
+                  type: string
+                due_at:
+                  $ref: "#/components/schemas/Timestamp"
+      responses:
+        "201":
+          $ref: "#/components/responses/ObligationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/offboardings/{offboarding_id}/deprovisioning":
+    post:
+      operationId: reportDeprovisioning
+      summary: The provisioning system reports a deprovisioning outcome. Records it; never retires.
+      tags: [offboardings]
+      x-route-class: provider-or-reporter:provisioning
+      x-mux-pattern: "POST /v1/offboardings/{offboarding_id}/deprovisioning"
+      security:
+        - workloadBearer: []
+        - bearer: []
+      parameters:
+        - $ref: "#/components/parameters/OffboardingID"
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [state]
+              properties:
+                state:
+                  type: string
+                  enum: [realized, failed, unresolved]
+                detail:
+                  type: string
+                  description: Required unless the state is realized.
+      responses:
+        "204":
+          description: Recorded.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/offboardings/{offboarding_id}/deprovisioning/resend":
+    post:
+      operationId: resendDeprovisioning
+      summary: Send a failed deprovisioning again. No body.
+      tags: [offboardings]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/offboardings/{offboarding_id}/deprovisioning/resend"
+      parameters:
+        - $ref: "#/components/parameters/OffboardingID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/OffboardingAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/obligations/{obligation_id}/resolve":
+    post:
+      operationId: resolveObligation
+      summary: The owing domain reports what it did about its obligation.
+      description: |
+        A registered reporter for `obligation:<domain>` alone, and only for an obligation raised
+        against that domain: the body's `domain` must be the reporter's, or the answer is 403. A
+        provider is answered 403.
+      tags: [offboardings]
+      x-route-class: reporter:obligation
+      x-mux-pattern: "POST /v1/obligations/{obligation_id}/resolve"
+      security:
+        - workloadBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ObligationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [domain, state]
+              properties:
+                domain:
+                  type: string
+                  pattern: "^[a-z0-9-]{1,63}$"
+                state:
+                  type: string
+                  enum: [completed, waived, failed]
+                detail:
+                  type: string
+                  description: Required unless the state is completed.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObligationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/provider-grants":
+    get:
+      operationId: listProviderGrants
+      summary: List provider grants, active and revoked.
+      tags: [provider-grants]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/provider-grants"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          description: Every grant.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [grants]
+                properties:
+                  grants:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProviderGrant"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: grantProvider
+      summary: Grant provider authority to a Principal.
+      tags: [provider-grants]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/provider-grants"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [principal_id, scope]
+              properties:
+                principal_id:
+                  $ref: "#/components/schemas/UUID"
+                scope:
+                  $ref: "#/components/schemas/ProviderScope"
+                kind:
+                  type: string
+                  enum: [eligible, emergency]
+                  default: eligible
+      responses:
+        "201":
+          $ref: "#/components/responses/ProviderGrantAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/provider-grants/{grant_id}/revoke":
+    post:
+      operationId: revokeProvider
+      summary: Revoke a provider grant. Refused 409 for the last grant. No body.
+      tags: [provider-grants]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/provider-grants/{grant_id}/revoke"
+      parameters:
+        - $ref: "#/components/parameters/GrantID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/ProviderGrantAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/provider-grants:emergency-validation":
+    get:
+      operationId: getEmergencyValidation
+      summary: Every unrevoked emergency grant of this service's scope and its last use, the oldest due first.
+      tags: [provider-grants]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/provider-grants:emergency-validation"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          description: The report. A grant unused for the validation period is overdue.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scope, validation_period_days, grants]
+                properties:
+                  scope:
+                    type: string
+                    const: provider:organization-control
+                  validation_period_days:
+                    type: integer
+                  grants:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EmergencyValidation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/privileged-access":
+    get:
+      operationId: listPrivilegedAccess
+      summary: The privileged-access record. The read is itself recorded.
+      tags: [privileged-access]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/privileged-access"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+        - name: actor_id
+          in: query
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: tenant_id
+          in: query
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: correlation_id
+          in: query
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/AuthorityFilter"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          $ref: "#/components/responses/AccessPageAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/privileged-access:unreviewed":
+    get:
+      operationId: getUnreviewedPrivilegedAccess
+      summary: Each Principal with provider access no review covers, oldest first.
+      tags: [privileged-access]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/privileged-access:unreviewed"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          description: The report.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [review_due_days, actors]
+                properties:
+                  review_due_days:
+                    type: integer
+                  actors:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UnreviewedActor"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/privileged-access/reviews":
+    get:
+      operationId: listPrivilegedAccessReviews
+      summary: List the reviews of provider access.
+      tags: [privileged-access]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/privileged-access/reviews"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+        - name: actor_id
+          in: query
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: reviewed_by
+          in: query
+          schema:
+            $ref: "#/components/schemas/UUID"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reviews, next]
+                properties:
+                  reviews:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AccessReview"
+                  next:
+                    $ref: "#/components/schemas/Next"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: recordPrivilegedAccessReview
+      summary: Record a review of another provider's access over a period. The reason is its statement.
+      description: A provider reviewing its own access is answered 403.
+      tags: [privileged-access]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/privileged-access/reviews"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [actor_id, from, to, outcome]
+              properties:
+                actor_id:
+                  $ref: "#/components/schemas/UUID"
+                from:
+                  $ref: "#/components/schemas/Timestamp"
+                to:
+                  $ref: "#/components/schemas/Timestamp"
+                outcome:
+                  type: string
+                  enum: [appropriate, escalated]
+      responses:
+        "201":
+          description: The review.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessReview"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/provider-access":
+    get:
+      operationId: listTenantProviderAccess
+      summary: The provider access that named the caller's own Tenant.
+      description: The Tenant is the token's; a tenant_id in the query is answered 400.
+      tags: [privileged-access]
+      x-route-class: tenant
+      x-mux-pattern: "GET /v1/provider-access"
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/AuthorityFilter"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          $ref: "#/components/responses/AccessPageAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/provider-activations":
+    get:
+      operationId: listProviderActivations
+      summary: List the caller's activations.
+      tags: [provider-activations]
+      x-route-class: eligible
+      x-mux-pattern: "GET /v1/provider-activations"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          description: The activations.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [activations]
+                properties:
+                  activations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProviderActivation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: requestProviderActivation
+      summary: Ask to activate one of the caller's eligible grants for a duration.
+      description: Without approval required, the activation is in force at once and the holder's reason is the decision's.
+      tags: [provider-activations]
+      x-route-class: eligible
+      x-mux-pattern: "POST /v1/provider-activations"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [grant_id, duration_seconds]
+              properties:
+                grant_id:
+                  $ref: "#/components/schemas/UUID"
+                duration_seconds:
+                  type: integer
+                  minimum: 1
+                  description: At most the deployment's maximum activation; longer is answered 400.
+      responses:
+        "201":
+          $ref: "#/components/responses/ProviderActivationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/provider-activations/grants":
+    get:
+      operationId: listHeldProviderGrants
+      summary: The caller's own unrevoked grants, so an eligible holder learns the grant_id it can activate.
+      tags: [provider-activations]
+      x-route-class: eligible
+      x-mux-pattern: "GET /v1/provider-activations/grants"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          description: The grants.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [grants]
+                properties:
+                  grants:
+                    type: array
+                    items:
+                      type: object
+                      required: [grant_id, scope, kind, granted_at]
+                      properties:
+                        grant_id:
+                          $ref: "#/components/schemas/UUID"
+                        scope:
+                          $ref: "#/components/schemas/ProviderScope"
+                        kind:
+                          type: string
+                          enum: [eligible, emergency]
+                        granted_at:
+                          $ref: "#/components/schemas/Timestamp"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/provider-activations/{activation_id}/approve":
+    post:
+      operationId: approveProviderActivation
+      summary: Approve another holder's pending activation. Approving one's own is answered 403. No body.
+      tags: [provider-activations]
+      x-route-class: eligible
+      x-mux-pattern: "POST /v1/provider-activations/{activation_id}/approve"
+      parameters:
+        - $ref: "#/components/parameters/ActivationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/ProviderActivationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/provider-activations/{activation_id}/deny":
+    post:
+      operationId: denyProviderActivation
+      summary: Deny a pending activation. No body.
+      tags: [provider-activations]
+      x-route-class: eligible
+      x-mux-pattern: "POST /v1/provider-activations/{activation_id}/deny"
+      parameters:
+        - $ref: "#/components/parameters/ActivationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/ProviderActivationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/provider-activations/{activation_id}/end":
+    post:
+      operationId: endProviderActivation
+      summary: End an activation in force, one's own or, as a provider, another's. No body.
+      tags: [provider-activations]
+      x-route-class: eligible
+      x-mux-pattern: "POST /v1/provider-activations/{activation_id}/end"
+      parameters:
+        - $ref: "#/components/parameters/ActivationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/ProviderActivationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/projections/consumers":
+    get:
+      operationId: listConsumers
+      summary: The consumer registry, for the projection health view. Each page records the access.
+      tags: [projections]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/projections/consumers"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+        - name: after
+          in: query
+          description: The last consumer_id of the previous page.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Limit"
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [active, retired]
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [consumers, next]
+                properties:
+                  consumers:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ListedConsumer"
+                  next:
+                    $ref: "#/components/schemas/Next"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: registerConsumer
+      summary: Register a projection consumer and its subscription.
+      tags: [projections]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/projections/consumers"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [consumer_id, principal_id, projection_version, max_accepted_age_seconds, stale_behavior, event_types]
+              properties:
+                consumer_id:
+                  type: string
+                principal_id:
+                  $ref: "#/components/schemas/UUID"
+                projection_version:
+                  type: string
+                max_accepted_age_seconds:
+                  type: integer
+                  format: int64
+                stale_behavior:
+                  $ref: "#/components/schemas/StaleBehavior"
+                event_types:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                  description: The subscription; each an event type the registry offers.
+                reconciliation_interval_seconds:
+                  type: integer
+                  minimum: 60
+                  maximum: 604800
+                  default: 86400
+                  description: How often the consumer reconciles its report.
+      responses:
+        "201":
+          $ref: "#/components/responses/ConsumerAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/projections/consumers/{consumer_id}":
+    get:
+      operationId: getConsumer
+      summary: Read one consumer, by itself or by a provider.
+      tags: [projections]
+      x-route-class: consumer-or-provider
+      x-mux-pattern: "GET /v1/projections/consumers/{consumer_id}"
+      security:
+        - workloadBearer: []
+        - bearer: []
+      parameters:
+        - $ref: "#/components/parameters/ConsumerID"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsumerAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/projections/consumers/{consumer_id}/retire":
+    post:
+      operationId: retireConsumer
+      summary: Retire a consumer, abandoning what it was still owed (ADR-GLB-018 §5.5). No body.
+      tags: [projections]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/projections/consumers/{consumer_id}/retire"
+      parameters:
+        - $ref: "#/components/parameters/ConsumerID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "204":
+          description: Retired.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/projections/consumers/{consumer_id}/progress":
+    post:
+      operationId: recordConsumerProgress
+      summary: A consumer reports the position it has applied.
+      tags: [projections]
+      x-route-class: consumer-or-provider
+      x-mux-pattern: "POST /v1/projections/consumers/{consumer_id}/progress"
+      security:
+        - workloadBearer: []
+        - bearer: []
+      parameters:
+        - $ref: "#/components/parameters/ConsumerID"
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [applied_mark]
+              properties:
+                applied_mark:
+                  type: integer
+                  format: int64
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsumerAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/projections/consumers/{consumer_id}/bootstrap":
+    post:
+      operationId: bootstrapConsumer
+      summary: A consumer records the snapshot mark it bootstrapped from. It moves forward only.
+      tags: [projections]
+      x-route-class: consumer-or-provider
+      x-mux-pattern: "POST /v1/projections/consumers/{consumer_id}/bootstrap"
+      security:
+        - workloadBearer: []
+        - bearer: []
+      parameters:
+        - $ref: "#/components/parameters/ConsumerID"
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [mark]
+              properties:
+                mark:
+                  type: integer
+                  format: int64
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsumerAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/projections/consumers/{consumer_id}/dead-letters":
+    get:
+      operationId: listConsumerDeadLetters
+      summary: One consumer's dead letters, open or resolved (TDD-organization-control-005).
+      tags: [dead-letters]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/projections/consumers/{consumer_id}/dead-letters"
+      parameters:
+        - $ref: "#/components/parameters/ConsumerID"
+        - $ref: "#/components/parameters/AdministrativeReason"
+        - name: after
+          in: query
+          description: The last event_id of the previous page.
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/Limit"
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [open, resolved]
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [dead_letters, next]
+                properties:
+                  dead_letters:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DeadLetter"
+                  next:
+                    $ref: "#/components/schemas/Next"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/projections/snapshot":
+    post:
+      operationId: projectionSnapshot
+      summary: One page of the Organization projection snapshot. A read in a POST.
+      tags: [projections]
+      x-route-class: consumer-or-provider
+      x-mux-pattern: "POST /v1/projections/snapshot"
+      security:
+        - workloadBearer: []
+        - bearer: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        $ref: "#/components/requestBodies/Snapshot"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [high_water_mark, taken_at, rows]
+                properties:
+                  high_water_mark:
+                    type: integer
+                    format: int64
+                    description: The outbox position the snapshot corresponds to; the same on every page.
+                  taken_at:
+                    $ref: "#/components/schemas/Timestamp"
+                  rows:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SnapshotRow"
+                  cursor:
+                    type: string
+                    description: The continuation; absent on the last page.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/projections/provider-authority/snapshot":
+    post:
+      operationId: providerAuthoritySnapshot
+      summary: One page of the provider authority projection snapshot. A read in a POST.
+      tags: [projections]
+      x-route-class: consumer-or-provider
+      x-mux-pattern: "POST /v1/projections/provider-authority/snapshot"
+      security:
+        - workloadBearer: []
+        - bearer: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        $ref: "#/components/requestBodies/Snapshot"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [high_water_mark, taken_at, grants]
+                properties:
+                  high_water_mark:
+                    type: integer
+                    format: int64
+                  taken_at:
+                    $ref: "#/components/schemas/Timestamp"
+                  grants:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProviderAuthorityRow"
+                  cursor:
+                    type: string
+                    description: The continuation; absent on the last page.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/projections/frontier":
+    get:
+      operationId: getProjectionFrontier
+      summary: The publication frontier as facts; a consumer reads its own debt, a provider the estate's.
+      tags: [projections]
+      x-route-class: consumer-or-provider
+      x-mux-pattern: "GET /v1/projections/frontier"
+      security:
+        - workloadBearer: []
+        - bearer: []
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      responses:
+        "200":
+          description: The frontier.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Frontier"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/projections/reconcile":
+    post:
+      operationId: reconcileProjection
+      summary: Compare a consumer's report at a mark with authority, and publish the repairs.
+      description: |
+        A registered consumer for its own `consumer_id` (no reason header), or a provider with a
+        reason. Findings of class `extra` are security incidents and are logged at ERROR. The run
+        clears the consumer's `reconciliation_requested_at`.
+      tags: [projections]
+      x-route-class: consumer-or-provider
+      x-mux-pattern: "POST /v1/projections/reconcile"
+      security:
+        - workloadBearer: []
+        - bearer: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        $ref: "#/components/requestBodies/ConsumerReport"
+      responses:
+        "200":
+          description: The run and its findings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [consumer_id, mark, run_at, findings]
+                properties:
+                  consumer_id:
+                    type: string
+                  mark:
+                    type: integer
+                    format: int64
+                  run_at:
+                    $ref: "#/components/schemas/Timestamp"
+                  findings:
+                    type: [array, "null"]
+                    items:
+                      $ref: "#/components/schemas/Finding"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/projections/advance-versions":
+    post:
+      operationId: advanceMembershipVersions
+      summary: After a restore to an older point, move each Membership a consumer holds at a higher version past it.
+      description: The report is reconciled first; only Memberships the consumer reports above authority's version, that authority still holds, are advanced.
+      tags: [recovery]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/projections/advance-versions"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/ConsumerReport"
+      responses:
+        "200":
+          description: What was advanced.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [consumer_id, mark, advanced]
+                properties:
+                  consumer_id:
+                    type: string
+                  mark:
+                    type: integer
+                    format: int64
+                  advanced:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdvancedMembership"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/tenant-administration-pause":
+    get:
+      operationId: getTenantAdministrationPause
+      summary: The latest decision on pausing every Tenant administrator's commands.
+      tags: [recovery]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/tenant-administration-pause"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/PauseAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: setTenantAdministrationPause
+      summary: Pause or lift the pause of every Tenant administrator's commands. The reason is the decision's.
+      tags: [recovery]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/tenant-administration-pause"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [paused]
+              properties:
+                paused:
+                  type: boolean
+                  description: True to pause, false to lift.
+      responses:
+        "200":
+          $ref: "#/components/responses/PauseAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/dead-letters/{event_id}/consumers/{consumer}/replay":
+    post:
+      operationId: replayDeadLetter
+      summary: Put an abandoned delivery back on the wire. Resolves nothing. No body.
+      tags: [dead-letters]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/dead-letters/{event_id}/consumers/{consumer}/replay"
+      parameters:
+        - $ref: "#/components/parameters/EventID"
+        - $ref: "#/components/parameters/DeadLetterConsumer"
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "202":
+          description: Queued again under its original identifier.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [event_id, consumer, event_type, position, resolved]
+                properties:
+                  event_id:
+                    $ref: "#/components/schemas/UUID"
+                  consumer:
+                    type: string
+                  event_type:
+                    type: string
+                  position:
+                    type: integer
+                    format: int64
+                  resolved:
+                    type: boolean
+                    const: false
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/dead-letters/{event_id}/consumers/{consumer}/resolve":
+    post:
+      operationId: resolveDeadLetter
+      summary: Close an incident that applied evidence supports.
+      description: The body is optional; absent, the resolution is REPLAYED. Refused 412 without the evidence.
+      tags: [dead-letters]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/dead-letters/{event_id}/consumers/{consumer}/resolve"
+      parameters:
+        - $ref: "#/components/parameters/EventID"
+        - $ref: "#/components/parameters/DeadLetterConsumer"
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                resolution_type:
+                  type: string
+                  enum: [REPLAYED, SUPERSEDED]
+                  default: REPLAYED
+      responses:
+        "200":
+          description: Resolved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [event_id, consumer, resolution_type, resolution_reference]
+                properties:
+                  event_id:
+                    $ref: "#/components/schemas/UUID"
+                  consumer:
+                    type: string
+                  resolution_type:
+                    type: string
+                    enum: [REPLAYED, SUPERSEDED]
+                  resolution_reference:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/dead-letters/{event_id}/consumers/{consumer}/waive":
+    post:
+      operationId: waiveDeadLetter
+      summary: Record an operational exception on an incident no corrective path can close. Not a closure.
+      tags: [dead-letters]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/dead-letters/{event_id}/consumers/{consumer}/waive"
+      parameters:
+        - $ref: "#/components/parameters/EventID"
+        - $ref: "#/components/parameters/DeadLetterConsumer"
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason, expires_at]
+              properties:
+                reason:
+                  type: string
+                expires_at:
+                  $ref: "#/components/schemas/Timestamp"
+      responses:
+        "200":
+          description: Waived until expires_at; the frontier still counts it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [event_id, consumer, waived_until, waiver_reason, resolved]
+                properties:
+                  event_id:
+                    $ref: "#/components/schemas/UUID"
+                  consumer:
+                    type: string
+                  waived_until:
+                    $ref: "#/components/schemas/Timestamp"
+                  waiver_reason:
+                    type: string
+                  resolved:
+                    type: boolean
+                    const: false
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/principals/{principal_id}/contexts":
+    get:
+      operationId: listPrincipalContexts
+      summary: A person's contexts, to themselves; anyone's, to a provider with a reason (ADR-ORG-005).
+      description: The self read is recorded nowhere; a provider's page records the access. A Tenant administrator, an eligible holder and a consumer are answered 403.
+      tags: [contexts]
+      x-route-class: self
+      x-mux-pattern: "GET /v1/principals/{principal_id}/contexts"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contexts, next]
+                properties:
+                  contexts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Context"
+                  next:
+                    $ref: "#/components/schemas/Next"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/context/verify":
+    post:
+      operationId: verifyContext
+      summary: The authoritative fresh check of one context. 200 whether or not it grants.
+      tags: [contexts]
+      x-route-class: consumer-or-provider
+      x-mux-pattern: "POST /v1/context/verify"
+      security:
+        - workloadBearer: []
+        - bearer: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        $ref: "#/components/requestBodies/ContextCheck"
+      responses:
+        "200":
+          $ref: "#/components/responses/DecisionAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/context/switch-eligible":
+    post:
+      operationId: checkContextSwitch
+      summary: Whether a context switch is permitted. 200 whether or not it grants.
+      tags: [contexts]
+      x-route-class: consumer-or-provider
+      x-mux-pattern: "POST /v1/context/switch-eligible"
+      security:
+        - workloadBearer: []
+        - bearer: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+      requestBody:
+        $ref: "#/components/requestBodies/ContextCheck"
+      responses:
+        "200":
+          $ref: "#/components/responses/DecisionAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/context/rate":
+    post:
+      operationId: recordContextRate
+      summary: Record how many requests a consumer served since its last report, for the fresh-check ratio.
+      tags: [contexts]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/context/rate"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [consumer_id, requests]
+              properties:
+                consumer_id:
+                  type: string
+                requests:
+                  type: integer
+                  format: int64
+                  minimum: 0
+      responses:
+        "200":
+          description: The consumer's measured rate.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/context/rate/over-threshold":
+    get:
+      operationId: listRatesOverThreshold
+      summary: The consumers whose fresh-check ratio is above a threshold.
+      tags: [contexts]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/context/rate/over-threshold"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+        - name: threshold
+          in: query
+          schema:
+            type: number
+            default: 0.5
+      responses:
+        "200":
+          description: The rates.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rates]
+                properties:
+                  rates:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Rate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/reporters":
+    get:
+      operationId: listReporters
+      summary: List registered reporter workloads.
+      tags: [reporters]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/reporters"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReason"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+        - name: reports
+          in: query
+          schema:
+            $ref: "#/components/schemas/ReporterReports"
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [active, retired]
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reporters, next]
+                properties:
+                  reporters:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Reporter"
+                  next:
+                    $ref: "#/components/schemas/Next"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: registerReporter
+      summary: Register a workload as a reporter for provisioning or for one domain's obligations.
+      description: A principal_id already registered, in any state, is answered 409 state-transition-refused.
+      tags: [reporters]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/reporters"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [principal_id, reports, purpose]
+              properties:
+                principal_id:
+                  $ref: "#/components/schemas/UUID"
+                reports:
+                  $ref: "#/components/schemas/ReporterReports"
+                purpose:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+      responses:
+        "201":
+          $ref: "#/components/responses/ReporterAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/reporters/{reporter_id}":
+    get:
+      operationId: getReporter
+      summary: Read one reporter.
+      tags: [reporters]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/reporters/{reporter_id}"
+      parameters:
+        - $ref: "#/components/parameters/ReporterID"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/ReporterAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/reporters/{reporter_id}/retire":
+    post:
+      operationId: retireReporter
+      summary: Retire a reporter. Its reports are refused from the next request.
+      tags: [reporters]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/reporters/{reporter_id}/retire"
+      parameters:
+        - $ref: "#/components/parameters/ReporterID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/ExpectedVersion"
+      responses:
+        "200":
+          $ref: "#/components/responses/ReporterAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A person's access token, typed at+jwt (RFC 9068), naming organization-control-api in aud and
+        carrying principal_id and subject_type human (STD-IAM-002 §3.2). With tenant_id it must carry
+        acr aal2 or higher and auth_time, and is a Tenant administrator's for that Tenant; without, it
+        carries acr and auth_time and is a provider's or an eligible holder's by this service's
+        provider grants, or a self caller's on the two self routes.
+    workloadBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A workload's access token: subject_type workload, workload_owner, and no tenant_id. Admitted as
+        the registered projection consumer, or the registered reporter, its principal_id names.
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: A value unique to this command, sent again unchanged when it is retried. Without it the command is answered 400.
+      schema:
+        type: string
+        minLength: 1
+    IdempotencyKeyOptional:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Honoured, not required; commands.go keyOptional names the reason.
+      schema:
+        type: string
+        minLength: 1
+    AdministrativeReason:
+      name: X-Administrative-Reason
+      in: header
+      required: true
+      description: Why, recorded with the action and the access. Visible US-ASCII (RFC 9110 §5.5); cut at 1000 characters.
+      schema:
+        type: string
+        minLength: 1
+        pattern: "^[\\t\\x20-\\x7e]+$"
+    AdministrativeReasonOptional:
+      name: X-Administrative-Reason
+      in: header
+      required: false
+      description: |
+        Visible US-ASCII (RFC 9110 §5.5). Required from a provider on a route a consumer, a reporter or
+        a self caller also reaches; on a Tenant administrator's route it is recorded when sent, and
+        required for a revocation.
+      schema:
+        type: string
+        pattern: "^[\\t\\x20-\\x7e]+$"
+    After:
+      name: after
+      in: query
+      description: The last identifier of the previous page; absent starts at the first item.
+      schema:
+        $ref: "#/components/schemas/UUID"
+    Limit:
+      name: limit
+      in: query
+      description: The page size; absent is 50.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+    AuthorityFilter:
+      name: authority
+      in: query
+      description: The authority the access was made under.
+      schema:
+        type: string
+        enum: [emergency, activation, eligible]
+    From:
+      name: from
+      in: query
+      description: The window's start, inclusive; an RFC 3339 instant with its offset.
+      schema:
+        $ref: "#/components/schemas/Timestamp"
+    To:
+      name: to
+      in: query
+      description: The window's end, exclusive; an RFC 3339 instant with its offset.
+      schema:
+        $ref: "#/components/schemas/Timestamp"
+    MembershipID:
+      name: membership_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    BatchID:
+      name: batch_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    WorkspaceID:
+      name: workspace_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    InvitationID:
+      name: invitation_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    OrganizationID:
+      name: organization_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    TenantID:
+      name: tenant_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    GrantID:
+      name: grant_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    OffboardingID:
+      name: offboarding_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    ObligationID:
+      name: obligation_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    ActivationID:
+      name: activation_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    ConsumerID:
+      name: consumer_id
+      in: path
+      required: true
+      description: The registered consumer's identifier.
+      schema:
+        type: string
+    EventID:
+      name: event_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    DeadLetterConsumer:
+      name: consumer
+      in: path
+      required: true
+      description: The consumer the delivery was dead-lettered at; a dead letter is keyed (event_id, consumer).
+      schema:
+        type: string
+    PrincipalID:
+      name: principal_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    ReporterID:
+      name: reporter_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+
+  requestBodies:
+    ExpectedVersion:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [expected_version]
+            properties:
+              expected_version:
+                type: integer
+                format: int64
+                minimum: 1
+                description: The record's version, as the caller was shown it; another is answered 409 version-conflict.
+    TenantExpectedVersion:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [expected_version]
+            properties:
+              expected_version:
+                type: integer
+                format: int64
+                minimum: 1
+                description: The Tenant's version, as the caller was shown it.
+    BatchSize:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              size:
+                type: integer
+                minimum: 0
+                description: How many rows one call handles; 0 or absent takes the service's default.
+    InvitationToken:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [token]
+            properties:
+              token:
+                type: string
+    PrincipalReference:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [principal_id]
+            properties:
+              principal_id:
+                $ref: "#/components/schemas/UUID"
+    ProvisioningOutcome:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [correlation_id]
+            properties:
+              correlation_id:
+                $ref: "#/components/schemas/UUID"
+              detail:
+                type: string
+    Snapshot:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              consumer_id:
+                type: string
+                description: The consumer the snapshot is for. A consumer may name only itself.
+              page_size:
+                type: integer
+                minimum: 1
+                maximum: 5000
+                description: Absent is 1000.
+              cursor:
+                type: string
+                description: The previous page's cursor; absent on the first page.
+              mark:
+                type: integer
+                format: int64
+                description: The snapshot's high_water_mark, sent with each continuation.
+    ConsumerReport:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [consumer_id, mark, rows]
+            properties:
+              consumer_id:
+                type: string
+              mark:
+                type: integer
+                format: int64
+                description: The position the reported state corresponds to.
+              rows:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [membership_id, membership_version]
+                  properties:
+                    membership_id:
+                      $ref: "#/components/schemas/UUID"
+                    membership_version:
+                      type: integer
+                      format: int64
+    ContextCheck:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [tenant_id, principal_id]
+            properties:
+              consumer_id:
+                type: string
+                description: A provider names the consumer it checks for; a consumer is itself and may omit it.
+              tenant_id:
+                $ref: "#/components/schemas/UUID"
+              principal_id:
+                $ref: "#/components/schemas/UUID"
+
+  responses:
+    BadRequest:
+      description: The request is invalid, a command carries no Idempotency-Key, or a required X-Administrative-Reason is missing.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unauthorized:
+      description: No bearer token, or one that was not accepted.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Forbidden:
+      description: The token's claims confer no scope, or the caller's route class does not admit it.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotFound:
+      description: No such record, or one the caller may not see.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    InvitationNotAcceptable:
+      description: The invitation cannot be accepted. One answer, with a constant detail, for every failure.
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Problem"
+              - type: object
+                properties:
+                  type:
+                    const: https://problems.scnehaux.com/invitation-not-acceptable
+                  title:
+                    const: The invitation cannot be accepted
+    Conflict:
+      description: A refused transition, a version conflict, an idempotency key conflict, or a request in progress.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PreconditionFailed:
+      description: The request is well formed and another record does not allow it yet.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PayloadTooLarge:
+      description: More items than a batch carries; the detail names the limit (RFC 7644 §3.7.4).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unavailable:
+      description: A dependency is unavailable, or Tenant administration is paused for a Tenant administrator's command; send the same request again later.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    MembershipResultAnswer:
+      description: The Membership as it now stands, and the event the transition published.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MembershipResult"
+    EnforcementAnswer:
+      description: The evidence for the Membership's latest transition.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Enforcement"
+    BatchAnswer:
+      description: The batch and each item.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MembershipBatch"
+    WorkspaceAnswer:
+      description: The Workspace.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Workspace"
+    InvitationAnswer:
+      description: The invitation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Invitation"
+    AffectedAnswer:
+      description: How many rows the batch changed.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [affected]
+            properties:
+              affected:
+                type: integer
+    OrganizationAnswer:
+      description: The Organization.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Organization"
+    TenantResultAnswer:
+      description: The Tenant as it now stands.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [tenant, accepted_at, published]
+            properties:
+              tenant:
+                $ref: "#/components/schemas/TenantSummary"
+              accepted_at:
+                $ref: "#/components/schemas/Timestamp"
+              published:
+                type: boolean
+                description: Whether the lifecycle event was written in the same transaction.
+    ProvisioningResolutionAnswer:
+      description: The outcome as recorded.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [provisioning_request_id, tenant_id, state, tenant, replay, resolved_at]
+            properties:
+              provisioning_request_id:
+                $ref: "#/components/schemas/UUID"
+              tenant_id:
+                $ref: "#/components/schemas/UUID"
+              state:
+                $ref: "#/components/schemas/ProvisioningState"
+              tenant:
+                $ref: "#/components/schemas/TenantSummary"
+              replay:
+                type: boolean
+                description: The outcome was already recorded and this call changed nothing.
+              resolved_at:
+                $ref: "#/components/schemas/Timestamp"
+    OffboardingAnswer:
+      description: The offboarding.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Offboarding"
+    ObligationAnswer:
+      description: The obligation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Obligation"
+    ProviderGrantAnswer:
+      description: The grant.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProviderGrant"
+    AccessPageAnswer:
+      description: One page of the privileged-access record.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [accesses, next]
+            properties:
+              accesses:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PrivilegedAccess"
+              next:
+                $ref: "#/components/schemas/Next"
+    ProviderActivationAnswer:
+      description: The activation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProviderActivation"
+    ConsumerAnswer:
+      description: The consumer.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Consumer"
+    PauseAnswer:
+      description: The latest pause decision.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Pause"
+    DecisionAnswer:
+      description: The authoritative answer; a refusal is a complete answer, not an error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Decision"
+    ReporterAnswer:
+      description: The reporter.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Reporter"
+
+  schemas:
+    UUID:
+      type: string
+      format: uuid
+    Timestamp:
+      type: string
+      format: date-time
+    NullableTimestamp:
+      type: [string, "null"]
+      format: date-time
+    NullableUUID:
+      type: [string, "null"]
+      format: uuid
+    NullableString:
+      type: [string, "null"]
+    Next:
+      type: [string, "null"]
+      description: The cursor for the next page, passed as `after`; null on the last page.
+    Problem:
+      type: object
+      description: RFC 9457 problem details, from foundation-platform's closed registry.
+      required: [type, title, status, instance]
+      properties:
+        type:
+          type: string
+          format: uri
+          enum:
+            - https://problems.scnehaux.com/validation-failed
+            - https://problems.scnehaux.com/authentication-required
+            - https://problems.scnehaux.com/forbidden
+            - https://problems.scnehaux.com/not-found
+            - https://problems.scnehaux.com/invitation-not-acceptable
+            - https://problems.scnehaux.com/version-conflict
+            - https://problems.scnehaux.com/idempotency-key-conflict
+            - https://problems.scnehaux.com/state-transition-refused
+            - https://problems.scnehaux.com/request-in-progress
+            - https://problems.scnehaux.com/precondition-unmet
+            - https://problems.scnehaux.com/payload-too-large
+            - https://problems.scnehaux.com/rate-limited
+            - https://problems.scnehaux.com/overloaded
+            - https://problems.scnehaux.com/dependency-unavailable
+            - https://problems.scnehaux.com/internal
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+          description: For a person to read. A client never parses it.
+        instance:
+          type: string
+        correlation_id:
+          type: string
+
+    SubjectType:
+      type: string
+      enum: [human, workload]
+    MembershipStatus:
+      type: string
+      enum: [active, suspended, revoked]
+    WorkspaceStatus:
+      type: string
+      enum: [active, archived, retired]
+    InvitationState:
+      type: string
+      enum: [pending, accepted, expired, revoked]
+    OrganizationClassification:
+      type: string
+      enum: [provider, customer, partner, publisher]
+    TenantStatus:
+      type: string
+      enum: [requested, provisioning, active, failed, suspended, offboarding, retired]
+    IsolationProfile:
+      type: string
+      enum: [pooled, bridge, silo, regional]
+    ProvisioningState:
+      type: string
+      enum: [requested, realized, failed, unresolved]
+    OffboardingStage:
+      type: string
+      enum: [freeze, obligations, release, retired, cancelled]
+    StaleBehavior:
+      type: string
+      enum: [use_with_marker, revalidate, fail_closed]
+    ProviderScope:
+      type: string
+      enum: [provider:organization-control, provider:identity-control]
+    ReporterReports:
+      type: string
+      pattern: "^(provisioning|obligation:[a-z0-9-]{1,63})$"
+      description: What the reporter reports. `provisioning`, or `obligation:<domain>` for one domain's obligations.
+
+    Membership:
+      type: object
+      required: [membership_id, principal_id, tenant_id, workspace_id, subject_type, status, version, valid_from, valid_until, provenance]
+      properties:
+        membership_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        workspace_id:
+          $ref: "#/components/schemas/UUID"
+        subject_type:
+          $ref: "#/components/schemas/SubjectType"
+        status:
+          $ref: "#/components/schemas/MembershipStatus"
+        version:
+          type: integer
+          format: int64
+        valid_from:
+          $ref: "#/components/schemas/Timestamp"
+        valid_until:
+          $ref: "#/components/schemas/Timestamp"
+        provenance:
+          type: string
+    MembershipResult:
+      type: object
+      required: [membership, accepted_at, tenant_security_version, event_id]
+      properties:
+        membership:
+          $ref: "#/components/schemas/Membership"
+        accepted_at:
+          $ref: "#/components/schemas/Timestamp"
+        tenant_security_version:
+          type: integer
+          format: int64
+        event_id:
+          $ref: "#/components/schemas/UUID"
+    Enforcement:
+      type: object
+      required: [membership_id, event_id, transition, accepted_at, published_at, budget_seconds, consumers, state, evaluated_at]
+      properties:
+        membership_id:
+          $ref: "#/components/schemas/UUID"
+        event_id:
+          $ref: "#/components/schemas/UUID"
+        transition:
+          type: string
+          enum: [grant, suspend, restore, revoke]
+        accepted_at:
+          $ref: "#/components/schemas/Timestamp"
+        published_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        budget_seconds:
+          type: integer
+        consumers:
+          type: array
+          items:
+            type: object
+            required: [consumer_id, evidence, recorded_at]
+            properties:
+              consumer_id:
+                type: string
+              evidence:
+                type: string
+                enum: [consumer_applied, transport_accepted, pending, dead_lettered]
+              recorded_at:
+                $ref: "#/components/schemas/NullableTimestamp"
+        state:
+          type: string
+          enum: [accepted, propagating, enforced, over_budget]
+        evaluated_at:
+          $ref: "#/components/schemas/Timestamp"
+    BatchProblem:
+      type: [object, "null"]
+      description: The problem the single command would answer for the item.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+    MembershipBatch:
+      type: object
+      required: [batch_id, action, state, reason, correlation_id, continues, created_by, created_at, expires_at, executed_at, completed_at, fail_on_errors, heartbeat_at, resumed_by, resumed_at, counts, items]
+      properties:
+        batch_id:
+          $ref: "#/components/schemas/UUID"
+        action:
+          type: string
+          enum: [suspend, restore, revoke]
+        state:
+          type: string
+          enum: [previewed, executing, executed, expired]
+        reason:
+          $ref: "#/components/schemas/NullableString"
+        correlation_id:
+          $ref: "#/components/schemas/UUID"
+        continues:
+          $ref: "#/components/schemas/NullableUUID"
+        created_by:
+          $ref: "#/components/schemas/UUID"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        expires_at:
+          $ref: "#/components/schemas/Timestamp"
+        executed_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        completed_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        fail_on_errors:
+          type: [integer, "null"]
+        heartbeat_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        resumed_by:
+          $ref: "#/components/schemas/NullableUUID"
+        resumed_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        counts:
+          type: object
+          required: [would_change, would_not_change, succeeded, failed, not_attempted]
+          properties:
+            would_change:
+              type: integer
+            would_not_change:
+              type: integer
+            succeeded:
+              type: integer
+            failed:
+              type: integer
+            not_attempted:
+              type: integer
+        items:
+          type: array
+          items:
+            type: object
+            required: [membership_id, principal_id, current_status, version, resulting_status, refusal, outcome]
+            properties:
+              membership_id:
+                $ref: "#/components/schemas/UUID"
+              principal_id:
+                $ref: "#/components/schemas/NullableUUID"
+              current_status:
+                $ref: "#/components/schemas/NullableString"
+              version:
+                type: [integer, "null"]
+                format: int64
+              resulting_status:
+                $ref: "#/components/schemas/NullableString"
+              refusal:
+                $ref: "#/components/schemas/BatchProblem"
+              outcome:
+                type: [object, "null"]
+                description: Null until the batch executed; carries only the fields its status has.
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [succeeded, failed, not_attempted]
+                  accepted_at:
+                    $ref: "#/components/schemas/Timestamp"
+                  event_id:
+                    $ref: "#/components/schemas/UUID"
+                  version:
+                    type: integer
+                    format: int64
+                  problem:
+                    $ref: "#/components/schemas/BatchProblem"
+                  reason:
+                    type: string
+                    enum: [refused_at_preview, error_allowance, expired]
+    Workspace:
+      type: object
+      required: [workspace_id, tenant_id, display_name, type, status, version, created_at]
+      properties:
+        workspace_id:
+          $ref: "#/components/schemas/UUID"
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        display_name:
+          type: string
+        type:
+          type: string
+        status:
+          $ref: "#/components/schemas/WorkspaceStatus"
+        version:
+          type: integer
+          format: int64
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+    Invitation:
+      type: object
+      description: Carries neither the invited address nor its hash.
+      required: [invitation_id, tenant_id, subject_type, invited_by, state, correlation_id, expires_at, created_at]
+      properties:
+        invitation_id:
+          $ref: "#/components/schemas/UUID"
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        workspace_id:
+          $ref: "#/components/schemas/UUID"
+        subject_type:
+          $ref: "#/components/schemas/SubjectType"
+        invited_by:
+          $ref: "#/components/schemas/UUID"
+        reason:
+          type: string
+        state:
+          $ref: "#/components/schemas/InvitationState"
+        correlation_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        expires_at:
+          $ref: "#/components/schemas/Timestamp"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        accepted_at:
+          $ref: "#/components/schemas/Timestamp"
+        revoked_at:
+          $ref: "#/components/schemas/Timestamp"
+    Organization:
+      type: object
+      required: [organization_id, display_name, classification, status, version, created_at]
+      properties:
+        organization_id:
+          $ref: "#/components/schemas/UUID"
+        display_name:
+          type: string
+        classification:
+          $ref: "#/components/schemas/OrganizationClassification"
+        status:
+          type: string
+          enum: [active, suspended, retired]
+        parent_id:
+          $ref: "#/components/schemas/UUID"
+        version:
+          type: integer
+          format: int64
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+    TenantSummary:
+      type: object
+      required: [tenant_id, organization_id, status, version, security_version]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        organization_id:
+          $ref: "#/components/schemas/UUID"
+        status:
+          $ref: "#/components/schemas/TenantStatus"
+        version:
+          type: integer
+          format: int64
+        security_version:
+          type: integer
+          format: int64
+    TenantRecord:
+      type: object
+      description: The lifecycle stamps are absent until reached.
+      required: [tenant_id, organization_id, display_name, status, isolation_profile, version, security_version, created_at]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        organization_id:
+          $ref: "#/components/schemas/UUID"
+        display_name:
+          type: string
+        status:
+          $ref: "#/components/schemas/TenantStatus"
+        isolation_profile:
+          $ref: "#/components/schemas/IsolationProfile"
+        residency_region:
+          type: string
+        version:
+          type: integer
+          format: int64
+        security_version:
+          type: integer
+          format: int64
+        activated_at:
+          $ref: "#/components/schemas/Timestamp"
+        suspended_at:
+          $ref: "#/components/schemas/Timestamp"
+        offboarding_started_at:
+          $ref: "#/components/schemas/Timestamp"
+        retired_at:
+          $ref: "#/components/schemas/Timestamp"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+    TenantDetail:
+      allOf:
+        - $ref: "#/components/schemas/TenantRecord"
+        - type: object
+          required: [offboarding_id, active_memberships, provisioning]
+          properties:
+            offboarding_id:
+              $ref: "#/components/schemas/NullableUUID"
+            active_memberships:
+              type: integer
+            provisioning:
+              type: [object, "null"]
+              description: The latest provisioning request, or null when there is none.
+              required: [request_id, correlation_id, state, detail, requested_at, resolved_at]
+              properties:
+                request_id:
+                  $ref: "#/components/schemas/UUID"
+                correlation_id:
+                  $ref: "#/components/schemas/UUID"
+                state:
+                  $ref: "#/components/schemas/ProvisioningState"
+                detail:
+                  $ref: "#/components/schemas/NullableString"
+                requested_at:
+                  $ref: "#/components/schemas/Timestamp"
+                resolved_at:
+                  $ref: "#/components/schemas/NullableTimestamp"
+    TenantAdministrationGrant:
+      type: object
+      required: [grant_id, tenant_id, principal_id, granted_by, reason, granted_at, active, revoked_at, revoked_by]
+      properties:
+        grant_id:
+          $ref: "#/components/schemas/UUID"
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        granted_by:
+          $ref: "#/components/schemas/UUID"
+        reason:
+          type: string
+        granted_at:
+          $ref: "#/components/schemas/Timestamp"
+        active:
+          type: boolean
+        revoked_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        revoked_by:
+          $ref: "#/components/schemas/NullableUUID"
+        revoke_reason:
+          type: string
+    Offboarding:
+      type: object
+      required: [offboarding_id, tenant_id, stage, initiated_by, legal_hold, correlation_id, started_at, obligations_at, released_at, deprovisioning, active_memberships, prior_status, cancelled_by, cancel_reason, cancelled_at, frozen_memberships, restore_pending]
+      properties:
+        offboarding_id:
+          $ref: "#/components/schemas/UUID"
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        stage:
+          $ref: "#/components/schemas/OffboardingStage"
+        initiated_by:
+          $ref: "#/components/schemas/UUID"
+        reason:
+          type: string
+        legal_hold:
+          type: boolean
+        correlation_id:
+          $ref: "#/components/schemas/UUID"
+        started_at:
+          $ref: "#/components/schemas/Timestamp"
+        frozen_at:
+          $ref: "#/components/schemas/Timestamp"
+        retired_at:
+          $ref: "#/components/schemas/Timestamp"
+        obligations_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        released_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        deprovisioning:
+          type: [object, "null"]
+          description: The latest deprovisioning command and what was reported for it.
+          required: [state, detail, requested_at, resolved_at]
+          properties:
+            state:
+              type: string
+              enum: [requested, realized, failed, unresolved]
+            detail:
+              $ref: "#/components/schemas/NullableString"
+            requested_at:
+              $ref: "#/components/schemas/Timestamp"
+            resolved_at:
+              $ref: "#/components/schemas/NullableTimestamp"
+        active_memberships:
+          type: integer
+        prior_status:
+          $ref: "#/components/schemas/NullableString"
+        cancelled_by:
+          $ref: "#/components/schemas/NullableUUID"
+        cancel_reason:
+          $ref: "#/components/schemas/NullableString"
+        cancelled_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        frozen_memberships:
+          type: integer
+        restore_pending:
+          type: integer
+    Obligation:
+      type: object
+      required: [obligation_id, offboarding_id, tenant_id, domain, type, state]
+      properties:
+        obligation_id:
+          $ref: "#/components/schemas/UUID"
+        offboarding_id:
+          $ref: "#/components/schemas/UUID"
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        domain:
+          type: string
+        type:
+          type: string
+        state:
+          type: string
+          enum: [open, completed, waived, failed, cancelled]
+        due_at:
+          $ref: "#/components/schemas/Timestamp"
+        completed_at:
+          $ref: "#/components/schemas/Timestamp"
+        detail:
+          type: string
+        resolved_by:
+          $ref: "#/components/schemas/UUID"
+        resolved_at:
+          $ref: "#/components/schemas/Timestamp"
+    ProviderGrant:
+      type: object
+      required: [grant_id, principal_id, scope, kind, granted_by, reason, granted_at, active, revoked_at, revoked_by]
+      properties:
+        grant_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        scope:
+          $ref: "#/components/schemas/ProviderScope"
+        kind:
+          type: string
+          enum: [eligible, emergency]
+        granted_by:
+          $ref: "#/components/schemas/NullableUUID"
+        bootstrap_operator:
+          type: string
+          description: Present on a grant the bootstrap recorded, which no Principal granted.
+        reason:
+          type: string
+        granted_at:
+          $ref: "#/components/schemas/Timestamp"
+        active:
+          type: boolean
+        revoked_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        revoked_by:
+          $ref: "#/components/schemas/NullableUUID"
+        revoke_reason:
+          type: string
+    EmergencyValidation:
+      type: object
+      required: [grant_id, principal_id, granted_at, last_used_at, uses, due_at, overdue]
+      properties:
+        grant_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        granted_at:
+          $ref: "#/components/schemas/Timestamp"
+        last_used_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        uses:
+          type: integer
+          format: int64
+        due_at:
+          $ref: "#/components/schemas/Timestamp"
+        overdue:
+          type: boolean
+    PrivilegedAccess:
+      type: object
+      required: [access_id, actor_id, authority, activation_id, tenant_id, operation, correlation_id, reason, occurred_at]
+      properties:
+        access_id:
+          $ref: "#/components/schemas/UUID"
+        actor_id:
+          $ref: "#/components/schemas/UUID"
+        authority:
+          type: string
+          enum: [emergency, activation, eligible]
+        activation_id:
+          $ref: "#/components/schemas/NullableUUID"
+        tenant_id:
+          $ref: "#/components/schemas/NullableUUID"
+        operation:
+          $ref: "#/components/schemas/NullableString"
+        correlation_id:
+          $ref: "#/components/schemas/UUID"
+        reason:
+          type: string
+        occurred_at:
+          $ref: "#/components/schemas/Timestamp"
+    AccessReview:
+      type: object
+      required: [review_id, actor_id, from, to, outcome, statement, accesses, emergency_accesses, reviewed_by, reviewed_at]
+      properties:
+        review_id:
+          $ref: "#/components/schemas/UUID"
+        actor_id:
+          $ref: "#/components/schemas/UUID"
+        from:
+          $ref: "#/components/schemas/Timestamp"
+        to:
+          $ref: "#/components/schemas/Timestamp"
+        outcome:
+          type: string
+          enum: [appropriate, escalated]
+        statement:
+          type: string
+        accesses:
+          type: integer
+          format: int64
+        emergency_accesses:
+          type: integer
+          format: int64
+        reviewed_by:
+          $ref: "#/components/schemas/UUID"
+        reviewed_at:
+          $ref: "#/components/schemas/Timestamp"
+    UnreviewedActor:
+      type: object
+      required: [actor_id, unreviewed, emergency, oldest_at, due_at, overdue]
+      properties:
+        actor_id:
+          $ref: "#/components/schemas/UUID"
+        unreviewed:
+          type: integer
+          format: int64
+        emergency:
+          type: integer
+          format: int64
+        oldest_at:
+          $ref: "#/components/schemas/Timestamp"
+        due_at:
+          $ref: "#/components/schemas/Timestamp"
+        overdue:
+          type: boolean
+    ProviderActivation:
+      type: object
+      required: [activation_id, grant_id, principal_id, scope, reason, duration_seconds, approval_required, requested_at, decided_by, decided_at, ends_at, in_force, ended_by, ended_at]
+      properties:
+        activation_id:
+          $ref: "#/components/schemas/UUID"
+        grant_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        scope:
+          $ref: "#/components/schemas/ProviderScope"
+        reason:
+          type: string
+        duration_seconds:
+          type: integer
+        approval_required:
+          type: boolean
+        requested_at:
+          $ref: "#/components/schemas/Timestamp"
+        decision:
+          type: string
+          enum: [approved, denied]
+          description: Absent while pending.
+        decided_by:
+          $ref: "#/components/schemas/NullableUUID"
+        decision_reason:
+          type: string
+        decided_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        ends_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        in_force:
+          type: boolean
+        ended_by:
+          $ref: "#/components/schemas/NullableUUID"
+        end_reason:
+          type: string
+        ended_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+    Consumer:
+      type: object
+      description: |
+        The reconciliation fields are absent until a reconciliation has run;
+        reconciliation_age_seconds is the time since, computed when the answer is built.
+      required: [consumer_id, principal_id, projection_version, max_accepted_age_seconds, stale_behavior, registered_at, event_types, reconciliation_interval_seconds, reconciliation_requested_at]
+      properties:
+        consumer_id:
+          type: string
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        projection_version:
+          type: string
+        max_accepted_age_seconds:
+          type: integer
+          format: int64
+        stale_behavior:
+          $ref: "#/components/schemas/StaleBehavior"
+        registered_at:
+          $ref: "#/components/schemas/Timestamp"
+        snapshot_mark:
+          type: integer
+          format: int64
+        last_reported_mark:
+          type: integer
+          format: int64
+        last_reported_at:
+          $ref: "#/components/schemas/Timestamp"
+        event_types:
+          type: array
+          items:
+            type: string
+        last_reconciled_at:
+          $ref: "#/components/schemas/Timestamp"
+        last_reconciled_mark:
+          type: integer
+          format: int64
+        last_reconciled_findings:
+          type: integer
+        last_reconciled_extra_findings:
+          type: integer
+          description: Findings of class extra in the last run; above 0 is a security incident.
+        reconciliation_age_seconds:
+          type: integer
+          format: int64
+        reconciliation_interval_seconds:
+          type: integer
+          description: How often the consumer reconciles its report.
+        reconciliation_requested_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+          description: Set by a restore bump; cleared by the consumer's next reconciliation.
+    ListedConsumer:
+      allOf:
+        - $ref: "#/components/schemas/Consumer"
+        - type: object
+          required: [state, stale]
+          properties:
+            state:
+              type: string
+              enum: [active, retired]
+            retired_at:
+              $ref: "#/components/schemas/Timestamp"
+            stale:
+              type: boolean
+              description: An active consumer that never reported, or last reported longer ago than its max_accepted_age.
+    SnapshotRow:
+      type: object
+      required: [membership_id, principal_id, tenant_id, workspace_id, subject_type, membership_status, membership_version, tenant_status, tenant_version, tenant_security_version]
+      properties:
+        membership_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        workspace_id:
+          $ref: "#/components/schemas/NullableUUID"
+        subject_type:
+          $ref: "#/components/schemas/SubjectType"
+        membership_status:
+          $ref: "#/components/schemas/MembershipStatus"
+        membership_version:
+          type: integer
+          format: int64
+        tenant_status:
+          $ref: "#/components/schemas/TenantStatus"
+        tenant_version:
+          type: integer
+          format: int64
+        tenant_security_version:
+          type: integer
+          format: int64
+    ProviderAuthorityRow:
+      type: object
+      required: [grant_id, principal_id, scope, kind, grant_status, grant_version, activation]
+      properties:
+        grant_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        scope:
+          $ref: "#/components/schemas/ProviderScope"
+        kind:
+          type: string
+          enum: [eligible, emergency]
+        grant_status:
+          type: string
+        grant_version:
+          type: integer
+          format: int64
+        activation:
+          type: [object, "null"]
+          description: The activation in force, or null.
+          required: [activation_id, ends_at]
+          properties:
+            activation_id:
+              $ref: "#/components/schemas/UUID"
+            ends_at:
+              $ref: "#/components/schemas/Timestamp"
+    Frontier:
+      type: object
+      required: [highest_committed_mark, oldest_unpublished_mark, oldest_unpublished_age_seconds, unpublished, security_dead_lettered, oldest_security_dead_letter_age_seconds, security_debt, observed_at]
+      properties:
+        highest_committed_mark:
+          type: integer
+          format: int64
+        oldest_unpublished_mark:
+          type: integer
+          format: int64
+        oldest_unpublished_age_seconds:
+          type: number
+        unpublished:
+          type: boolean
+        security_dead_lettered:
+          type: integer
+          format: int64
+          description: Authority-bearing events sitting unresolved as dead letters.
+        oldest_security_dead_letter_age_seconds:
+          type: number
+        security_debt:
+          type: boolean
+        observed_at:
+          $ref: "#/components/schemas/Timestamp"
+    Finding:
+      type: object
+      required: [classification, membership_id, tenant_id, principal_id, authoritative_version, projected_version, state]
+      properties:
+        classification:
+          type: string
+          enum: [missing, extra, mismatch]
+          description: extra is a security finding; somebody holds access nothing granted.
+        membership_id:
+          $ref: "#/components/schemas/UUID"
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        authoritative_version:
+          type: integer
+          format: int64
+        projected_version:
+          type: integer
+          format: int64
+        state:
+          type: [object, "null"]
+          description: The authoritative Membership to repair toward; null when authority holds none, which tells the consumer to remove the row.
+          required: [membership_id, principal_id, tenant_id, workspace_id, membership_status, membership_version, tenant_security_version]
+          properties:
+            membership_id:
+              $ref: "#/components/schemas/UUID"
+            principal_id:
+              $ref: "#/components/schemas/UUID"
+            tenant_id:
+              $ref: "#/components/schemas/UUID"
+            workspace_id:
+              $ref: "#/components/schemas/NullableUUID"
+            membership_status:
+              $ref: "#/components/schemas/MembershipStatus"
+            membership_version:
+              type: integer
+              format: int64
+            tenant_security_version:
+              type: integer
+              format: int64
+    AdvancedMembership:
+      type: object
+      required: [membership_id, tenant_id, from_version, to_version, membership_status, event_id]
+      properties:
+        membership_id:
+          $ref: "#/components/schemas/UUID"
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        from_version:
+          type: integer
+          format: int64
+        to_version:
+          type: integer
+          format: int64
+        membership_status:
+          $ref: "#/components/schemas/MembershipStatus"
+        event_id:
+          $ref: "#/components/schemas/NullableUUID"
+    Pause:
+      type: object
+      required: [paused, pause_id, reason, actor_id, correlation_id, recorded_at]
+      properties:
+        paused:
+          type: boolean
+        pause_id:
+          $ref: "#/components/schemas/NullableUUID"
+        reason:
+          $ref: "#/components/schemas/NullableString"
+        actor_id:
+          $ref: "#/components/schemas/NullableUUID"
+        correlation_id:
+          $ref: "#/components/schemas/NullableUUID"
+        recorded_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+    DeadLetter:
+      type: object
+      required: [event_id, consumer, event_type, authority_bearing, aggregate_id, version, lane, failure_class, failure_detail, attempts, first_failed_at, dead_lettered_at, resolved_at, resolution_type, resolved_by, resolution_reference, waived_at, waived_until, waived_by, waiver_reason]
+      properties:
+        event_id:
+          $ref: "#/components/schemas/UUID"
+        consumer:
+          type: string
+        event_type:
+          type: string
+        authority_bearing:
+          type: boolean
+        aggregate_id:
+          $ref: "#/components/schemas/NullableUUID"
+        version:
+          type: [integer, "null"]
+          format: int64
+        lane:
+          $ref: "#/components/schemas/NullableString"
+        failure_class:
+          type: string
+        failure_detail:
+          type: string
+        attempts:
+          type: integer
+        first_failed_at:
+          $ref: "#/components/schemas/Timestamp"
+        dead_lettered_at:
+          $ref: "#/components/schemas/Timestamp"
+        resolved_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        resolution_type:
+          $ref: "#/components/schemas/NullableString"
+        resolved_by:
+          $ref: "#/components/schemas/NullableString"
+        resolution_reference:
+          $ref: "#/components/schemas/NullableString"
+        waived_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        waived_until:
+          $ref: "#/components/schemas/NullableTimestamp"
+        waived_by:
+          $ref: "#/components/schemas/NullableString"
+        waiver_reason:
+          $ref: "#/components/schemas/NullableString"
+    Context:
+      type: object
+      description: No version, no grant and no other person (ADR-ORG-005 §5.2).
+      required: [membership_id, tenant_id, tenant_display_name, tenant_status, workspace_id, administers]
+      properties:
+        membership_id:
+          $ref: "#/components/schemas/UUID"
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        tenant_display_name:
+          type: string
+        tenant_status:
+          $ref: "#/components/schemas/TenantStatus"
+        workspace_id:
+          $ref: "#/components/schemas/NullableUUID"
+        administers:
+          type: boolean
+    Decision:
+      type: object
+      description: The membership fields and versions are present only on a granted decision.
+      required: [granted, tenant_id, principal_id, checked_at]
+      properties:
+        granted:
+          type: boolean
+        refusal:
+          type: string
+          enum: [no-membership, tenant-not-active]
+          description: Absent on a granted decision.
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        membership_id:
+          $ref: "#/components/schemas/UUID"
+        workspace_id:
+          $ref: "#/components/schemas/UUID"
+        subject_type:
+          $ref: "#/components/schemas/SubjectType"
+        membership_version:
+          type: integer
+          format: int64
+        tenant_security_version:
+          type: integer
+          format: int64
+        checked_at:
+          $ref: "#/components/schemas/Timestamp"
+    Rate:
+      type: object
+      required: [consumer_id, verify_calls, requests, ratio]
+      properties:
+        consumer_id:
+          type: string
+        verify_calls:
+          type: integer
+          format: int64
+        requests:
+          type: integer
+          format: int64
+        ratio:
+          type: number
+    Reporter:
+      type: object
+      required: [reporter_id, principal_id, reports, purpose, state, version, registered_at, registered_by, retired_at, retired_by]
+      properties:
+        reporter_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        reports:
+          $ref: "#/components/schemas/ReporterReports"
+        purpose:
+          type: string
+        state:
+          type: string
+          enum: [active, retired]
+        version:
+          type: integer
+          format: int64
+        registered_at:
+          $ref: "#/components/schemas/Timestamp"
+        registered_by:
+          $ref: "#/components/schemas/UUID"
+        retired_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        retired_by:
+          $ref: "#/components/schemas/NullableUUID"

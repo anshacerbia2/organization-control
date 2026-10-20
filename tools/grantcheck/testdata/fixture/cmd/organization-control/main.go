@@ -25,6 +25,7 @@ func main() {
 	_ = records.ProviderStanding(context.Background())
 	_ = records.EmergencyGrants(context.Background())
 	_ = records.ConsumerFor(context.Background())
+	_ = records.ReporterFor(context.Background())
 	_ = grants.Bootstrap(context.Background())
 
 	// The two scheduled sweeps, on the provider connections.

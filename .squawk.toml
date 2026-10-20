@@ -1,0 +1,39 @@
+# squawk, the destructive-statement gate of ADR-GLB-004 §5.1 item 2 (amended 2026-10-20). ci.yml runs
+# the pinned release over every migration after the cutover it names. squawk's rules are documented
+# at https://squawkhq.com/docs/rules.
+#
+# A reviewed exception is a rule-scoped comment on the line before the statement, never an exclusion
+# here: "Rule violations can be ignored via the `squawk-ignore` comment" (squawk README), for example
+#
+#   -- squawk-ignore ban-drop-column
+#
+# A statement that trips two rules names both in one comma-separated comment, on the line directly
+# before it: of two stacked comment lines, squawk 2.70.0 applies only the nearer one.
+#
+#   -- squawk-ignore ban-drop-constraint, constraint-missing-not-valid
+#
+# Writing a migration for this gate: Atlas writes the file (`atlas migrate diff`), the author then
+# opens it with the two timeouts below and runs `atlas migrate hash`. require-timeout-settings: "You
+# must configure a `lock_timeout` to safely apply migrations", and "a statement_timeout also helps
+# prevent long migrations that consume too many database resources". SET LOCAL, so the values end with
+# the file's transaction and never reach the next file:
+#
+#   SET LOCAL lock_timeout = '5s';
+#   SET LOCAL statement_timeout = '60s';
+
+pg_version = "17.0"
+
+# Atlas runs each file in a transaction of its own: "By default, Atlas creates one transaction per
+# migration file" (atlasgo.io/versioned/apply, --tx-mode file). Linting as if it did not would demand
+# IF NOT EXISTS guards (prefer-robust-stmts) that a file rolled back whole never needs.
+assume_in_transaction = true
+
+excluded_rules = [
+  # The schema uses integer on purpose where a value is bounded: an activation's duration_seconds
+  # (CHECK > 0, at most the deployment's maximum), a bulk Membership action's counts and an item's
+  # position (at most MaxBatchItems, 500, as SCIM asks a declared maximum of), and a reconciliation
+  # run's finding counts. Every identifier is a uuid, never a sequence, and every version, mark and
+  # running counter is bigint, so the rule's problem, "hitting the max `int` limit", has no column to
+  # land on. Review of schema.hcl decides a column's type.
+  "prefer-bigint-over-int",
+]

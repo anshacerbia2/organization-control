@@ -98,9 +98,18 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
 
+      # The standard Atlas distribution, pinned to an exact release and never `latest`
+      # (ADR-GLB-004 §5.4, amended 2026-10-20). The same release as the migrate image's pin in the
+      # Dockerfile, so CI validates and plans with the Atlas that applies the migrations. The
+      # action takes the version "in the format of "v0.14.1"" (its action.yml).
       - uses: ariga/setup-atlas@2f3c785c89a15e1c0d07bcae3900fb5feb969eea # v0.3
         with:
-          version: latest
+          version: v1.3.4
+
+      - name: the Atlas CLI is the pinned release
+        run: |
+          atlas version
+          atlas version | grep -q 'v1.3.4' || { echo "::error::setup-atlas installed another Atlas than v1.3.4"; exit 1; }
 
       - name: gofmt
         run: |
@@ -117,6 +126,18 @@ jobs:
       - name: build
         run: go build ./...
 
+      # ADR-GLB-010 §5.1: "Each served API SHALL publish its specification (OpenAPI for HTTP) as a
+      # versioned artifact". api/openapi.yaml is that artifact, so an invalid document fails here.
+      # Redocly CLI is pinned by version and digest and runs with no network; api/redocly.yaml makes
+      # every rule of its recommended set an error, and .redocly.lint-ignore.yaml names the two probe
+      # exceptions. That the document describes every route in routes.go, and nothing else, is
+      # internal/httpapi/openapi_test.go's, run with the tests below.
+      - name: the API specification lints
+        run: >-
+          docker run --rm --network none -e REDOCLY_TELEMETRY=off -v "$PWD/api":/api:ro -w /api
+          redocly/cli:2.55.0@sha256:224477ac49f5e8fdfd3f244d30ed1db9d74f57263a46117a09d5894f6751a2a0
+          lint openapi.yaml
+
       # The dev issuer is behind its build tag, so the three steps above never compile it. Its client
       # credentials grant is what foundation-reference's system proof obtains this service's
       # delivery token from, and its refusals (RFC 7523 §3) are tested here, under the tag.
@@ -131,21 +152,67 @@ jobs:
       - name: atlas migration directory integrity
         run: atlas migrate validate --env ci
 
-      # ADR-GLB-004 requires the pipeline to block a destructive plan rather than report one,
-      # and names `atlas migrate lint` as the mechanism. Since Atlas v0.38 that command is
-      # available only to Atlas Pro accounts, so the mandated gate cannot run on the free CLI.
-      #
-      # This is the interim replacement. It is cruder than the analyzer it stands in for — it
-      # reads text rather than a parsed plan — but it fails, which is the property that matters,
-      # and it is recorded as debt in ROADMAP.md rather than presented as equivalent.
+      # The destructive-statement gate of ADR-GLB-004 §5.1 item 2. With `atlas migrate validate`
+      # above and the synchronisation check below it meets the gate without Atlas Pro: "A pipeline
+      # that implements items 1 and 2 meets this gate. It is not a waiver" (ADR-GLB-004, amended
+      # 2026-10-20). The migrations are split at one cutover, the last migration applied before
+      # squawk:
+      #   - up to the cutover, the text match these migrations were reviewed against. Their reviewed
+      #     `atlas:destructive-approved` lines stay, because editing an applied migration breaks
+      #     atlas.sum and fails the integrity step above;
+      #   - after it, squawk, the gate's preferred form, in the next step. squawk 2.70.0 flags every
+      #     statement of the list but TRUNCATE (it bans only TRUNCATE ... CASCADE), so the text match
+      #     keeps TRUNCATE there, approved by the same annotation.
       - name: destructive statements are blocked
         run: |
+          cutover=migrations/20261019120000_remove_identity_verified.sql
           pattern='DROP TABLE|DROP SCHEMA|DROP COLUMN|DROP CONSTRAINT|DROP INDEX|RENAME TO|RENAME COLUMN|TRUNCATE'
-          if grep -nEi "$pattern" migrations/*.sql | grep -v 'atlas:destructive-approved'; then
+          before=() after=()
+          for file in migrations/*.sql; do
+            if [[ "$file" > "$cutover" ]]; then after+=("$file"); else before+=("$file"); fi
+          done
+          found=$(
+            grep -nEi "$pattern" "${before[@]}" | grep -v 'atlas:destructive-approved'
+            [ "${#after[@]}" -eq 0 ] || grep -nEiH 'TRUNCATE' "${after[@]}" | grep -v 'atlas:destructive-approved'
+          ) || true
+          if [ -n "$found" ]; then
+            echo "$found"
             echo "::error::a migration contains a destructive statement; a multi-phase deployment is required by STD-GLB-002, or annotate the line with atlas:destructive-approved after review"
             exit 1
           fi
-          echo "no destructive statements in migrations/"
+          echo "no unapproved destructive statements in migrations/"
+
+      # squawk, a "Linter for Postgres migrations & SQL" that parses each statement, so a word in a
+      # comment is not flagged and an approval names the one rule it waives, as a reviewed
+      # `-- squawk-ignore <rule>` comment on the line before the statement. Its configuration is
+      # .squawk.toml, which says why each excluded rule is excluded. It lints every migration after
+      # the cutover on every run, so each is held to the same pinned release it was reviewed with.
+      #
+      # Pinned by version and checksum, as STD-GLB-009 §Container Images rule 6 asks of a scanner.
+      # The sha256 is the release asset's digest as GitHub's release API publishes it
+      # (`gh api repos/sbdchd/squawk/releases/tags/v2.70.0`, asset squawk-linux-x64), and it matched
+      # the downloaded file on 2026-10-20.
+      - name: squawk lints the migrations after the cutover
+        env:
+          SQUAWK_VERSION: v2.70.0
+          SQUAWK_SHA256: 836ba2ab0c0ec30ae02c9f2cec065b341ff853765ceaa3965c22109c2f53eb1c
+        run: |
+          cutover=migrations/20261019120000_remove_identity_verified.sql
+          after=()
+          for file in migrations/*.sql; do
+            [[ "$file" > "$cutover" ]] && after+=("$file")
+          done
+          if [ "${#after[@]}" -eq 0 ]; then
+            echo "no migration after the cutover yet"
+            exit 0
+          fi
+          bin="$RUNNER_TEMP/squawk"
+          curl -fsSL -o "$bin" "https://github.com/sbdchd/squawk/releases/download/${SQUAWK_VERSION}/squawk-linux-x64"
+          echo "${SQUAWK_SHA256}  ${bin}" | sha256sum -c -
+          chmod +x "$bin"
+          "$bin" --version
+          printf 'linting %s\n' "${after[@]}"
+          "$bin" --config .squawk.toml "${after[@]}"
 
       # A migration directory that no longer matches schema.hcl is drift that would be applied
       # silently on the next deploy.

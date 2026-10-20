@@ -286,6 +286,90 @@ table "provider_grant" {
   }
 }
 
+// A reporter: a workload Principal registered to report one kind of outcome (ADR-ORG-001 §5.11,
+// amended 2026-10-20; TDD-organization-control-001 §Reporters). The provisioning system reports the
+// provisioning outcomes, and an obligation-owning domain resolves the obligations raised against it.
+// A workload token is a reporter's when its principal_id is an active row here, and it reaches the
+// routes `reports` names and no other. Not tenant-scoped, like the provider grant: a reporter reports
+// for every Tenant. The provider role reads and inserts it and updates the retirement columns alone.
+table "reporter" {
+  schema  = schema.organization
+  comment = "Workload Principals admitted to report provisioning or one domain's obligations. Checked for every report."
+
+  column "reporter_id" {
+    null = false
+    type = uuid
+  }
+  // Unique across every row, retired ones included, so a workload Principal is one reporter for
+  // good and its owner's review reads one history.
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+  // provisioning, or obligation:<domain>.
+  column "reports" {
+    null = false
+    type = text
+  }
+  column "purpose" {
+    null = false
+    type = text
+  }
+  // Moves on every change, so a retirement names the record the operator was shown.
+  column "version" {
+    null    = false
+    type    = bigint
+    default = 1
+  }
+  column "registered_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "registered_by" {
+    null = false
+    type = uuid
+  }
+  column "register_reason" {
+    null = false
+    type = text
+  }
+  column "retired_at" {
+    null = true
+    type = timestamptz
+  }
+  column "retired_by" {
+    null = true
+    type = uuid
+  }
+  column "retire_reason" {
+    null = true
+    type = text
+  }
+
+  primary_key {
+    columns = [column.reporter_id]
+  }
+
+  index "reporter_principal_unique" {
+    unique  = true
+    columns = [column.principal_id]
+  }
+
+  check "reporter_reports_check" {
+    expr = "(reports = 'provisioning') OR (reports ~ '^obligation:[a-z0-9][a-z0-9-]{0,62}$')"
+  }
+  check "reporter_purpose_check" {
+    expr = "(btrim(purpose) <> '') AND (length(purpose) <= 500)"
+  }
+  check "reporter_reason_check" {
+    expr = "btrim(register_reason) <> ''"
+  }
+  check "reporter_retirement_check" {
+    expr = "((retired_at IS NULL) = (retired_by IS NULL)) AND ((retired_at IS NULL) = (retire_reason IS NULL)) AND ((retire_reason IS NULL) OR (btrim(retire_reason) <> ''))"
+  }
+}
+
 // Which version each published provider grant event carries, written in the publishing transaction.
 // The SUPERSEDED resolution predicate reads it (TDD-organization-control-005). Provider-only, by
 // grant, like the grant itself.
@@ -1755,7 +1839,7 @@ table "privileged_access" {
   column "authority" {
     null    = false
     type    = text
-    comment = "emergency, activation, eligible or consumer: what admitted the access."
+    comment = "emergency, activation, eligible, consumer or reporter: what admitted the access."
   }
   column "activation_id" {
     null    = true
@@ -1780,7 +1864,7 @@ table "privileged_access" {
   }
 
   check "privileged_access_authority_check" {
-    expr = "authority IN ('emergency', 'activation', 'eligible', 'consumer')"
+    expr = "authority IN ('emergency', 'activation', 'eligible', 'consumer', 'reporter')"
   }
   check "privileged_access_activation_check" {
     expr = "(authority = 'activation') = (activation_id IS NOT NULL)"
@@ -1812,7 +1896,9 @@ table "privileged_access" {
 }
 
 // privileged_access_review is a provider's review of another provider's access over a period
-// (ADR-ORG-002 §5.6). Insert-only: no runtime role updates or deletes one, and nothing purges one.
+// (ADR-ORG-002 §5.6). Insert-only: no runtime role updates or deletes one. The maintenance stage
+// purges a review recorded more than 7 years ago, and rls.sql's retention trigger refuses the delete
+// of a younger one (STD-GLB-007 1.1.0).
 //
 // The separation check is AC-5 in the database, as provider_activation_separation_check is for an
 // approval: the reviewer is never the provider whose access is reviewed. The counts are taken in the
@@ -1979,6 +2065,21 @@ table "consumer" {
     null = true
     type = integer
   }
+  // How often the consumer reconciles itself, as it declared at registration (ADR-ORG-001 §5.7,
+  // amended 2026-10-20). The reconciliation-age alerts read it: a warning past one interval, critical
+  // past two (TDD-organization-control-002 §Reconciliation Interval).
+  column "reconciliation_interval" {
+    null    = false
+    type    = sql("interval")
+    default = sql("'1 day'::interval")
+  }
+  // Set by a restore to an older point, which makes every consumer reconcile before normal operation
+  // (ADR-ORG-003 §5.5); cleared by the consumer's next recorded reconciliation. While set, the
+  // reconciliation is overdue whatever last_reconciled_at says.
+  column "reconciliation_requested_at" {
+    null = true
+    type = timestamptz
+  }
 
   // The three columns below carry the `:verify` misuse signal.
   //
@@ -2023,6 +2124,12 @@ table "consumer" {
     columns = [column.consumer_id]
   }
 
+  // A minute to a week: shorter is a poll, not an anti-entropy pass, and longer leaves a lost event
+  // uncorrected past any budget this platform states (TDD-organization-control-002 §Reconciliation
+  // Interval).
+  check "consumer_reconciliation_interval_check" {
+    expr = "(reconciliation_interval >= '00:01:00'::interval) AND (reconciliation_interval <= '7 days'::interval)"
+  }
   check "stale_behavior_check" {
     expr = "stale_behavior IN ('use_with_marker', 'revalidate', 'fail_closed')"
   }

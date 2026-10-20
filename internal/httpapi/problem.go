@@ -149,9 +149,11 @@ var mapping = []struct {
 	{invitation.ErrSettled, platform.StateTransitionRefused},
 	{invitation.ErrTransitionRefused, platform.StateTransitionRefused},
 	{invitation.ErrExpired, platform.PreconditionUnmet},
-	// ADR-ORG-007 §5.4: the one refusal for every failed lookup is 404, and a refused Tenant is 409,
-	// because by then the caller has proved they hold the invited address.
-	{invitation.ErrNotAcceptable, platform.NotFound},
+	// ADR-ORG-007 §5.4: the one refusal for every failed lookup is invitation-not-acceptable, a 404
+	// with one constant detail, and a refused Tenant is 409, because by then the caller has proved
+	// they hold the invited address. A type of its own since foundation-platform v0.5.0
+	// (STD-GLB-001 1.7.0), so a client branches on the type and not on a 404 any route may answer.
+	{invitation.ErrNotAcceptable, platform.InvitationNotAcceptable},
 	{invitation.ErrIdentityUnavailable, platform.DependencyUnavailable},
 	{invitation.ErrTenantNotActive, platform.StateTransitionRefused},
 	{invitation.ErrAlreadyMember, platform.StateTransitionRefused},
@@ -218,6 +220,12 @@ var mapping = []struct {
 	{authority.ErrGrantNotFound, platform.NotFound},
 	{authority.ErrAlreadyGranted, platform.StateTransitionRefused},
 	{authority.ErrAlreadyRevoked, platform.StateTransitionRefused},
+	// The reporter registry (ADR-ORG-001 §5.11, amended 2026-10-20).
+	{authority.ErrReporterInvalid, platform.ValidationFailed},
+	{authority.ErrReporterRegistered, platform.StateTransitionRefused},
+	{authority.ErrReporterNotFound, platform.NotFound},
+	{authority.ErrReporterRetired, platform.StateTransitionRefused},
+	{authority.ErrReporterVersion, platform.VersionConflict},
 	// StateTransitionRefused: the request is well formed, and the estate refuses it until another
 	// provider holds a grant. The refusal says so.
 	{authority.ErrLastGrant, platform.StateTransitionRefused},

@@ -101,6 +101,10 @@ const (
 	AuthorityEligible = "eligible"
 	// AuthorityConsumer is a registered projection consumer acting on its own records.
 	AuthorityConsumer = "consumer"
+	// AuthorityReporter is a registered reporter workload: the provisioning system or an
+	// obligation-owning domain, reporting on the routes its record names (ADR-ORG-001 §5.11, amended
+	// 2026-10-20). Reviewed through the workload's owner, not in the weekly provider review.
+	AuthorityReporter = "reporter"
 )
 
 // Authority is what admitted a provider-scoped request: an emergency grant, an activation (named),
@@ -123,6 +127,11 @@ func ActivationAuthority(activation id.UUID) Authority {
 // alone.
 func EligibleAuthority() Authority { return Authority{kind: AuthorityEligible} }
 
+// ReporterAuthority is a registered reporter workload, which reaches the report routes its record
+// names alone. It opens the provider scope, because the reports change records only the provider
+// role may write, and its access record says it was a reporter and not provider personnel.
+func ReporterAuthority() Authority { return Authority{kind: AuthorityReporter} }
+
 // Kind is the authority's name, as the record stores it, or "" for none.
 func (a Authority) Kind() string { return a.kind }
 
@@ -132,7 +141,7 @@ func (a Authority) Activation() id.UUID { return a.activation }
 // valid is whether the authority is one a provider scope may carry.
 func (a Authority) valid() bool {
 	switch a.kind {
-	case AuthorityEmergency, AuthorityEligible:
+	case AuthorityEmergency, AuthorityEligible, AuthorityReporter:
 		return a.activation.IsNil()
 	case AuthorityActivation:
 		return !a.activation.IsNil()
@@ -788,6 +797,31 @@ func WithConsumerScope(ctx context.Context, pool *ConsumerPool, reason string, f
 func WithConsumerSnapshot(ctx context.Context, pool *ConsumerPool, reason string, fn Body) error {
 	if pool == nil {
 		return errors.New("db: a consumer pool is required")
+	}
+	return withRecordedScope(ctx, pool.tx, pool.recorder, reason, true, true, fn)
+}
+
+// WithConsumerReconciliation runs fn on the provider pool, as the provider role, for a registered
+// consumer reconciling its own copy (ADR-ORG-001 §5.7, amended 2026-10-20). It requires a consumer
+// scope, and its access record names the consumer authority.
+//
+// A bridge of one purpose, as WithProviderInTenant is one. The work is this service's own: it reads
+// every Tenant's authoritative Memberships, which the consumer's snapshot already does, and publishes
+// the repair event, which only the provider role may append. The consumer supplies its report and
+// nothing else, and the event's content is what authority holds. Granting the consumer role INSERT on
+// the outbox instead would let a leaked consumer credential publish any authority event.
+func WithConsumerReconciliation(ctx context.Context, pool *ProviderPool, reason string, fn Body) error {
+	if pool == nil {
+		return errors.New("db: a provider pool is required")
+	}
+	return withRecordedScope(ctx, pool.tx, pool.recorder, reason, false, true, fn)
+}
+
+// WithConsumerReconciliationSnapshot is WithConsumerReconciliation in a read-only REPEATABLE READ
+// transaction, for the comparison's one instant, as WithProviderSnapshot is for a provider's.
+func WithConsumerReconciliationSnapshot(ctx context.Context, pool *ProviderPool, reason string, fn Body) error {
+	if pool == nil {
+		return errors.New("db: a provider pool is required")
 	}
 	return withRecordedScope(ctx, pool.tx, pool.recorder, reason, true, true, fn)
 }

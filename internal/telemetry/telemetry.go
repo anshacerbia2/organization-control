@@ -62,6 +62,13 @@ var (
 	ConsumerExtraFindings = Instrument{Name: "organization.projection.consumer_extra_findings", Unit: "{finding}"}
 	OldestUnapplied       = Instrument{Name: "organization.enforcement.oldest_unapplied_age", Unit: "s"}
 
+	// A consumer's reconciliation age against the interval it declared, and a restore's unanswered
+	// request that it reconcile (ADR-ORG-001 §5.7, ADR-ORG-003 §5.5, amended 2026-10-20). Prometheus:
+	// "The key metric of a batch job is the last time it succeeded."
+	ConsumerReconciliationAge       = Instrument{Name: "organization.projection.consumer_reconciliation_age", Unit: "s"}
+	ConsumerReconciliationInterval  = Instrument{Name: "organization.projection.consumer_reconciliation_interval", Unit: "s"}
+	ConsumerReconciliationRequested = Instrument{Name: "organization.projection.consumer_reconciliation_requested", Unit: "{request}"}
+
 	// The lifecycle gauges of TDD-organization-control-004 and -003 §Operational Notes.
 	ObligationsOverdue      = Instrument{Name: "organization.offboarding.obligations_overdue", Unit: "{obligation}"}
 	OldestOverdueObligation = Instrument{Name: "organization.offboarding.oldest_overdue_obligation_age", Unit: "s"}
@@ -91,7 +98,8 @@ var (
 
 	Instruments = []Instrument{OutboxUnpublished, OutboxOldestUnpublished, SecurityDebt, SecurityDebtOldest,
 		StaleDeadLetters, StaleDeadLettersOldest, ConsumerReportAge, ConsumerMaxAcceptedAge, ConsumerVerifyRatio,
-		ConsumerExtraFindings, OldestUnapplied, ObligationsOverdue, OldestOverdueObligation,
+		ConsumerExtraFindings, OldestUnapplied, ConsumerReconciliationAge, ConsumerReconciliationInterval,
+		ConsumerReconciliationRequested, ObligationsOverdue, OldestOverdueObligation,
 		OffboardingsInProgress, OldestOffboarding, ProvisioningRequests, OldestProvisioning,
 		IsolationRefusals, InvitationLookups, InvitationAcceptancesRefused,
 		SweepLastSuccess, SweepLastRun, SweepInterval, SweepRuns, SweepAffected}
@@ -166,6 +174,18 @@ func Register(provider metric.MeterProvider, signals reader, deployable, system 
 	if err != nil {
 		return err
 	}
+	reconciliationAge, err := gauge(ConsumerReconciliationAge)
+	if err != nil {
+		return err
+	}
+	reconciliationInterval, err := gauge(ConsumerReconciliationInterval)
+	if err != nil {
+		return err
+	}
+	reconciliationRequested, err := gauge(ConsumerReconciliationRequested)
+	if err != nil {
+		return err
+	}
 
 	// Every series carries deployable and system, as TDD-foundation-platform-002 requires.
 	identity := []attribute.KeyValue{attribute.String("deployable", deployable), attribute.String("system", system)}
@@ -198,12 +218,16 @@ func Register(provider metric.MeterProvider, signals reader, deployable, system 
 				o.ObserveFloat64(verify, *c.VerifyRatio, with(consumer))
 			}
 			o.ObserveFloat64(extra, float64(c.ExtraFindings), with(consumer))
+			o.ObserveFloat64(reconciliationAge, c.ReconciliationAge, with(consumer))
+			o.ObserveFloat64(reconciliationInterval, c.ReconciliationInterval, with(consumer))
+			o.ObserveFloat64(reconciliationRequested, c.ReconciliationRequested, with(consumer))
 		}
 		for _, u := range s.Unapplied {
 			o.ObserveFloat64(unapplied, u.OldestAge, with(attribute.String("consumer", u.Consumer)))
 		}
 		return nil
-	}, unpublished, unpublishedAge, debt, debtAge, stale, staleAge, reportAge, budget, verify, extra, unapplied)
+	}, unpublished, unpublishedAge, debt, debtAge, stale, staleAge, reportAge, budget, verify, extra, unapplied,
+		reconciliationAge, reconciliationInterval, reconciliationRequested)
 	if err != nil {
 		return err
 	}

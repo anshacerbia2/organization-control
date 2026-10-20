@@ -15,6 +15,7 @@ The Compose project is `scnehaux-organization-control-dev`.
 | `organization-control` | The API, with its delivery dispatcher (ADR-GLB-018 §5.4) and the two scheduled sweeps (TDD-003 §Scheduled Sweeps) in process, on `127.0.0.1:8083` (`ORGANIZATION_CONTROL_PORT`) |
 | `bootstrap-provider` | One-off task: the first provider grant |
 | `maintenance` | One-off task: the daily maintenance stage |
+| `restore-bump` | One-off task: the restore bump, run by `restore.sh` after a restore and before the service serves (ADR-ORG-003 §5.5) |
 
 | Network | What it is |
 | :-- | :-- |
@@ -83,12 +84,15 @@ image, so this rebuilds them too.
 | :-- | :-- | :-- |
 | `bootstrap-provider` | `docker compose run --rm bootstrap-provider -principal-id <id> -operator "<you>" -reason "<why>"` | once per Control Database: it refuses while any grant exists |
 | `maintenance` | `docker compose run --rm maintenance` | daily, from cron; it exits 3 on a security incident open past 24 hours |
+| `restore-bump` | run by `restore.sh` (§Backups); never by hand on a database that was not just restored | once per restore, before the service serves |
 | `scripts/dev-provisioning.ps1` | `pwsh ./scripts/dev-provisioning.ps1 -IdentityRepo <identity-control checkout> -State <wiring state file> -TenantId <id> -Realized` (or `-Failed -Reason "<why>"`) | for each Tenant waiting on provisioning: it stands in for the provisioning system (§Provisioning a Tenant on the development server) |
 | `scripts/dev-obligation.ps1` | `pwsh ./scripts/dev-obligation.ps1 -IdentityRepo <identity-control checkout> -State <wiring state file> -OffboardingId <id> -ObligationId <id> -Domain <its domain> -Completed` (or `-Waived -Reason "<why>"`, `-Failed -Reason "<why>"`) | for each obligation an offboarding raised: it stands in for the domain that owns it (§Offboarding a Tenant on the development server) |
 | `scripts/dev-deprovisioning.ps1` | `pwsh ./scripts/dev-deprovisioning.ps1 -IdentityRepo <identity-control checkout> -State <wiring state file> -OffboardingId <id> -Realized` (or `-Failed -Reason "<why>"`) | for each released offboarding: it stands in for the provisioning system's deprovisioning report (§Offboarding a Tenant on the development server) |
 
 `maintenance` creates the outbox partitions ahead, applies the retention, purges expired Membership
-batch previews and counts stale incidents (the repository README §Building the database). On the
+batch previews, purges idempotency keys completed more than 7 days ago, purges audit records older
+than 7 years (the privileged-access record, its reviews and emergency grant uses), and counts stale
+incidents (the repository README §Building the database). On the
 development server, in the crontab of the user that runs the stacks (`crontab -e`), with the checkout
 where that server keeps it:
 
@@ -141,7 +145,7 @@ dropped (§Never do).
 Use plain ASCII in every `X-Administrative-Reason`. Anything else is refused with `400`
 (STD-GLB-001 §Request Header Values).
 
-**Run it as a script.** `scripts/dev-wire.ps1` is steps 1 to 6 below, and `scripts/dev-wiring-proof.ps1`
+**Run it as a script.** `scripts/dev-wire.ps1` is steps 1 to 6b below, and `scripts/dev-wiring-proof.ps1`
 is step 7. They are the files CI runs against the three stacks on every change and every night
 (`.github/workflows/deploy-dev.yml`, STD-GLB-009 1.3.0), so the procedure on the server is the
 procedure that was tested:
@@ -276,6 +280,25 @@ IDENTITY_DELIVERY_PRINCIPAL_ID=<organization-control-workload's principal_id>
 IDENTITY_ORGANIZATION_BASE_URL=http://organization-control:8080
 ```
 
+### 6b. The development reporters
+
+A reporter is a workload this service admits on one kind of report route, from its record here
+(ADR-ORG-001 §5.11, amended 2026-10-20). Production's provisioning system and each obligation-owning
+domain are one each. On this server the stand-ins of §Provisioning a Tenant and §Offboarding a Tenant
+report as development reporters, so development runs production's path (STD-GLB-009 rule 13). For each
+of `provisioning`, `obligation:product`, `obligation:hcm`, `obligation:billing` and
+`obligation:audit`, `dev-wire.ps1`:
+
+1. makes a key pair with the kernel's tool, beside the state file, never in a directory a container
+   mounts;
+2. creates a workload in identity-control, `dev-reporter-<what it reports>`, owned by the operator,
+   with `organization-control-api` as its audience and the public key;
+3. registers it here: `POST /v1/reporters` `{"principal_id", "reports", "purpose"}`;
+4. writes its client and key file into the state file's `reporters`.
+
+`GET /v1/reporters` lists them. A reporter is retired with `POST /v1/reporters/{reporter_id}/retire`
+`{"expected_version"}`, which stops its next report.
+
 ### 7. What you should see
 
 - identity-control logs `the provider projection is fresh` within 15 seconds.
@@ -307,7 +330,8 @@ A Tenant is created `requested` and becomes `active` only after the provisioning
 its boundary exists (TDD-organization-control-003 §Tenant State Machine). **No provisioning system runs
 on a development server.** You stand in for it with `scripts/dev-provisioning.ps1`, which reports the
 outcome through the two routes the provisioning system calls, `POST /v1/provisioning/realized` and
-`/failed`, with your provider token (TDD-organization-control-003 1.15.0 §The Provisioning System on a
+`/failed`, as the development provisioning reporter of §Wiring to other services step 6b, after reading
+the Tenant with your provider token (TDD-organization-control-003 1.18.0 §The Provisioning System on a
 Development Server). Production has a real provisioning system and never runs it.
 
 It needs the wiring done (§Wiring to other services): the state file `dev-wire.ps1` wrote, and the
@@ -355,8 +379,9 @@ An offboarding waits on two parties that do not run on a development server: the
 obligations, which resolve them, and the provisioning system, which reports the deprovisioning release
 sends. Without them, an obligation stays open and Release stays refused, and a released offboarding's
 deprovisioning stays `requested`, ages to `unresolved`, and Retire stays disabled. You stand in for
-both with two scripts, through the routes they call, with your provider token
-(TDD-organization-control-004 1.13.0 §Offboarding on a Development Server):
+both with two scripts, through the routes they call, as the development reporters of §Wiring to other
+services step 6b; each reads first with your provider token (TDD-organization-control-004 1.15.0
+§Offboarding on a Development Server). No provider token resolves an obligation:
 
 - `scripts/dev-obligation.ps1` resolves one obligation as its domain, through
   `POST /v1/obligations/{obligation_id}/resolve`. Organization Experience offers no control for this on
@@ -465,6 +490,21 @@ local socket, which the image trusts, so no password is typed or stored. In the 
 30 2 * * * /home/development/apps/organization-control/deploy/dev/backup.sh /mnt/imam-storage/backups/organization-control >/dev/null
 ```
 
+The cron line runs `backup.sh`, never a bare `pg_dump`, because the script is what writes the two
+steps and keeps the count (STD-GLB-009 rule 9, 1.10.0):
+
+- **Each file is written as `<name>.partial`**, with `umask 077`, and renamed only once its command
+  succeeded. A failed run stops there and leaves at most a `.partial`, never a file that looks like a
+  backup.
+- **Retention is by count: the newest 14 complete sets.** Once both files of the new set are in
+  place, the script deletes the complete sets older than the newest 14 and names each on stderr. A
+  set is complete when both files of one `<date>` exist under their final names. A failed run
+  deletes nothing, and the set just written is never deleted. A lone file or a `.partial` is not
+  counted and not deleted: look at it, then remove it by hand. Never prune with an age-based
+  `find -mtime +N -delete`, which deletes the last good sets once backups have stopped for N days.
+- **The directory is on this host.** A copy off the host is required before production; a
+  development server is redeployed from zero, so STD-GLB-009 accepts the gap there and nowhere else.
+
 Copy `.env` and `keys/` alongside when they change; without them a restored database has no
 credentials to match and the service no workload key.
 
@@ -485,6 +525,14 @@ exists", then restores the database whole with `pg_restore --create --exit-on-er
 the first error. The migrate job that `up` runs then applies anything newer and asserts RLS, the
 privileges and the five login roles' passwords from `.env` again.
 
+Last, `restore.sh` runs the restore bump before anything serves (ADR-ORG-003 §5.5): it builds the
+migrate image, runs the migrate job, then `docker compose --profile restore-bump run --rm restore-bump`,
+which adds 10^9 to every Tenant version, Tenant security version and provider grant version, publishes
+the withdrawn Tenants and grants at their new versions and no active one, and asks every consumer to
+reconcile. A restore to an older point gives back versions consumers have already seen superseded, and
+they discard a lower version as already applied. `RESTORE_BUMP=0` skips it; only the drill sets it,
+because it compares the restored tables with the source first and bumps after.
+
 `PAUSE_REASON` makes `restore.sh` record a pause of Tenant administration in the restored database
 before anything serves, so no Tenant administrator changes authority until the runbook's
 reconciliation is done; a provider lifts it with `POST /v1/tenant-administration-pause`
@@ -501,12 +549,17 @@ would fail.
 the restore drill `scripts/dev-restore-drill.sh` (STD-GLB-002 §Restore Evidence): it begins an
 offboarding, backs the wired stack up, deletes its volume, restores, and compares schema, migration
 version, every table, sequence and role with the source. The outbox, its deliveries, the receipts
-and the consumer registry must be among the non-empty tables. It then starts the service, reads the
+and the consumer registry must be among the non-empty tables. It also seeds a directory with 16 older
+complete sets and requires `backup.sh` to keep exactly the newest 14, the one it wrote among them, and
+to fail and delete nothing while the database is down. It then starts the service, reads the
 provider grants, Organizations and offboardings through the API, and times the recovery against the
 15-minute RTO. The evidence is the job's `restore-evidence` artifact. A daily dump loses up to 24
 hours, against the 1-minute RPO of `PAD-PLT-002 §6.2`. A restore to an older point is reconciled by
 the runbook's procedure, which moves each Membership a consumer holds at a higher version past it
-(`POST /v1/projections/advance-versions`, SAD-004 §6.6); the drill does not exercise it. The runbook is
+(`POST /v1/projections/advance-versions`, SAD-004 §6.6); the drill does not exercise it. The drill does
+run the restore bump on the restored database, and requires every Tenant version at 10^9 or above,
+only withdrawals published, every consumer asked to reconcile, and identity-control holding a bumped
+Tenant version. The runbook is
 [`docs/runbooks/organization-database-restore.md`](../../docs/runbooks/organization-database-restore.md).
 
 ## Never do

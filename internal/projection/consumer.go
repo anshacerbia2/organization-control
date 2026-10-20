@@ -122,6 +122,16 @@ type Consumer struct {
 	// LastReconciledExtraFindings is how many of the last run's findings were `extra`: access the
 	// consumer serves and authority does not grant (TDD-organization-control-002 §Operational Notes).
 	LastReconciledExtraFindings *int
+
+	// ReconciliationInterval is how often the consumer reconciles itself, as it declared (ADR-ORG-001
+	// §5.7, amended 2026-10-20). The reconciliation-age alerts are a warning past one interval and
+	// critical past two.
+	ReconciliationInterval time.Duration
+
+	// ReconciliationRequestedAt is set by a restore to an older point, which has every consumer
+	// reconcile before normal operation (ADR-ORG-003 §5.5), and cleared by its next recorded
+	// reconciliation. While set, the reconciliation is overdue.
+	ReconciliationRequestedAt *time.Time
 }
 
 // Registration is a consumer declaring what it needs.
@@ -141,6 +151,27 @@ type Registration struct {
 	// registration is the subscription: from its commit every event of these types owes the
 	// consumer a delivery (TDD-organization-control-002 §Consumer Registry).
 	EventTypes []string
+
+	// ReconciliationInterval is how often the consumer reconciles itself (ADR-ORG-001 §5.7). Zero
+	// takes DefaultReconciliationInterval; otherwise from MinReconciliationInterval to
+	// MaxReconciliationInterval.
+	ReconciliationInterval time.Duration
+}
+
+// The reconciliation interval's bounds and default (TDD-organization-control-002 §Reconciliation
+// Interval). The database checks the same bounds.
+const (
+	MinReconciliationInterval     = time.Minute
+	MaxReconciliationInterval     = 7 * 24 * time.Hour
+	DefaultReconciliationInterval = 24 * time.Hour
+)
+
+// interval is the declared interval, or the default for a registration that declares none.
+func (r Registration) interval() time.Duration {
+	if r.ReconciliationInterval == 0 {
+		return DefaultReconciliationInterval
+	}
+	return r.ReconciliationInterval
 }
 
 // subscription returns the registration's event types, deduplicated and in a stable order, or a
@@ -187,6 +218,9 @@ func (r Registration) validate() error {
 		return fmt.Errorf("%w: a positive max_accepted_age is required", ErrInvalid)
 	case !r.StaleBehavior.Valid():
 		return fmt.Errorf("%w: stale_behavior %q is not a declared behavior", ErrInvalid, r.StaleBehavior)
+	case r.interval() < MinReconciliationInterval || r.interval() > MaxReconciliationInterval:
+		return fmt.Errorf("%w: reconciliation_interval_seconds is from %d to %d", ErrInvalid,
+			int64(MinReconciliationInterval/time.Second), int64(MaxReconciliationInterval/time.Second))
 	}
 	_, err := r.subscription()
 	return err
@@ -222,12 +256,13 @@ func NewRegistry(pool *db.ProviderPool) (*Registry, error) {
 // `principal_id` is written on insert and never updated: identityConflict refuses a re-registration
 // naming another one before this runs.
 const upsertStatement = `INSERT INTO projection.consumer
-    (consumer_id, principal_id, projection_version, max_accepted_age, stale_behavior)
-VALUES ($1, $2, $3, $4, $5)
+    (consumer_id, principal_id, projection_version, max_accepted_age, stale_behavior, reconciliation_interval)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (consumer_id) DO UPDATE
-SET projection_version = excluded.projection_version,
-    max_accepted_age   = excluded.max_accepted_age,
-    stale_behavior     = excluded.stale_behavior,
+SET projection_version      = excluded.projection_version,
+    max_accepted_age        = excluded.max_accepted_age,
+    stale_behavior          = excluded.stale_behavior,
+    reconciliation_interval = excluded.reconciliation_interval,
     retired_at         = NULL
 RETURNING registered_at`
 
@@ -338,6 +373,8 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Consumer, er
 		MaxAcceptedAge:    reg.MaxAcceptedAge,
 		StaleBehavior:     reg.StaleBehavior,
 		EventTypes:        types,
+
+		ReconciliationInterval: reg.interval(),
 	}
 
 	if err := db.WithProviderScope(ctx, r.pool,
@@ -353,7 +390,7 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Consumer, er
 
 			if err := tx.QueryRow(ctx, upsertStatement,
 				reg.ConsumerID, reg.PrincipalID.String(), reg.ProjectionVersion, reg.MaxAcceptedAge,
-				string(reg.StaleBehavior),
+				string(reg.StaleBehavior), reg.interval(),
 			).Scan(&consumer.RegisteredAt); err != nil {
 				return err
 			}
@@ -447,7 +484,9 @@ const selectConsumer = `SELECT c.consumer_id,
        c.last_reconciled_at,
        c.last_reconciled_mark,
        c.last_reconciled_findings,
-       c.last_reconciled_extra_findings
+       c.last_reconciled_extra_findings,
+       c.reconciliation_interval,
+       c.reconciliation_requested_at
 FROM projection.consumer c
 LEFT JOIN platform.subscription s ON s.consumer = c.consumer_id AND s.retired_at IS NULL
 WHERE c.consumer_id = $1 AND c.retired_at IS NULL`
@@ -476,7 +515,8 @@ func load(ctx context.Context, tx db.Tx, consumerID string, consumer *Consumer) 
 		&behavior, &consumer.RegisteredAt, &consumer.SnapshotMark,
 		&consumer.LastReportedMark, &consumer.LastReportedAt, &consumer.EventTypes,
 		&consumer.LastReconciledAt, &consumer.LastReconciledMark, &consumer.LastReconciledFindings,
-		&consumer.LastReconciledExtraFindings); err != nil {
+		&consumer.LastReconciledExtraFindings, &consumer.ReconciliationInterval,
+		&consumer.ReconciliationRequestedAt); err != nil {
 		return fmt.Errorf("%w: %s", ErrNotRegistered, consumerID)
 	}
 	return decodeStored(consumer, principal, behavior)
@@ -563,7 +603,9 @@ const listStatement = `SELECT c.consumer_id,
        c.last_reconciled_at,
        c.last_reconciled_mark,
        c.last_reconciled_findings,
-       c.last_reconciled_extra_findings
+       c.last_reconciled_extra_findings,
+       c.reconciliation_interval,
+       c.reconciliation_requested_at
 FROM projection.consumer c
 LEFT JOIN platform.subscription s ON s.consumer = c.consumer_id AND s.retired_at IS NULL
 WHERE ($1::text = ''
@@ -606,7 +648,8 @@ func (r *Registry) List(ctx context.Context, query ConsumerListQuery, reason str
 			if err := rows.Scan(&item.ConsumerID, &principal, &item.ProjectionVersion, &item.MaxAcceptedAge,
 				&behavior, &item.RegisteredAt, &item.SnapshotMark, &item.LastReportedMark,
 				&item.LastReportedAt, &item.EventTypes, &item.RetiredAt, &item.LastReconciledAt,
-				&item.LastReconciledMark, &item.LastReconciledFindings, &item.LastReconciledExtraFindings); err != nil {
+				&item.LastReconciledMark, &item.LastReconciledFindings, &item.LastReconciledExtraFindings,
+				&item.ReconciliationInterval, &item.ReconciliationRequestedAt); err != nil {
 				return fmt.Errorf("projection: scan consumer list: %w", err)
 			}
 			if err := decodeStored(&item.Consumer, principal, behavior); err != nil {
@@ -710,6 +753,20 @@ func (c Consumer) Age(now time.Time) (time.Duration, bool) {
 	}
 	age := now.Sub(*c.LastReportedAt)
 	return age, age > c.MaxAcceptedAge
+}
+
+// ReconciliationOverdue reports whether the consumer owes a reconciliation: a restore asked for one
+// and none has run since, or none has run for longer than its declared interval, counted from its
+// registration when it never has.
+func (c Consumer) ReconciliationOverdue(now time.Time) bool {
+	if c.ReconciliationRequestedAt != nil {
+		return true
+	}
+	since := c.RegisteredAt
+	if c.LastReconciledAt != nil {
+		since = *c.LastReconciledAt
+	}
+	return c.ReconciliationInterval > 0 && now.Sub(since) > c.ReconciliationInterval
 }
 
 // ReconciliationAge reports how long ago this service last reconciled the consumer's report, or nil

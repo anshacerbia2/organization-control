@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.15.0
+  version: 1.16.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-09
+  last_reviewed: 2026-10-20
   parent_sad: SAD-004
 ---
 
@@ -898,6 +898,36 @@ Errors are RFC 7807 problem documents from `foundation-platform`. Commands requi
 protocol routes and the fresh check do not require the key, are in `TDD-organization-control-003`
 §The `Idempotency-Key` Is Required on Commands.
 
+### A Provider Withdraws One Membership
+
+1.16.0, decided 2026-10-20 (`ADR-ORG-003 §5.6`). A provider in force may suspend or revoke one
+Membership inside a Tenant. It contains: a withdrawal a restore to an older point lost, or a
+compromised member in a cross-tenant exposure.
+
+```text
+POST /v1/tenants/{tenant_id}/memberships/{membership_id}/suspend    {"expected_version": n}
+POST /v1/tenants/{tenant_id}/memberships/{membership_id}/revoke     {"expected_version": n}
+    provider in force (an approved activation, or an emergency grant), X-Administrative-Reason,
+    Idempotency-Key; answers as the Tenant administrator's POST /v1/memberships/{id}/suspend|revoke
+```
+
+- **Suspend and revoke only.** There is no provider restore and no provider grant of a Membership:
+  least privilege gives the containment the task needs (AC-6, AC-2(13), `ADR-ORG-003` [R7][R10]), and
+  giving access back stays the Tenant administrator's act.
+- **An ordinary provider act, not break-glass.** It needs authority in force; an eligible holder is
+  refused before a transaction opens. An emergency grant's use is reviewed like any other.
+- **Its command shape.** The reason, the `Idempotency-Key` and the Membership's `expected_version`,
+  as `STD-GLB-001` asks of a command on another actor's record. It runs the same state machine,
+  version check, priority event and `membership_event` row as the Tenant administrator's transition,
+  with the provider as actor and the reason recorded.
+- **Recorded where the Tenant sees it.** It runs through `db.WithProviderInTenant`, so the
+  privileged-access row names the Tenant and its administrators read it in `GET /v1/provider-access`,
+  as Access Transparency logs "the affected resource and action, the time of the action, the reason for
+  the action, and information about the accessor" (`ADR-ORG-003` [R11]). The Membership is read under
+  that Tenant's policy, so one in another Tenant is `404`.
+- **No Tenant approval first, and usable at any time.** It only narrows access and is used in
+  incidents; the pause of Tenant administration does not hold it.
+
 ### Published Events
 
 ```text
@@ -1111,8 +1141,8 @@ event also writes `last_reconciled_at` (the run's instant), `last_reconciled_mar
 and `last_reconciled_findings` on the consumer's registry row, and a clean run, which publishes
 nothing, writes them all the same: a clean sweep is the evidence that the copy was compared and
 agreed. A retired consumer's row is left as it was. The consumer view serves them with the age
-(§The Consumer List). The "Consumer reconciliation age" signal in §Operational Notes is still alerted
-from the report age, because no reconciliation cadence is declared per consumer to alert against.
+(§The Consumer List). From 1.16.0 each consumer declares the cadence, and the reconciliation age is
+alerted against it (§Reconciliation Interval). The run also clears `reconciliation_requested_at`.
 
 **An `extra` finding is recorded and alerted** (1.15.0). `Result.SecurityFindings` existed and nothing
 called it, so an `extra` reached whoever read the response and nobody else. Now each run also writes
@@ -1124,23 +1154,43 @@ that consumer finds none rather than for one scrape, and it survives a restart. 
 logged at ERROR, "reconciliation found access authority does not grant", naming the consumer, mark,
 Membership, Tenant, Principal and both versions, which is where an investigation starts.
 
-### Scheduled Reconciliation
+### Reconciliation Interval
 
-1.15.0. **Not built: a decision for the owner.** Nothing runs reconciliation on a schedule. It runs
-when someone sends a consumer's report to `POST /v1/projections/reconcile`, so drift is found when an
-operator looks. The run needs the consumer's report, its own account of its projection at a mark, and
-only the consumer can produce that. Who starts a run, and when, is therefore a contract between this
-service and every consumer, and identity-control and foundation-reference would change with it.
+1.16.0, decided 2026-10-20 (`ADR-ORG-001 §5.7`, amended). Until 1.16.0 nothing ran reconciliation on a
+schedule, and the choice of who should was left open here with three options. The owner chose the
+first: **the consumer reconciles itself, on an interval it declares.** The party that holds the copy
+runs the comparison, as a Kubernetes controller that "find[s] their desired state from the API server,
+then communicate[s] directly with an external system" and as each Dynamo node keeps the Merkle trees of
+the key ranges it hosts (`ADR-ORG-001` [R6][R7]).
 
-| Option | How | For | Against |
-| :-- | :-- | :-- | :-- |
-| A. The consumer reconciles itself | Each consumer sends its report on its own schedule, as itself: `POST /v1/projections/reconcile` joins its routes. It declares `reconciliation_interval` at registration, and this side alerts when `last_reconciled_at` is older (the one-interval warning of §Operational Notes, which has no interval today) | Uses the route and the recording that exist; the consumer already reports progress the same way. The age alert catches a consumer that stops | Each consumer builds a scheduler; the consumer's role gains a route that publishes a repair event |
-| B. This service pulls | Each consumer declares a report endpoint, as it declares its acceptance endpoint (ADR-GLB-018 §5.4). This service fetches the report on a schedule with its workload token and reconciles | One schedule, one place; the direction delivery already takes | A new outbound contract in every consumer, and a workload token that consumer must accept on a provider-only read |
-| C. An operator schedule | The runbook's procedure, run by a job outside both services with a provider credential | Nothing to build in either service | A provider credential held by a job; every run is a privileged access the weekly review then reads |
-
-Recommendation: A. It reuses what is built, keeps the report with the party that produces it, and
-gives the age alert an interval to measure. Waiting on the owner, because it changes
-identity-control and foundation-reference, and the cadence is a commitment of each consumer.
+- **Declared at registration.** `POST /v1/projections/consumers` takes
+  `reconciliation_interval_seconds`, from 60 to 604800 (one minute to a week). Absent, it is 86400, one
+  day, so a registration written before the field still registers (foundation-reference's system
+  proof does). `projection.consumer.reconciliation_interval` holds it, checked by the database with
+  the same bounds, and the consumer read and list serve it as `reconciliation_interval_seconds`.
+- **The consumer runs it as itself.** `POST /v1/projections/reconcile` admits a registered consumer
+  for its own `consumer_id`, with no `X-Administrative-Reason`, as its other own routes do; a body
+  naming another consumer is `403`, and the service refuses it again where it reads the registry row,
+  by the token's `principal_id`. A provider still runs one with a reason: the drift runbook's manual
+  path.
+- **On the provider connections.** The comparison reads every Tenant's active Memberships and the
+  repair appends an outbox event, which the provider role does. A consumer's run uses
+  `db.WithConsumerReconciliation` and its snapshot form: the provider connections, recorded under the
+  consumer's authority (`TDD-organization-control-001` §Grant Derivation). The consumer role gains no
+  outbox privilege, so a leaked consumer credential cannot publish an authority event; what the event
+  says is what authority holds.
+- **Alerted against the interval.** The gauges
+  `organization_projection_consumer_reconciliation_age_seconds{consumer}` (since
+  `last_reconciled_at`, or registration when none has run) and
+  `organization_projection_consumer_reconciliation_interval_seconds{consumer}` feed
+  `ReconciliationOverdueWarning`, past one interval, and `ReconciliationOverdueCritical`, past two.
+  Prometheus: "The key metric of a batch job is the last time it succeeded", and an alert should allow
+  "at least enough time for 2 full runs of the batch job" (`ADR-ORG-001` [R8][R9]). The interval is a
+  series of its own, so no threshold is copied out of the registry into the rule file, and promtool
+  tests both edges (`observability/alerts/organization-control.test.yml`).
+- **Not built here.** The schedulers are the consumers': identity-control and foundation-reference
+  each add one and declare their interval (reported to the owner with this change). Until they do,
+  the age alerts fire one interval after registration, which is the signal that nobody reconciles.
 
 ### After a Restore to an Older Point
 
@@ -1194,19 +1244,57 @@ the same report again advances the rest, since the advanced ones are no longer b
 is therefore written after them, not recorded inside one (§The `Idempotency-Key` Is Required on
 Commands in `TDD-organization-control-003`).
 
-**What it does not cover**, recorded rather than claimed:
+**Tenant and provider grant versions: the restore bump** (1.16.0, decided 2026-10-20,
+`ADR-ORG-003 §5.5`). The owner chose option (b) of 1.15.0, a margin, as etcd restores its revision: "In
+order to ensure the revisions are never decreasing after a restore, you can supply the
+--bump-revision option" (`ADR-ORG-003` [R9]). `organization-migrate -stage=restore-bump`
+(`internal/restore`), which `deploy/dev/restore.sh` runs after the restore and before the service
+serves, does in one transaction, with no actor, on the restore's own connection:
 
-- **Tenant security versions and provider grant versions.** The consumer's report carries Memberships
-  only, so nothing says which Tenant or grant version a consumer holds. Options for the owner:
-  (a) extend the report with Tenants and grants, which changes identity-control and
-  foundation-reference; (b) advance every withdrawn Tenant and grant by a margin and publish, and every
-  active one without publishing, which assumes a bound on the changes a backup can lose; (c) leave
-  them to the runbook's re-application, as today. Recommendation: (a), the same rule as Memberships,
-  on evidence rather than a margin.
-- **The same version, two states.** A report gives versions, not states, so a consumer holding version
-  6 of a change authority lost while authority's own version 6 is a different change is not a
-  finding. The pause keeps authority from making one while the procedure runs; a provider's change in
-  that window is the remaining exposure.
+```text
+M := 10^9                                  -- etcd's margin for a week-old snapshot
+every Tenant:          version += M, tenant_security_version += M
+every provider grant:  grant_version += M
+publish, at the new versions, each Tenant suspended, offboarding or retired
+    (tenant.security.suspended, priority; tenant.lifecycle.retired), recorded in tenant_event
+publish, at the new version, each published-scope grant that confers nothing now:
+    revoked (provider.security.revoked) or eligible with no activation in force
+    (provider.security.ended), recorded in provider_grant_event
+publish no active Tenant and no grant that confers authority
+every active consumer: reconciliation_requested_at := now()
+```
+
+- **Both Tenant versions move.** identity-control orders a Tenant's desired state by
+  `tenant_version` and judges a token's staleness by `tenant_security_version`, so a margin on one
+  alone would leave the other discarded.
+- **No active row is published.** Publishing one could grant again what a withdrawal the restore lost
+  took away: the rule the Membership advance keeps above.
+- **Every consumer reconciles.** etcd marks the bumped revisions compacted so "all watches are
+  terminated" (`ADR-ORG-003` [R9]). Here `reconciliation_requested_at` raises
+  `ReconciliationRequestedAfterRestore` for each consumer, and its next recorded reconciliation clears
+  it (§Reconciliation Interval). Until the consumers' schedulers exist, the restore runbook runs each
+  one's reconciliation as a provider.
+- **No consumer contract changes.** identity-control and foundation-reference apply only a higher
+  version and check no gap, so a jump of 10^9 is applied like any later version. It also ends "the
+  same version, two states" for Tenants and grants: no version a consumer holds can equal a new one.
+  The versions are `bigint`, and no row changes 10^9 times within a backup window.
+- **Memberships are not bumped.** Each is advanced from the consumer's report, as above, which knows
+  how far the consumer holds it.
+
+The drill (`scripts/dev-restore-drill.sh` step 8) runs it on the restored database and asserts the
+versions, that only withdrawals were published, the reconcile request, and that identity-control
+applies a bumped Tenant version. `internal/restore`'s integration test proves the same against the
+engine, grant by grant.
+
+**A lost withdrawal of one Membership** that the consumer holds wider than authority, or that no
+report names, is re-applied by a provider through
+`POST /v1/tenants/{tenant_id}/memberships/{membership_id}/suspend|revoke` (§A Provider Withdraws One
+Membership), usable during the pause, which holds Tenant administrators only.
+
+**The same version, two states, for Memberships.** A report gives versions, not states, so a consumer
+holding version 6 of a change authority lost while authority's own version 6 is a different change is
+not a finding. The pause keeps authority from making one while the procedure runs; a provider's change
+in that window is the remaining exposure.
 
 ## Configuration
 
@@ -1323,6 +1411,17 @@ the sum, because that is the number incident response works from.
 - A clean run and a run with findings are both recorded on the consumer, with their mark and
   count, and the single read and the list serve them with the age.
 
+- A consumer reconciles itself and clears a restore's request, and reconciles no other consumer; the
+  interval is declared within its bounds and a consumer never reconciled is overdue past it
+  (`internal/projection/self_reconcile_integration_test.go`, 1.16.0). promtool tests the warning and
+  critical edges and the request alert.
+- The restore bump moves every Tenant and grant version by 10^9 and publishes the withdrawn ones only
+  (`internal/restore`, 1.16.0); the drill repeats it on the restored database and proves
+  identity-control applies a bumped version.
+- A provider suspends and revokes one Membership inside the Tenant it names, with the access naming
+  that Tenant; inside another Tenant it is not found, and it never restores or grants
+  (`internal/membership/provider_transition_integration_test.go`, 1.16.0).
+
 ### Negative
 
 - A context switch to a Tenant without active Membership is refused.
@@ -1367,16 +1466,21 @@ that makes the model workable for cross-client operators.
 | Signal | Warning | Critical |
 | :-- | :-- | :-- |
 | Accept-to-enforcement delay, security events | above budget | twice budget |
-| Consumer reconciliation age | one interval | consumer stale policy exceeded |
+| Consumer reconciliation age (1.16.0) | one declared interval | two declared intervals |
+| Consumer report age | — | its `max_accepted_age` exceeded |
+| Reconciliation a restore asked for (1.16.0) | any occurrence | — |
 | `extra` reconciliation findings | any occurrence | any occurrence |
 | Consumers with an unregistered cursor | any occurrence | — |
 | `:verify` rate per consumer | above threshold | ten times threshold |
 
 This side exports these signals from `internal/telemetry` over OTLP, together with the outbox lag
 and security debt of TDD-foundation-platform-001 and TDD-005. `observability/alerts` evaluates them at
-these thresholds. "Consumer reconciliation age" is alerted critical when a consumer's report age
-exceeds its own `max_accepted_age`. The one-interval warning is not alerted, because no reporting
-interval is declared per consumer (§Scheduled Reconciliation).
+these thresholds. The report age is alerted critical when it exceeds the consumer's own
+`max_accepted_age`. From 1.16.0 the reconciliation age has its own series and is alerted against the
+interval each consumer declares, a warning past one and critical past two
+(`ReconciliationOverdueWarning`, `ReconciliationOverdueCritical`), and
+`ReconciliationRequestedAfterRestore` warns while a restore's request is unanswered (§Reconciliation
+Interval, §After a Restore to an Older Point).
 
 **Two of them had no metric until 1.15.0.** `extra` findings are alerted as §Reconciliation
 describes (`ReconciliationExtraFinding`). Accept-to-enforcement is
@@ -1419,6 +1523,9 @@ as a provider. Written (1.15.0): `docs/runbooks/fresh-check-misuse.md`.
 | Parent system | SAD-004 — Scnehaux Organization Control |
 | Realizes capability | PAD-PLT-002 — Organization & Tenancy Platform |
 | Governed by | ADR-ORG-001 — Separate Organization Authority and Keycloak Projection; §5.11 a consumer is a registered workload Principal |
+| Governed by | ADR-ORG-001 §5.7 (amended 2026-10-20) — a consumer reconciles itself on a declared interval, alerted at one and two (1.16.0, §Reconciliation Interval) |
+| Governed by | ADR-ORG-003 §5.5 (amended 2026-10-20) — the restore bump; §5.6 — a provider suspends or revokes one Membership inside a Tenant (1.16.0) |
+| Conforms to | STD-GLB-002 3.3.0 §A restore to an older point — the drill proves the bump (1.16.0) |
 | Governed by | ADR-GLB-003 — Transactional Outbox |
 | Governed by | ADR-GLB-006 — Event Versioning |
 | Conforms to | STD-IAM-001 §3.3 — one active Tenant context per token; the Membership set is never placed in a token |
