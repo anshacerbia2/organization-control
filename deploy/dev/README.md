@@ -88,7 +88,9 @@ image, so this rebuilds them too.
 | `scripts/dev-deprovisioning.ps1` | `pwsh ./scripts/dev-deprovisioning.ps1 -IdentityRepo <identity-control checkout> -State <wiring state file> -OffboardingId <id> -Realized` (or `-Failed -Reason "<why>"`) | for each released offboarding: it stands in for the provisioning system's deprovisioning report (§Offboarding a Tenant on the development server) |
 
 `maintenance` creates the outbox partitions ahead, applies the retention, purges expired Membership
-batch previews and counts stale incidents (the repository README §Building the database). On the
+batch previews, purges idempotency keys completed more than 7 days ago, purges audit records older
+than 7 years (the privileged-access record, its reviews and emergency grant uses), and counts stale
+incidents (the repository README §Building the database). On the
 development server, in the crontab of the user that runs the stacks (`crontab -e`), with the checkout
 where that server keeps it:
 

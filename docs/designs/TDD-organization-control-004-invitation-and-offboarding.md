@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.14.0
+  version: 1.15.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-19
+  last_reviewed: 2026-10-20
   parent_sad: SAD-004
 ---
 
@@ -178,8 +178,12 @@ token space. Without the column, the thing carried in the invitation link would 
 roughly when a Tenant issued invitations can narrow that space sharply. A uniform response
 closes the information leak; it does not close a successful guess.
 
-The token is high-entropy, generated at creation, returned exactly once to the caller, and
-never stored — only its hash is. `token_hash` is unique across the whole table rather than
+The token is high-entropy, generated at creation, and returned exactly once, to the caller of
+the issue command. It is stored nowhere. Not in the row, which holds only its hash. Not in the
+issue command's idempotency record either: that record holds the answer without the token, so a
+replay of the issue command answers the invitation without it (`STD-GLB-001` 1.7.0, `ADR-ORG-007
+§5.5` amended 2026-10-20). Until 2026-10-20 the idempotency record kept the token, for ever,
+which this paragraph did not say (1.15.0). `token_hash` is unique across the whole table rather than
 per Tenant, because a token is resolved before any Tenant is known and must therefore
 identify at most one invitation on its own.
 

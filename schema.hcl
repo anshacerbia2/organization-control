@@ -1896,7 +1896,9 @@ table "privileged_access" {
 }
 
 // privileged_access_review is a provider's review of another provider's access over a period
-// (ADR-ORG-002 §5.6). Insert-only: no runtime role updates or deletes one, and nothing purges one.
+// (ADR-ORG-002 §5.6). Insert-only: no runtime role updates or deletes one. The maintenance stage
+// purges a review recorded more than 7 years ago, and rls.sql's retention trigger refuses the delete
+// of a younger one (STD-GLB-007 1.1.0).
 //
 // The separation check is AC-5 in the database, as provider_activation_separation_check is for an
 // approval: the reviewer is never the provider whose access is reviewed. The counts are taken in the

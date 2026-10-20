@@ -57,6 +57,10 @@ func pools(t *testing.T) (provider, owner *fdb.Pool, ctx context.Context) {
 	return provider, owner, ctx
 }
 
+// deleteEmergencyUses empties organization.emergency_grant_use past its retention trigger, which fires
+// for every role. session_replication_role is a superuser's setting and lasts for the one transaction.
+const deleteEmergencyUses = `SET LOCAL session_replication_role = replica; DELETE FROM organization.emergency_grant_use`
+
 func exec(t *testing.T, ctx context.Context, pool *fdb.Pool, statement string, args ...any) {
 	t.Helper()
 	if err := pool.InTx(ctx, func(ctx context.Context, tx fdb.Tx) error {
@@ -110,14 +114,15 @@ func emptyGrants(t *testing.T, ctx context.Context, owner *fdb.Pool) {
 		t.Fatalf("save the grants: %v", err)
 	}
 	// Activations, published events and recorded uses name their grant, so they go first; no test leaves one another
-	// test needs.
+	// test needs. A recorded use is an audit record the database refuses to delete before it is 7 years old
+	// (STD-GLB-007 1.1.0, rls.sql), so the suite turns triggers off for that one delete, as the superuser it is.
 	exec(t, ctx, owner, `DELETE FROM organization.provider_grant_event`)
 	exec(t, ctx, owner, `DELETE FROM organization.provider_activation`)
-	exec(t, ctx, owner, `DELETE FROM organization.emergency_grant_use`)
+	exec(t, ctx, owner, deleteEmergencyUses)
 	exec(t, ctx, owner, `DELETE FROM organization.provider_grant`)
 	t.Cleanup(func() {
 		exec(t, context.Background(), owner, `DELETE FROM organization.provider_grant_event`)
-		exec(t, context.Background(), owner, `DELETE FROM organization.emergency_grant_use`)
+		exec(t, context.Background(), owner, deleteEmergencyUses)
 		exec(t, context.Background(), owner, `DELETE FROM organization.provider_activation`)
 		exec(t, context.Background(), owner, `DELETE FROM organization.provider_grant`)
 		for _, r := range saved {

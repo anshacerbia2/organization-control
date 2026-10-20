@@ -16,7 +16,8 @@
 //
 // A fourth stage is not part of a deploy. It is run on a schedule, daily, as the same role:
 //
-//	organization-migrate -stage=maintenance   # partitions, retention, batch previews, the stale-incident count
+//	organization-migrate -stage=maintenance   # partitions, retention, batch previews, idempotency keys,
+//	                                          # audit records past 7 years, the stale-incident count
 //
 // A fifth is run once, by deploy/dev/restore.sh, after a restore and before the service serves:
 //
@@ -85,6 +86,9 @@ func main() {
 	flag.DurationVar(&maintenance.ReceiptRetention, "receipt-retention", maintenance.ReceiptRetention, "maintenance: uncited receipts are pruned after this, while no incident is open")
 	flag.DurationVar(&maintenance.StaleAlert, "stale-alert", maintenance.StaleAlert, "maintenance: unresolved dead letters older than this exit 3")
 	flag.DurationVar(&maintenance.BatchPreviewRetention, "batch-preview-retention", maintenance.BatchPreviewRetention, "maintenance: Membership batch previews expired longer ago than this are purged")
+	flag.DurationVar(&maintenance.IdempotencyRetention, "idempotency-retention", maintenance.IdempotencyRetention, "maintenance: idempotency keys completed longer ago than this are purged, and a retry after it is a new command; at least 24h")
+	// The audit retention has no flag: STD-GLB-007 fixes it at 7 years. The stage refuses fewer, and
+	// the database refuses the delete of a younger record whatever the stage is told.
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -276,6 +280,10 @@ func runMaintenance(ctx context.Context, pool *db.Pool, cfg controldb.Maintenanc
 		slog.Int64("dead_letters_disposed", report.DeadLettersDisposed),
 		slog.Int64("receipts_pruned", report.ReceiptsPruned),
 		slog.Int64("batch_previews_purged", report.BatchPreviewsPurged),
+		slog.Int64("idempotency_keys_purged", report.IdempotencyKeysPurged),
+		slog.Int64("privileged_access_purged", report.AuditPurged.PrivilegedAccess),
+		slog.Int64("privileged_access_reviews_purged", report.AuditPurged.Reviews),
+		slog.Int64("emergency_grant_uses_purged", report.AuditPurged.EmergencyUses),
 		slog.Int64("stale_unresolved", report.StaleUnresolved))
 	reportEmergencyValidation(ctx, pool, logger)
 	reportUnreviewedAccess(ctx, pool, logger)

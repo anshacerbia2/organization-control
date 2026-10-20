@@ -186,7 +186,7 @@ same migration role:
 go run ./cmd/organization-migrate -stage=maintenance
 ```
 
-It does six things, each in its own transaction and each timed from the database clock:
+It does eight things, each in its own transaction and each timed from the database clock:
 
 - creates the outbox partitions for today and the next seven days;
 - drops published partitions older than 30 days;
@@ -198,6 +198,13 @@ It does six things, each in its own transaction and each timed from the database
   items (`-batch-preview-retention`; TDD-organization-control-002 §Membership Batches). The two
   tables are under `FORCE ROW LEVEL SECURITY`, so the migration role reaches only expired previews,
   through the purge policies `rls.sql` gives it;
+- purges idempotency keys completed more than 7 days ago (`-idempotency-retention`, at least 24h).
+  An uncompleted key is never purged, and a retry after the window is a new command
+  (TDD-organization-control-003 §Completed Keys Are Kept 7 Days, Then Purged);
+- purges audit records older than 7 years: `audit.privileged_access`, `audit.privileged_access_review`
+  and `organization.emergency_grant_use`. The period is STD-GLB-007's and has no flag. A trigger on
+  each table refuses the delete of any younger record, and every `TRUNCATE`, for every role
+  (TDD-organization-control-001 §Privileged Access Review);
 - counts unresolved dead letters older than 24 hours.
 
 It exits 3 when that count is not zero, after the rest of its work is done, so the scheduler

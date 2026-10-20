@@ -41,7 +41,9 @@ BEGIN
               ('invitation.invitation'),
               ('operation.offboarding'),
               ('operation.offboarding_obligation'),
-              ('audit.privileged_access')
+              ('audit.privileged_access'),
+              ('audit.privileged_access_review'),
+              ('organization.emergency_grant_use')
            ) AS expected(name)
      WHERE to_regclass(expected.name) IS NULL;
 
@@ -308,6 +310,87 @@ CREATE POLICY membership_batch_item_purge ON membership.membership_batch_item
                            AND b.state = 'previewed'
                            AND b.expires_at < now()))
     WITH CHECK (false);
+
+-- The audit records' retention: kept 7 years, deleted only after (STD-GLB-007 1.1.0, ADR-ORG-002 §5.6).
+--
+-- audit.privileged_access, audit.privileged_access_review and organization.emergency_grant_use are
+-- audit records. The maintenance stage purges each one older than 7 years, as the migration role, and
+-- nothing else may delete one. "Through a policy that admits only that delete" is STD-GLB-007's
+-- phrase; here the policy is a trigger rather than a row-level security policy, for three reasons
+-- (TDD-organization-control-001 §Privileged Access Review):
+--
+--   A policy does not bind a superuser: "Superusers and roles with the BYPASSRLS attribute always
+--   bypass the row security system when accessing a table" (PostgreSQL 17, Row Security Policies).
+--   CI and deploy/dev run the stages as one. A trigger fires for every role.
+--
+--   A policy does not cover TRUNCATE: "Operations that apply to the whole table, such as TRUNCATE and
+--   REFERENCES, are not subject to row security" (ibid.). Nor does a row trigger: "TRUNCATE will not
+--   fire any ON DELETE triggers that might exist for the tables. But it will fire ON TRUNCATE
+--   triggers" (PostgreSQL 17, TRUNCATE). So each table also refuses every TRUNCATE.
+--
+--   Enabling row-level security on these tables would make every reader and writer need a policy:
+--   the recorder, which writes outside any binding (above), the resolution role's insert, the
+--   provider's upsert of a grant's use, and the owner reading through audit.tenant_provider_access.
+--   Each is a new predicate to get wrong. The trigger changes none of them.
+--
+-- The boundary is computed on the database clock, as the purge's is: now() is the transaction's
+-- start in both, so the purge and the trigger agree on every row. The column is passed by name, the
+-- one that says when the newest evidence in the row was made. A row whose column cannot be read is
+-- refused, not deleted.
+--
+-- Turning the trigger off needs the table's owner ("You must own the table to use ALTER TABLE") or a
+-- superuser (session_replication_role), the same people who could drop a policy. What it stops is a
+-- defect in the purge, a hand-written DELETE on the migration credential, and every other role.
+CREATE OR REPLACE FUNCTION audit.refuse_young_audit_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    recorded TIMESTAMPTZ;
+BEGIN
+    IF TG_OP = 'TRUNCATE' THEN
+        RAISE EXCEPTION 'audit records are never truncated: %.% keeps each record 7 years', TG_TABLE_SCHEMA, TG_TABLE_NAME
+            USING HINT = 'STD-GLB-007 1.1.0; the maintenance stage purges records older than that';
+    END IF;
+    recorded := (to_jsonb(OLD) ->> TG_ARGV[0])::timestamptz;
+    IF recorded IS NULL OR recorded >= now() - make_interval(years => 7) THEN
+        RAISE EXCEPTION 'an audit record younger than 7 years is never deleted: %.% % is %',
+                        TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_ARGV[0], recorded
+            USING HINT = 'STD-GLB-007 1.1.0; the maintenance stage purges records older than that';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+COMMENT ON FUNCTION audit.refuse_young_audit_delete() IS
+    'Refuses the delete of an audit record younger than 7 years, and every truncation. STD-GLB-007 1.1.0.';
+-- A trigger function cannot be called on its own, and a trigger fires without the caller holding
+-- EXECUTE. Revoked all the same, so no role holds a privilege nothing uses.
+REVOKE ALL ON FUNCTION audit.refuse_young_audit_delete() FROM PUBLIC;
+
+CREATE OR REPLACE TRIGGER privileged_access_retention
+    BEFORE DELETE ON audit.privileged_access
+    FOR EACH ROW EXECUTE FUNCTION audit.refuse_young_audit_delete('occurred_at');
+CREATE OR REPLACE TRIGGER privileged_access_no_truncate
+    BEFORE TRUNCATE ON audit.privileged_access
+    FOR EACH STATEMENT EXECUTE FUNCTION audit.refuse_young_audit_delete('occurred_at');
+
+CREATE OR REPLACE TRIGGER privileged_access_review_retention
+    BEFORE DELETE ON audit.privileged_access_review
+    FOR EACH ROW EXECUTE FUNCTION audit.refuse_young_audit_delete('reviewed_at');
+CREATE OR REPLACE TRIGGER privileged_access_review_no_truncate
+    BEFORE TRUNCATE ON audit.privileged_access_review
+    FOR EACH STATEMENT EXECUTE FUNCTION audit.refuse_young_audit_delete('reviewed_at');
+
+-- One row per emergency grant, updated on each use. last_used_at is when its newest evidence was
+-- made; first_used_at and the count are no younger. A grant unused for 7 years then loses its row,
+-- and the validation report reads it from granted_at, which is older still: overdue either way.
+CREATE OR REPLACE TRIGGER emergency_grant_use_retention
+    BEFORE DELETE ON organization.emergency_grant_use
+    FOR EACH ROW EXECUTE FUNCTION audit.refuse_young_audit_delete('last_used_at');
+CREATE OR REPLACE TRIGGER emergency_grant_use_no_truncate
+    BEFORE TRUNCATE ON organization.emergency_grant_use
+    FOR EACH STATEMENT EXECUTE FUNCTION audit.refuse_young_audit_delete('last_used_at');
 
 -- audit.tenant_provider_access, a Tenant administrator's read of the provider access to its Tenant.
 --

@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.26.0
+  version: 1.27.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-19
+  last_reviewed: 2026-10-20
   parent_sad: SAD-004
 ---
 
@@ -923,7 +923,9 @@ CREATE TABLE organization.emergency_grant_use (
   not refuse the request: the grant is in force, and a break-glass path that fails on its own
   bookkeeping fails when it is needed.
 - **The record is evidence.** The provider role holds `SELECT`, `INSERT` and `UPDATE` of
-  `last_used_at` and `uses`, and nothing deletes one. The consumer role cannot read it.
+  `last_used_at` and `uses`, and no runtime role deletes one. The maintenance stage purges a row
+  last used more than 7 years ago, and nothing deletes a younger one (§Privileged Access Review,
+  1.27.0). The consumer role cannot read it.
 - **Overdue is ninety days.** The clock runs from the last use, or from the grant when it was never
   used.
 - **The report is in two places.** `GET /v1/provider-grants:emergency-validation` lists every
@@ -1026,7 +1028,8 @@ or due: a consumer is a workload, reviewed through its owner (`ADR-IAM-003 §5.8
 | A provider in force | Every row, and every review | `organization_provider_rt`: `SELECT` on both tables, `INSERT` on the review |
 | A Tenant administrator | The provider rows that name its Tenant, consumer rows excluded | `organization_rt`: `SELECT` on the view `audit.tenant_provider_access` only |
 | An eligible holder, a consumer | Nothing | The routes refuse them before a transaction opens |
-| Any role | No `UPDATE`, `DELETE` or `TRUNCATE` on either table | AU-9 a.: "Protect audit information and audit logging tools from unauthorized access, modification, and deletion" [R7] |
+| Any runtime role | No `UPDATE`, `DELETE` or `TRUNCATE` on either table | AU-9 a.: "Protect audit information and audit logging tools from unauthorized access, modification, and deletion" [R7] |
+| The maintenance stage | `DELETE` of a record older than 7 years, as the migration role; the database refuses any younger one, and every `TRUNCATE`, for every role | §Retention below (1.27.0) |
 
 The Tenant's read is a view. `internal/controldb/rls.sql` creates it, because Atlas OSS models no
 views. It is owned by the migration credential that applied the schema, which owns the table, and
@@ -1102,10 +1105,50 @@ daily `maintenance` stage logs each Principal with an overdue access at `WARN`, 
 the route reads, and does not fail on one, as it reports an overdue emergency grant
 (§Emergency Grant Validation).
 
-**Retention.** Neither table is purged. A row is needed until a review covers it, and an
-investigation may come later. CIS asks for "a minimum of 90 days" (Safeguard 8.10) [R9]; AU-11
-leaves the period to the organization [R7]. A retention standard that names a period would add a
-purge to the maintenance stage.
+**Retention.** (1.27.0, `STD-GLB-007` 1.1.0, `ADR-ORG-002 §5.6` amended 2026-10-20.) An audit
+record is kept 7 years, purged after that by the maintenance stage, and never purged by a Tenant's
+decommissioning. `STD-GLB-007` names the period: audit logs are "Retained in immutable storage for
+`7 years`", and it counts this record, its reviews and the emergency uses among them. AU-11 leaves
+the period to the organization [R7]; CIS asks for "a minimum of 90 days" (Safeguard 8.10) [R9]. Until
+1.27.0 neither table was purged, and this paragraph said a retention standard would add the purge.
+`STD-GLB-007` already named one.
+
+- **What is purged, by which column.** The column is the one that says when the newest evidence in
+  the row was made: `audit.privileged_access` by `occurred_at`, `audit.privileged_access_review` by
+  `reviewed_at`, and `organization.emergency_grant_use` by `last_used_at`. The last is one row per
+  emergency grant, updated on each use, so it is a counter, but it ages: `first_used_at` and the
+  count are no younger than `last_used_at`, so a row last used 7 years ago holds nothing younger. A
+  grant unused for 7 years then reads as never used, and `EmergencyValidation` takes its due date
+  from `granted_at`, which is older still: it is overdue either way (§Emergency Grant Validation).
+- **The boundary** is `now() - make_interval(years => 7)`, calendar years on the database clock,
+  the clock that wrote each time. `MaintenanceConfig.AuditRetentionYears` is 7 and has no flag: the
+  stage refuses fewer before any step runs.
+- **Only that delete is admitted, by a trigger.** `rls.sql` puts a `BEFORE DELETE` row trigger on each
+  table that raises on a row younger than 7 years, and a `BEFORE TRUNCATE` trigger that raises on
+  any truncation. They fire for every role: the migration role, the owner, a superuser. A defect in
+  the purge, or a hand-written `DELETE` on the migration credential, removes nothing younger.
+- **Not a row-level security policy,** which is how `membership_batch_purge` admits the batch
+  purge and nothing else. Three reasons. A policy does not bind a superuser: "Superusers and roles
+  with the BYPASSRLS attribute always bypass the row security system when accessing a table" [R21],
+  and CI and `deploy/dev` run the stages as one. A policy does not cover `TRUNCATE`: "Operations that
+  apply to the whole table, such as TRUNCATE and REFERENCES, are not subject to row security" [R21];
+  and neither does a row trigger, since "TRUNCATE will not fire any ON DELETE triggers that might
+  exist for the tables. But it will fire ON TRUNCATE triggers" [R21], hence the second trigger. And
+  under `FORCE ROW LEVEL SECURITY` every reader and writer of these tables would need a policy of its
+  own: the recorder, which writes outside any binding; the resolution role's insert; the provider's
+  upsert of a grant's use; the owner reading through `audit.tenant_provider_access`. Each is a new
+  predicate to get wrong, and the trigger changes none of them.
+- **What the trigger does not stop.** Turning it off needs the table's owner ("You must own the
+  table to use ALTER TABLE") or a superuser, through `session_replication_role` ("Only superusers and
+  users with the appropriate SET privilege can change this setting") [R21]. Those are the people who
+  could drop a policy too. The integration suite turns triggers off the same way, for its own seeded
+  rows, on its disposable database.
+- **Decommissioning purges none.** Retiring a Tenant through offboarding deletes no audit record,
+  however old. A provider's access to a retired Tenant is what a later investigation needs, and
+  `STD-GLB-007` exempts audit records from the decommissioning purge. There is no decommissioning
+  purge yet; the test below fails the day one is added that deletes this record.
+- **An unreviewed access leaves the report when it is purged.** The weekly report will have named it
+  as overdue for 7 years by then.
 
 **The tradeoffs.**
 
@@ -1116,8 +1159,11 @@ purge to the maintenance stage.
 - **A Tenant sees what names it.** A provider list across Tenants, or a read of an offboarding by its
   identifier, names no Tenant and is shown to none.
 - **The unreviewed report scans the record.** It asks of every provider row whether a review covers
-  it, one probe of `privileged_access_review_actor_idx` each, so its cost grows with the record. A
-  record large enough for that to matter is one a retention standard would also bound.
+  it, one probe of `privileged_access_review_actor_idx` each, so its cost grows with the record,
+  which the 7-year retention bounds (1.27.0).
+- **The purge scans the record too.** No index leads with `occurred_at`, so the daily purge reads
+  `audit.privileged_access` whole. That is one scan a day, in the maintenance stage; an index on
+  `occurred_at` is the remedy if it ever matters.
 - **Reviewing is itself provider access.** Reading the record and recording a review each leave a
   row under the reviewer, which another provider reviews in turn. Every week a provider who
   reviewed is reviewed, which is the point: nobody's reads of the record go unexamined.
@@ -1127,6 +1173,7 @@ purge to the maintenance stage.
 | R7 | NIST SP 800-53 Rev. 5, OSCAL catalog, <https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json>, accessed 2026-10-08. AU-3: "Ensure that audit records contain information that establishes the following:" "What type of event occurred;" "When the event occurred;" "Where the event occurred;" "Source of the event;" "Outcome of the event; and" "Identity of any individuals, subjects, or objects/entities associated with the event." AU-6 a.: "Review and analyze system audit records [Assignment: frequency] for indications of [Assignment: inappropriate or unusual activity] and the potential impact of the inappropriate or unusual activity;" AU-9 a.: "Protect audit information and audit logging tools from unauthorized access, modification, and deletion; and" AU-9(4) discussion: "Individuals or roles with privileged access to a system and who are also the subject of an audit by that system may affect the reliability of the audit information by inhibiting audit activities or modifying audit records." AU-11: "Retain audit records for [Assignment: time period] to provide support for after-the-fact investigations of incidents and to meet regulatory and organizational information retention requirements." AC-5 discussion: "Separation of duties includes dividing mission or business functions and support functions among different individuals or roles, conducting system support functions with different individuals, and ensuring that security personnel who administer access control functions do not also administer audit functions." |
 | R8 | PostgreSQL 17 Documentation, §39.5 *Rules and Privileges*, <https://www.postgresql.org/docs/17/rules-privileges.html>, and *CREATE VIEW*, <https://www.postgresql.org/docs/17/sql-createview.html>, accessed 2026-10-08: "all relations that are used due to rules get checked against the privileges of the rule owner, not the user invoking the rule"; views "cannot be used to reliably conceal the data in unseen rows unless the security_barrier flag has been set"; `security_barrier` "should be used if the view is intended to provide row-level security." |
 | R9 | Center for Internet Security, *CIS Controls Assessment Specification v8.1*, Controls 8, <https://cas.docs.cisecurity.org/en/latest/source/Controls8/>, accessed 2026-10-08. 8.10: "Retain audit logs across enterprise assets for a minimum of 90 days." 8.11: "Conduct reviews of audit logs to detect anomalies or abnormal events that could indicate a potential threat. Conduct reviews on a weekly, or more frequent, basis." |
+| R21 | PostgreSQL 17 Documentation, accessed 2026-10-20. *Row Security Policies*, <https://www.postgresql.org/docs/17/ddl-rowsecurity.html>: "Superusers and roles with the BYPASSRLS attribute always bypass the row security system when accessing a table." and "Operations that apply to the whole table, such as TRUNCATE and REFERENCES, are not subject to row security." *TRUNCATE*, <https://www.postgresql.org/docs/17/sql-truncate.html>: "TRUNCATE will not fire any ON DELETE triggers that might exist for the tables. But it will fire ON TRUNCATE triggers." *ALTER TABLE*, <https://www.postgresql.org/docs/17/sql-altertable.html>: "You must own the table to use ALTER TABLE." *Client Connection Defaults*, `session_replication_role`, <https://www.postgresql.org/docs/17/runtime-config-client.html>: "Only superusers and users with the appropriate SET privilege can change this setting." |
 
 ### Pausing Tenant Administration
 
@@ -1607,6 +1654,15 @@ administrative connection is explicitly not accepted as evidence.
   Tenant's, no consumer row, and no row that names no Tenant. `organization_rt` cannot read the
   table, and an unbound tenant connection reading the view raises.
 - No runtime role can update or delete a row of either table.
+- Retention (1.27.0, `STD-GLB-007` 1.1.0 compliance check 4):
+  `TestTheAuditPurgeDeletesOnlyRecordsOlderThanSevenYears` seeds an 8-year-old and a 6-year-old
+  record in each of the three tables, purges as `organization_migrator` and then runs the stage, and
+  finds only the 8-year-old ones gone. `TestTheDatabaseRefusesToDeleteAYoungAuditRecord` deletes each
+  6-year-old record directly, as the migration role and as a superuser, and truncates each table;
+  every one is refused by the trigger. `TestMaintenanceRefusesAnAuditRetentionBelowSevenYears`.
+  `TestRetirementLeavesTheTenantsPrivilegedAccessRecord` (`internal/offboarding`) retires a Tenant
+  through the offboarding service and finds its privileged-access rows, from today, 6 and 8 years
+  ago, all still there.
 
 ### Provider Authority Projection
 
@@ -2055,7 +2111,8 @@ not pulled.
 | Governed by | ADR-ORG-003 — Tenant Administration Is a Recorded Grant, Checked with Current Membership |
 | Governed by | ADR-ORG-005 §5.1 — a self caller reads its own contexts, on one route, with no provider record (1.17.0) |
 | Governed by | ADR-ORG-007 §5.1, §5.2 — the self caller accepts an invitation; the token selects one row through the self role (1.26.0) |
-| Governed by | ADR-ORG-002 §5.6 — the privileged-access record is read and reviewed (1.21.0) |
+| Governed by | ADR-ORG-002 §5.6 — the privileged-access record is read and reviewed (1.21.0); kept 7 years, purged by maintenance, never by decommissioning (amended 2026-10-20, 1.27.0) |
+| Conforms to | STD-GLB-007 1.1.0 §Data Retention Lifecycle and compliance check 4 — audit records kept 7 years, purged through a delete-only control, exempt from decommissioning (1.27.0) |
 | Conforms to | STD-GLB-001 1.6.0 §Pagination — the list form and its time window |
 | Conforms to | STD-IAM-002 §3.1.1, §3.2, §3.5 — the grant's holder checks its own record; `principal_id` is the persisted identifier |
 | Conforms to | STD-GLB-002 — `FORCE ROW LEVEL SECURITY`, non-owner runtime role, no `SUPERUSER`/`BYPASSRLS`, isolation proven as the runtime role |

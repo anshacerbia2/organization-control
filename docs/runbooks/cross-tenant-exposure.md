@@ -1,6 +1,6 @@
 # Runbook: suspected cross-tenant exposure
 
-Version 1.0.0. Owner: Core Platform Team; incident policy: Security. Last reviewed 2026-10-09.
+Version 1.0.1. Owner: Core Platform Team; incident policy: Security. Last reviewed 2026-10-20.
 
 A Tenant's data or authority may have been read or changed by someone acting for another Tenant, or
 by a provider without a recorded reason. SAD-004 §9.2 treats "a cross-tenant authorization defect" as
@@ -49,8 +49,9 @@ Any of:
    Filters: `actor_id`, `tenant_id`, `correlation_id`, `authority` (`emergency`, `activation`,
    `eligible`, `consumer`), `from` (inclusive) and `to` (exclusive), RFC 3339 with an offset. Each
    row carries `access_id`, `actor_id`, `authority`, `activation_id`, `tenant_id`, `operation` (the
-   route pattern), `correlation_id`, `reason`, `occurred_at`. Nothing purges the record, and no
-   runtime role can update or delete it.
+   route pattern), `correlation_id`, `reason`, `occurred_at`. The record keeps 7 years: maintenance
+   purges older rows and nothing purges a younger one (STD-GLB-007 1.1.0). No runtime role can update
+   or delete it.
 3. Establish the posture. `curl -sS $OC/readyz`; the service log names each problem the check found.
 4. Establish the extent for each affected Tenant:
    - provider access that named it: `GET /v1/privileged-access?tenant_id=$TENANT_ID`;

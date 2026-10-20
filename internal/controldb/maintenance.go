@@ -11,7 +11,8 @@ package controldb
 // paper.
 //
 // This runs as the migration role, which owns the tables: dropping a partition, nulling a retained
-// payload and deleting a receipt are all things no runtime role may do.
+// payload, deleting a receipt, purging a completed idempotency key and purging an audit record past
+// its 7 years are all things no runtime role may do.
 //
 // # One clock
 //
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
+	"github.com/anshacerbia2/foundation-platform/idempotency"
 	"github.com/anshacerbia2/foundation-platform/migrations"
 	"github.com/anshacerbia2/foundation-platform/outbox"
 )
@@ -40,7 +42,25 @@ type MaintenanceConfig struct {
 	// BatchPreviewRetention is how long a Membership batch preview is kept past its expiry before it
 	// is purged (TDD-organization-control-002 §Membership Batches).
 	BatchPreviewRetention time.Duration
+
+	// IdempotencyRetention is how long a completed idempotency key is kept before it is purged, and
+	// so how long a retry is answered with the first result (TDD-organization-control-003 §Completed
+	// Keys Are Kept 7 Days, Then Purged). foundation-platform refuses less than
+	// idempotency.MinimumRetention. An uncompleted key is never purged.
+	IdempotencyRetention time.Duration
+
+	// AuditRetentionYears is how many calendar years an audit record is kept before it is purged:
+	// audit.privileged_access, audit.privileged_access_review and organization.emergency_grant_use
+	// (STD-GLB-007 1.1.0, TDD-organization-control-001 §Privileged Access Review). Years rather than a
+	// Duration, because the boundary is make_interval(years => n) on the database clock, which a fixed
+	// number of hours is not. Never below AuditRetentionFloor: the stage refuses a shorter value, and
+	// the tables' retention triggers refuse the delete of any younger row whatever the caller asks.
+	AuditRetentionYears int
 }
+
+// AuditRetentionFloor is the 7 years STD-GLB-007 1.1.0 keeps an audit record. rls.sql's retention
+// trigger holds the same number, in the database, for every role.
+const AuditRetentionFloor = 7
 
 // DefaultMaintenance is foundation-platform TDD-001 §Configuration.
 var DefaultMaintenance = MaintenanceConfig{
@@ -53,6 +73,11 @@ var DefaultMaintenance = MaintenanceConfig{
 	// A day past the 15-minute expiry: an administrator who left the screen open overnight still
 	// reads the preview as expired rather than as absent, and nothing is executable meanwhile.
 	BatchPreviewRetention: 24 * time.Hour,
+
+	// 7 days, the window TDD-organization-control-003 publishes.
+	IdempotencyRetention: 7 * 24 * time.Hour,
+
+	AuditRetentionYears: AuditRetentionFloor,
 }
 
 // MaintenanceReport is what one run did, for the log line a scheduler keeps.
@@ -65,6 +90,12 @@ type MaintenanceReport struct {
 
 	// BatchPreviewsPurged counts expired Membership batch previews deleted, with their items.
 	BatchPreviewsPurged int64
+
+	// IdempotencyKeysPurged counts completed idempotency keys deleted past IdempotencyRetention.
+	IdempotencyKeysPurged int64
+
+	// AuditPurged counts the audit records deleted past AuditRetentionYears, per table.
+	AuditPurged AuditPurge
 
 	// StaleUnresolved counts incidents open longer than StaleAlert. They are never disposed; the
 	// count exists so a scheduler can alert, and the stage reports it rather than failing on it,
@@ -79,12 +110,19 @@ func (c MaintenanceConfig) validate() error {
 	case c.OutboxRetention <= 0, c.DeadLetterRetention <= 0, c.ReceiptRetention <= 0, c.StaleAlert <= 0,
 		c.BatchPreviewRetention <= 0:
 		return fmt.Errorf("controldb: every retention boundary must be positive: %+v", c)
+	case c.IdempotencyRetention < idempotency.MinimumRetention:
+		return fmt.Errorf("controldb: idempotency key retention %s is shorter than %s", c.IdempotencyRetention,
+			idempotency.MinimumRetention)
+	case c.AuditRetentionYears < AuditRetentionFloor:
+		return fmt.Errorf("controldb: audit retention of %d years is shorter than the %d years STD-GLB-007 keeps an audit record",
+			c.AuditRetentionYears, AuditRetentionFloor)
 	}
 	return nil
 }
 
 // RunMaintenance creates the partitions ahead, drops expired published ones, disposes of resolved
-// dead-letter payloads, prunes receipts, and counts stale incidents -- each in its own transaction,
+// dead-letter payloads, prunes receipts, purges expired batch previews, completed idempotency keys
+// and audit records past their 7 years, and counts stale incidents -- each in its own transaction,
 // so a failure in one step leaves the steps before it committed and says which one failed.
 func RunMaintenance(ctx context.Context, pool *db.Pool, cfg MaintenanceConfig) (MaintenanceReport, error) {
 	if err := cfg.validate(); err != nil {
@@ -129,6 +167,16 @@ func RunMaintenance(ctx context.Context, pool *db.Pool, cfg MaintenanceConfig) (
 		{"purge expired membership batch previews", func(ctx context.Context, tx db.Tx) error {
 			var err error
 			report.BatchPreviewsPurged, err = PurgeExpiredBatchPreviews(ctx, tx, now.Add(-cfg.BatchPreviewRetention))
+			return err
+		}},
+		{"purge completed idempotency keys", func(ctx context.Context, tx db.Tx) error {
+			var err error
+			report.IdempotencyKeysPurged, err = idempotency.PurgeCompleted(ctx, tx, cfg.IdempotencyRetention)
+			return err
+		}},
+		{"purge audit records past retention", func(ctx context.Context, tx db.Tx) error {
+			var err error
+			report.AuditPurged, err = PurgeExpiredAuditRecords(ctx, tx, cfg.AuditRetentionYears)
 			return err
 		}},
 		{"count stale unresolved dead letters", func(ctx context.Context, tx db.Tx) error {
@@ -176,4 +224,55 @@ func PurgeExpiredBatchPreviews(ctx context.Context, tx db.Tx, before time.Time) 
 		return 0, fmt.Errorf("controldb: purge expired batches: %w", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+// AuditPurge is how many audit records one run deleted from each table.
+type AuditPurge struct {
+	PrivilegedAccess int64 // audit.privileged_access, by occurred_at
+	Reviews          int64 // audit.privileged_access_review, by reviewed_at
+	EmergencyUses    int64 // organization.emergency_grant_use, by last_used_at
+}
+
+// auditPurges deletes each table's records older than the retention, in calendar years on the
+// database clock. The column is the one that says when the newest evidence in the row was made: an
+// access when it occurred, a review when it was recorded, and a grant's use record when the grant
+// was last used, since first_used_at and the count are no younger than that.
+var auditPurges = []struct {
+	table, statement string
+	into             func(*AuditPurge) *int64
+}{
+	{"audit.privileged_access",
+		`DELETE FROM audit.privileged_access WHERE occurred_at < now() - make_interval(years => $1)`,
+		func(p *AuditPurge) *int64 { return &p.PrivilegedAccess }},
+	{"audit.privileged_access_review",
+		`DELETE FROM audit.privileged_access_review WHERE reviewed_at < now() - make_interval(years => $1)`,
+		func(p *AuditPurge) *int64 { return &p.Reviews }},
+	{"organization.emergency_grant_use",
+		`DELETE FROM organization.emergency_grant_use WHERE last_used_at < now() - make_interval(years => $1)`,
+		func(p *AuditPurge) *int64 { return &p.EmergencyUses }},
+}
+
+// PurgeExpiredAuditRecords deletes the audit records older than years calendar years, and returns
+// how many from each table (STD-GLB-007 1.1.0: kept 7 years, purged after by the owning service's
+// maintenance).
+//
+// It refuses fewer than AuditRetentionFloor years before running anything. The database refuses
+// them as well: each table carries a BEFORE DELETE trigger, from rls.sql, that raises on a row
+// younger than 7 years and a BEFORE TRUNCATE trigger that raises on any truncation, for every role,
+// the owner and a superuser included. A delete this function did not issue, or a defect in it, can
+// therefore remove nothing a younger record holds. TDD-organization-control-001 §Privileged Access
+// Review says why a trigger and not a policy.
+func PurgeExpiredAuditRecords(ctx context.Context, tx db.Tx, years int) (AuditPurge, error) {
+	var purged AuditPurge
+	if years < AuditRetentionFloor {
+		return purged, fmt.Errorf("controldb: audit retention of %d years is shorter than %d", years, AuditRetentionFloor)
+	}
+	for _, purge := range auditPurges {
+		tag, err := tx.Exec(ctx, purge.statement, years)
+		if err != nil {
+			return purged, fmt.Errorf("controldb: purge %s: %w", purge.table, err)
+		}
+		*purge.into(&purged) = tag.RowsAffected()
+	}
+	return purged, nil
 }

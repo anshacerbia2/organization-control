@@ -307,7 +307,9 @@ GRANT UPDATE (decided_by, decision, decision_reason, decided_at, ends_at, ended_
 -- organization.emergency_grant_use -- provider only: every request an emergency grant authorizes
 -- records the grant's use, and the validation report reads it (ADR-ORG-002 §5.2). INSERT for the
 -- first use, UPDATE of the last use and the count alone, SELECT for the report and for the count the
--- update adds to. Nothing deletes one: it is the evidence that the grant was validated.
+-- update adds to. No runtime role deletes one: it is the evidence that the grant was validated. The
+-- maintenance stage purges a row whose grant was last used more than 7 years ago, as the migration
+-- role, and rls.sql's retention trigger refuses the delete of any younger row (STD-GLB-007 1.1.0).
 GRANT SELECT, INSERT ON organization.emergency_grant_use TO organization_provider_rt;
 GRANT UPDATE (last_used_at, uses) ON organization.emergency_grant_use TO organization_provider_rt;
 
@@ -327,7 +329,9 @@ GRANT SELECT, INSERT, UPDATE ON projection.consumer TO organization_provider_rt;
 -- Nothing may change it. Evidence whose writer can amend it is not evidence, and a tenant-scoped
 -- caller able to INSERT could attribute an access to somebody else. The evidence sits outside the
 -- RLS set by construction, so these grants are its boundary: no UPDATE, DELETE or TRUNCATE for any
--- role (AU-9).
+-- runtime role (AU-9). The one delete is the maintenance stage's, as the migration role, of a record
+-- older than 7 years; rls.sql's retention trigger refuses any younger one and every TRUNCATE, for every
+-- role (STD-GLB-007 1.1.0).
 --
 -- SELECT from 1.21.0 of TDD-organization-control-001: a provider in force reads the record to review
 -- it, and the unreviewed report counts it (ADR-ORG-002 §5.6). Until then nothing read it, and the
@@ -479,6 +483,12 @@ GRANT SELECT ON platform.dead_letter TO organization_provider_rt;
 -- provider role completes a claim only inside the transaction that made it (TDD-organization-
 -- control-003 §The Response Is Recorded with the Effect), so it may set the response and nothing
 -- else: not the scope, the key or the digest a claim is matched on.
+--
+-- No DELETE, for any runtime role, and no EXECUTE on platform.purge_idempotency_keys: the revoke of
+-- every platform function from PUBLIC below covers it. Completed keys are purged after 7 days by the
+-- maintenance stage, which runs as the migration role, the table's owner (TDD-organization-control-003
+-- §Completed Keys Are Kept 7 Days, Then Purged). A request path able to delete a key could make a
+-- retry of a completed command execute it again.
 GRANT SELECT, INSERT, UPDATE ON platform.idempotency_key TO organization_rt;
 GRANT SELECT, INSERT         ON platform.idempotency_key TO organization_provider_rt;
 GRANT UPDATE (response_status, response_body, completed_at) ON platform.idempotency_key TO organization_provider_rt;
