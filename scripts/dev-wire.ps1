@@ -9,7 +9,11 @@
 #   3. the first provider here, by bootstrap-provider;
 #   4. Organization's emergency provider:identity-control grant and identity-control's consumer;
 #   5. delivery to identity-control;
-#   6. identity-control pointed here, and its provider-bootstrap run.
+#   6. identity-control pointed here, and its provider-bootstrap run;
+#   7. the development reporters: a workload per stand-in of STD-GLB-009 rule 13, each with its own key,
+#      registered here for what it reports (ADR-ORG-001 §5.11, amended 2026-10-20): provisioning, and
+#      obligation:product, :hcm, :billing and :audit. scripts/dev-provisioning.ps1, dev-deprovisioning.ps1
+#      and dev-obligation.ps1 report as them.
 #
 # It is run once per pair of databases. Each creation is refused when it was made before, and the
 # script stops there.
@@ -200,8 +204,33 @@ $bootstrap | ForEach-Object { Write-Host "        $_" }
 if ($LASTEXITCODE -ne 0) { throw "provider-bootstrap failed" }
 if (-not ($bootstrap -match "memberships\s+\d+")) { throw "provider-bootstrap did not bootstrap the Tenant context" }
 
+Write-Host "7. the development reporters"
+# Fresh tokens: steps 3 to 6 restart both services, and the first ones may have expired meanwhile.
+$identityToken = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
+    -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp
+$token = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
+    -ClientId "dev-provider-caller" -KeyFile $callerKey @operatorTotp
+$reporters = [ordered]@{}
+foreach ($reports in @("provisioning", "obligation:product", "obligation:hcm", "obligation:billing", "obligation:audit")) {
+    # One workload client per external system, with its own key (ADR-ORG-001 §5.11). The keys stay
+    # beside the state file, with the operator's caller key: a stand-in is the operator's script.
+    $name = "dev-reporter-" + ($reports -replace ':', '-')
+    $jwk = New-Key $name $callerKeys "$(id -u):$(id -g)"
+    $workload = Require "$name created" (Send-Json "POST" "$identityApi/v1/workloads" (@{
+                display_name = $name; purpose = "Development stand-in that reports $reports to Organization Control"
+                workload_type = "service"; owner_principal_id = $operatorPrincipal; client_key = $name
+                application_ref = "development-reporter"; audience = @("organization-control-api"); public_key = $jwk
+            } | ConvertTo-Json -Compress -Depth 4) $identityToken "wire-$name") 201
+    $null = Require "$name registered as the $reports reporter" (Send-Json "POST" "$organizationApi/v1/reporters" (@{
+                principal_id = $workload.principal_id; reports = $reports
+                purpose = "The development server's stand-in for $reports (STD-GLB-009 rule 13)"
+            } | ConvertTo-Json -Compress) $token "wire-reporter-$name") 201
+    $reporters[$reports] = [ordered]@{ client_id = $name; key_file = (Join-Path $callerKeys "$name.pem")
+        principal_id = $workload.principal_id }
+}
+
 @{ operator_principal_id = $operatorPrincipal; organization_workload_principal_id = $organizationWorkload.principal_id
     identity_workload_principal_id = $identityWorkload.principal_id; caller_client_id = "dev-provider-caller"
-    caller_key_file = $callerKey } | ConvertTo-Json -Compress | Set-Content -NoNewline $State
+    caller_key_file = $callerKey; reporters = $reporters } | ConvertTo-Json -Compress -Depth 4 | Set-Content -NoNewline $State
 Write-Host ""
 Write-Host "wired: the state is in $State"

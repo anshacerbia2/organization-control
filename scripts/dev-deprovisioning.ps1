@@ -2,10 +2,12 @@
 # (TDD-organization-control-003 1.16.0 §The Provisioning System on a Development Server,
 # TDD-organization-control-004 1.13.0 §Offboarding on a Development Server). Releasing an offboarding
 # records a deprovisioning command and publishes it; on a development server no provisioning system
-# receives it, so nothing reports its outcome and Retire stays refused. This script reports it, as an
-# operator acting for that system, through the route the system itself calls:
-# POST /v1/offboardings/{offboarding_id}/deprovisioning. Same route, same authentication; only the
-# caller differs. Production has a real provisioning system and never runs this.
+# receives it, so nothing reports its outcome and Retire stays refused. This script reports it through
+# the route the system itself calls, POST /v1/offboardings/{offboarding_id}/deprovisioning, as the
+# development provisioning reporter: a workload registered as production's provisioning system is,
+# with its own key (ADR-ORG-001 §5.11, STD-GLB-009 rule 13, 1.10.0). It reads the offboarding first as
+# the operator, a provider, because a reporter reaches its report routes alone. Production has a real
+# provisioning system and never runs this.
 #
 # deploy/dev/README.md §Offboarding a Tenant on the development server is the procedure:
 #   1. Release the offboarding in Organization Experience (or POST /v1/offboardings/{id}/release);
@@ -21,9 +23,9 @@
 #
 # Exit codes: 0 reported; 2 refused, nothing sent; 1 any other failure.
 #
-# Environment and SECRETS: as dev-provisioning.ps1. The token is the operator's dev-provider-caller,
-# from the wiring state file dev-wire.ps1 wrote. Nothing read from a key file or the environment is
-# printed.
+# Environment and SECRETS: as dev-provisioning.ps1. The reads use the operator's dev-provider-caller,
+# and the report the provisioning reporter's key, both from the wiring state file dev-wire.ps1 wrote.
+# Nothing read from a key file or the environment is printed.
 #   $env:IDENTITY_CALLER_PASSWORD      the bootstrap operator's password
 #   $env:IDENTITY_OPERATOR_TOTP_FILE   optional, the operator's TOTP file (identity-control's dev-env.ps1
 #                                      finds deploy/dev/keys/operator-totp.json in its checkout)
@@ -84,6 +86,10 @@ if (Get-Command Get-DevOperatorTotp -ErrorAction SilentlyContinue) {
 } else {
     $operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
 }
+. (Join-Path $PSScriptRoot "dev-reporter.ps1")
+if ($null -eq (Get-ReporterEntry $s "provisioning")) {
+    Refuse "the wiring state names no development provisioning reporter; run scripts/dev-wire.ps1 (step 7 registers it)"
+}
 $token = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
     -ClientId $s.caller_client_id -KeyFile $s.caller_key_file @operatorTotp
 $client = New-Object System.Net.Http.HttpClient
@@ -91,9 +97,9 @@ $client = New-Object System.Net.Http.HttpClient
 # Call sends one request with the administrative reason every provider route requires. The report
 # honours an Idempotency-Key and does not require one (TDD-organization-control-004 §API: the same
 # outcome sent again records the same state), so none is sent.
-function Call([string] $method, [string] $path, $body) {
+function Call([string] $method, [string] $path, $body, [string] $bearer = $token) {
     $request = New-Object System.Net.Http.HttpRequestMessage($method, "$organizationApi$path")
-    $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $token)
+    $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $bearer)
     $request.Headers.Add("X-Administrative-Reason", $AdministrativeReason)
     if ($null -ne $body) {
         $json = $body | ConvertTo-Json -Compress -Depth 4
@@ -143,7 +149,8 @@ switch ($deprovisioning.state) {
 
 $body = @{ state = $outcome }
 if (-not [string]::IsNullOrWhiteSpace($Reason)) { $body.detail = $Reason.Trim() }
-$r = Call "POST" "/v1/offboardings/$OffboardingId/deprovisioning" $body
+# The report itself, as the provisioning reporter workload.
+$r = Call "POST" "/v1/offboardings/$OffboardingId/deprovisioning" $body (Get-ReporterToken $s "provisioning")
 if ($r.code -ne 204) { throw "POST /v1/offboardings/$OffboardingId/deprovisioning answered $($r.code): $($r.text)" }
 Write-Host "reported    $outcome$(if ($body.Contains('detail')) { ": $($body.detail)" })"
 $now = Get-Prop (Read-Offboarding) "deprovisioning"

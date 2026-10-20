@@ -561,6 +561,10 @@ try {
         (Dev-Obligation @("-OffboardingId", $off, "-ObligationId", $export.obligation_id, "-Domain", "billing", "-Completed")).code 2
     $board = Require "the board read" (Call "GET" "$base/obligations" $null (Provider-Token) $null) 200
     Expect "and changed nothing" (@($board.obligations | Where-Object { $_.state -eq "open" }).Count) 2
+    # No provider resolves an obligation: only the domain's registered reporter does (ADR-ORG-001
+    # §5.11, amended 2026-10-20).
+    Expect "the operator's own token is refused on resolve" (Call "POST" "$organizationApi/v1/obligations/$($export.obligation_id)/resolve" @{
+            domain = "product"; state = "completed" } (Provider-Token) "proof-off-provider-resolve").code 403
     Expect "dev-obligation.ps1 completes product's obligation, as product" `
         (Dev-Obligation @("-OffboardingId", $off, "-ObligationId", $export.obligation_id, "-Domain", "product", "-Completed")).code 0
     Expect "dev-obligation.ps1 waives billing's obligation, as billing, with a reason" `

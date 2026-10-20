@@ -3,9 +3,11 @@
 # against a domain (product, hcm, billing, audit, ...) and only that domain resolves it, through
 # POST /v1/obligations/{obligation_id}/resolve naming itself. On a development server no such domain
 # runs, so an obligation raised there stays open and Release stays refused. This script reports the
-# domain's outcome, as an operator acting for that domain, through the same route: same route, same
-# authentication, the same domain check; only the caller differs. Production's domains report their
-# own outcomes and nothing runs this. Organization Experience offers no control for it on purpose: an
+# domain's outcome through the same route, as the development reporter registered for
+# obligation:<domain>: a workload with its own key, admitted from its record as production's domain is
+# (ADR-ORG-001 §5.11, STD-GLB-009 rule 13, 1.10.0). No provider resolves an obligation, so the route
+# refuses the operator's own token. It reads the board first as the operator, a provider. Production's
+# domains report their own outcomes and nothing runs this. Organization Experience offers no control for it on purpose: an
 # operator there cannot resolve another domain's obligation (TDD-organization-experience-003 §As Served).
 #
 # deploy/dev/README.md §Offboarding a Tenant on the development server is the procedure:
@@ -21,7 +23,8 @@
 #
 # Exit codes: 0 reported; 2 refused, nothing sent; 1 any other failure.
 #
-# Environment and SECRETS: as dev-provisioning.ps1.
+# Environment and SECRETS: as dev-provisioning.ps1. The reads use the operator's dev-provider-caller, and
+# the resolution the domain reporter's key, both from the wiring state file dev-wire.ps1 wrote.
 #   $env:IDENTITY_CALLER_PASSWORD      the bootstrap operator's password
 #   $env:IDENTITY_OPERATOR_TOTP_FILE   optional, the operator's TOTP file
 #   $env:ORGANIZATION_API_URL          optional, http://127.0.0.1:8083
@@ -52,7 +55,8 @@ param(
     [Parameter(ParameterSetName = "Completed")]
     [string] $Reason,
 
-    # The X-Administrative-Reason recorded as provider-access evidence. Plain ASCII.
+    # The X-Administrative-Reason: required on the operator's reads, and recorded on the reporter's
+# access row. Plain ASCII.
     [string] $AdministrativeReason = "development server: no owning domain, obligation outcome reported by dev-obligation.ps1"
 )
 
@@ -87,6 +91,7 @@ if (Get-Command Get-DevOperatorTotp -ErrorAction SilentlyContinue) {
 } else {
     $operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
 }
+. (Join-Path $PSScriptRoot "dev-reporter.ps1")
 $token = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
     -ClientId $s.caller_client_id -KeyFile $s.caller_key_file @operatorTotp
 $client = New-Object System.Net.Http.HttpClient
@@ -94,9 +99,9 @@ $client = New-Object System.Net.Http.HttpClient
 # Call sends one request with the administrative reason. The resolution is a command and requires an
 # Idempotency-Key (TDD-organization-control-004 §API): one per run, so a run is one command.
 $idempotencyKey = [Guid]::NewGuid().ToString()
-function Call([string] $method, [string] $path, $body) {
+function Call([string] $method, [string] $path, $body, [string] $bearer = $token) {
     $request = New-Object System.Net.Http.HttpRequestMessage($method, "$organizationApi$path")
-    $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $token)
+    $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $bearer)
     $request.Headers.Add("X-Administrative-Reason", $AdministrativeReason)
     if ($method -eq "POST") { $request.Headers.Add("Idempotency-Key", $idempotencyKey) }
     if ($null -ne $body) {
@@ -142,9 +147,13 @@ if ($obligation.state -eq "completed" -or $obligation.state -eq "waived" -or $ob
     Refuse "it is already $($obligation.state): the first resolution is final"
 }
 
+if ($null -eq (Get-ReporterEntry $s "obligation:$($obligation.domain)")) {
+    Refuse "the wiring state names no development reporter for obligation:$($obligation.domain); scripts/dev-wire.ps1 step 7 registers product, hcm, billing and audit"
+}
 $body = @{ domain = $obligation.domain; state = $outcome }
 if (-not [string]::IsNullOrWhiteSpace($Reason)) { $body.detail = $Reason.Trim() }
-$r = Call "POST" "/v1/obligations/$($obligation.obligation_id)/resolve" $body
+# The resolution itself, as the domain's reporter workload.
+$r = Call "POST" "/v1/obligations/$($obligation.obligation_id)/resolve" $body (Get-ReporterToken $s "obligation:$($obligation.domain)")
 if ($r.code -ne 200) { throw "POST /v1/obligations/$($obligation.obligation_id)/resolve answered $($r.code): $($r.text)" }
 Write-Host "reported    $outcome$(if ($body.Contains('detail')) { ": $($body.detail)" }) for $($obligation.domain)"
 Write-Host "now         obligation $($r.json.state)"

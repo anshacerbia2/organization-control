@@ -17,7 +17,11 @@
 #   6. starts the stack with docker compose up -d --build, waits for /readyz, and reads again;
 #   7. writes restore-evidence.json and fails on any difference, on an empty outbox, delivery,
 #      receipt, consumer registry, Membership, Tenant or offboarding table, or on a recovery slower
-#      than the 15-minute RTO of PAD-PLT-002 §6.2.
+#      than the 15-minute RTO of PAD-PLT-002 §6.2;
+#   8. runs the restore bump restore.sh skipped for the comparison (ADR-ORG-003 §5.5, STD-GLB-002
+#      3.3.0 §A restore to an older point): every Tenant version and security version at 10^9 or
+#      above, each withdrawn Tenant published at its new version and no active one, every active
+#      consumer asked to reconcile, and identity-control applying a bumped Tenant version.
 #
 # Between steps 3 and 5 it also drills backup.sh's retention (STD-GLB-009 rule 9 and compliance check
 # 7, 1.10.0) in a directory of its own, seeded with 16 older complete sets, one lone file and one
@@ -165,7 +169,8 @@ retention_failure_deleted_nothing=false
 
 echo "5. restore into an empty volume with deploy/dev/restore.sh"
 t0="$(now)"
-bash "$deploy/restore.sh" "$globals" "$dump"
+# RESTORE_BUMP=0: the comparison below needs the restored tables as backed up; step 8 bumps them.
+RESTORE_BUMP=0 bash "$deploy/restore.sh" "$globals" "$dump"
 restore_seconds="$(elapsed "$t0" "$(now)")"
 volume_after="$(docker volume inspect -f '{{.CreatedAt}}' "$volume")"
 fingerprint restored
@@ -204,7 +209,7 @@ fi
 docker rm -f "$probe_container" >/dev/null
 
 refuses_occupied=false
-if bash "$deploy/restore.sh" "$globals" "$dump" > "$out/second-restore.txt" 2>&1; then
+if RESTORE_BUMP=0 bash "$deploy/restore.sh" "$globals" "$dump" > "$out/second-restore.txt" 2>&1; then
 	echo "::error::a second restore.sh ran over the restored database; it must refuse"
 else
 	grep -qF "refusing:" "$out/second-restore.txt" && refuses_occupied=true
@@ -253,6 +258,40 @@ critical_filled="$(jq --argjson names "$required_json" \
 	'($names | length) == ([.[] | select(.rows > 0)] | length)' <<< "$critical")"
 within_rto="$(awk -v s="$recovery_seconds" -v b="$rto_seconds" 'BEGIN { print (s <= b) ? "true" : "false" }')"
 
+echo "8. the restore bump (ADR-ORG-003 §5.5)"
+psql_org() {
+	compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -qtA -U postgres -d "$database" -c "$1"
+}
+compose stop "$service"
+compose --profile restore-bump run --rm restore-bump > "$out/restore-bump.txt" 2>&1 || true
+compose start "$service"
+bump_versions=false
+[ "$(psql_org "SELECT count(*) > 0 AND bool_and(version >= 1000000000 AND tenant_security_version >= 1000000000) FROM tenant.tenant")" = t ] &&
+	bump_versions=true
+withdrawn_published="$(psql_org "SELECT count(*) FROM platform.outbox
+	WHERE envelope->'data'->>'tenant_status' IN ('suspended', 'offboarding', 'retired')
+	  AND (envelope->'data'->>'tenant_security_version')::bigint >= 1000000000")"
+active_published="$(psql_org "SELECT count(*) FROM platform.outbox
+	WHERE envelope->'data'->>'tenant_status' = 'active'
+	  AND (envelope->'data'->>'tenant_security_version')::bigint >= 1000000000")"
+bump_withdrawals_only=false
+[ "$withdrawn_published" -gt 0 ] && [ "$active_published" -eq 0 ] && bump_withdrawals_only=true
+bump_reconcile_requested=false
+[ "$(psql_org "SELECT count(*) > 0 AND bool_and(reconciliation_requested_at IS NOT NULL) FROM projection.consumer WHERE retired_at IS NULL")" = t ] &&
+	bump_reconcile_requested=true
+# The consumer applies it: identity-control holds a Tenant at a bumped version, delivered by the
+# restarted dispatcher. Its apply rule is a higher version only, so this is the version the bump wrote.
+bump_applied=false
+for _ in $(seq 1 90); do
+	applied="$(cd "$identity_repo/deploy/dev" && docker compose exec -T postgres psql -X -qtA -U postgres -d identity_control \
+		-c "SELECT count(*) FROM identity.tenant_desired WHERE tenant_version >= 1000000000" 2>/dev/null || echo 0)"
+	if [ "${applied:-0}" -gt 0 ] 2>/dev/null; then
+		bump_applied=true
+		break
+	fi
+	sleep 2
+done
+
 jq -n \
 	--arg service organization-control --arg database "$database" --arg started_at "$started_at" \
 	--arg commit "${GITHUB_SHA:-}" \
@@ -274,6 +313,9 @@ jq -n \
 	--argjson retention_failure_refused "$retention_failure_refused" \
 	--argjson retention_failure_deleted_nothing "$retention_failure_deleted_nothing" \
 	--arg kept_sets "${kept[*]}" --arg pruned_sets "$actually_pruned" \
+	--argjson bump_versions "$bump_versions" --argjson bump_withdrawals_only "$bump_withdrawals_only" \
+	--argjson bump_reconcile_requested "$bump_reconcile_requested" --argjson bump_applied "$bump_applied" \
+	--argjson withdrawn_published "$withdrawn_published" --argjson active_published "$active_published" \
 	--slurpfile source "$out/fingerprint-source.json" \
 	'{
 	  standard: "STD-GLB-002 §Restore Evidence",
@@ -308,8 +350,13 @@ jq -n \
 	             failed_backup_deleted_nothing: $retention_failure_deleted_nothing},
 	  rpo: {target_seconds: 60, backup_interval_seconds: 86400, met: false,
 	        why: "A daily pg_dump loses up to 24 hours. A 1-minute RPO needs continuous WAL archiving with point-in-time recovery on the production platform; a drill of a logical dump never proves it."},
+	  restore_bump: {decision: "ADR-ORG-003 §5.5", procedure: "organization-migrate -stage=restore-bump, run by deploy/dev/restore.sh",
+	                 margin: 1000000000, versions_bumped: $bump_versions, withdrawn_published: $withdrawn_published,
+	                 active_published: $active_published, withdrawals_only: $bump_withdrawals_only,
+	                 every_consumer_asked_to_reconcile: $bump_reconcile_requested,
+	                 identity_control_applied_a_bumped_tenant: $bump_applied},
 	  older_point: {drilled: false,
-	                why: "The drill restores to the instant of its own backup. A restore to an older point gives back security versions identity-control has already seen superseded; its reconciliation is not built (SAD-004 §6.6)."}
+	                why: "The drill restores to the instant of its own backup, then bumps. Memberships a consumer holds at a higher version are advanced from its report, which internal/membership integration tests prove (SAD-004 §6.6)."}
 	}' > "$out/restore-evidence.json"
 
 cat "$out/restore-evidence.json"
@@ -317,7 +364,8 @@ cat "$out/restore-evidence.json"
 checks=(schema_equal migration_equal tables_equal sequences_equal roles_equal critical_filled
 	volume_new refuses_occupied one_row_detected without_roles_refused ready migrate_ready read_equal within_rto
 	retention_kept retention_newest_kept retention_pruned_oldest retention_incomplete_left
-	retention_failure_refused retention_failure_deleted_nothing)
+	retention_failure_refused retention_failure_deleted_nothing
+	bump_versions bump_withdrawals_only bump_reconcile_requested bump_applied)
 failures=0
 for check in "${checks[@]}"; do
 	if [ "${!check}" = true ]; then
@@ -347,6 +395,7 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
 		echo "| Schema, migration, tables, sequences, roles equal | $schema_equal, $migration_equal, $tables_equal, $sequences_equal, $roles_equal |"
 		echo "| API read equal | $read_equal |"
 		echo "| Retention, 16 older sets seeded | ${#kept[@]} complete sets kept, pruned: ${actually_pruned:-none}; a backup with the database down refused: $retention_failure_refused, deleted nothing: $retention_failure_deleted_nothing |"
+		echo "| Restore bump (ADR-ORG-003 §5.5) | versions bumped: $bump_versions; withdrawn published: $withdrawn_published, active: $active_published; consumers asked to reconcile: $bump_reconcile_requested; identity-control applied a bumped Tenant: $bump_applied |"
 		echo "| RPO | not met: a daily dump loses up to 24 h, against 1 min (STD-GLB-002 §Restore Evidence) |"
 	} >> "$GITHUB_STEP_SUMMARY"
 fi
