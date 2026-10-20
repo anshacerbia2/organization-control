@@ -12,7 +12,7 @@ UPDATE "invitation"."invitation" SET state = 'pending', principal_id = NULL WHER
 ALTER TABLE "invitation"."invitation" DROP CONSTRAINT "invitation_state_check", ADD CONSTRAINT "invitation_state_check" CHECK (state = ANY (ARRAY['pending'::text, 'accepted'::text, 'expired'::text, 'revoked'::text])); -- atlas:destructive-approved: check narrowed in place after the rows it excludes were returned to pending
 -- The partial unique index is rebuilt with the narrower predicate. Both statements run in Atlas's one
 -- transaction, so no concurrent issue sees the table without it.
--- Drop index "invitation_pending_unique" from table: "invitation"
+-- Rebuild "invitation_pending_unique" on table "invitation": first the old predicate goes
 DROP INDEX "invitation"."invitation_pending_unique"; -- atlas:destructive-approved: rebuilt below with state = 'pending', in the same transaction
 -- Create index "invitation_pending_unique" to table: "invitation"
 CREATE UNIQUE INDEX "invitation_pending_unique" ON "invitation"."invitation" ("tenant_id", "target_hash", (COALESCE(workspace_id, tenant_id))) WHERE (state = 'pending'::text);
