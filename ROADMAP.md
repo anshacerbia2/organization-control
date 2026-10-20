@@ -582,25 +582,31 @@ against 900 s. Two gaps stay recorded, not claimed:
 
 ## Debt, named rather than implied
 
-Two items, and one purchase clears both.
+One item. Until 2026-10-20 there were two; the first was never debt, and is folded into the one
+below.
 
-### `atlas migrate lint` is Atlas Pro only since v0.38
+### RLS outside HCL (Pro only)
 
-`ADR-GLB-004` requires the pipeline to block a destructive plan rather than report it, and names
-that command as the mechanism. On the free CLI it aborts. CI stands in with `atlas migrate
-validate` — which checks directory integrity and nothing about destructiveness — plus a
-text-level grep for `DROP TABLE`, `RENAME`, `TRUNCATE` and their neighbours.
+Recorded first as "`atlas migrate lint` is Atlas Pro only since v0.38", retitled 2026-10-20.
 
-The grep fails, which is the property that matters. It is also cruder than the analyzer it
-replaces: it reads text rather than a parsed plan, so it cannot tell a destructive statement from
-the same words inside a comment, and a reviewer can silence it with an annotation. Recorded here
-rather than presented as equivalent.
+**The lint half was never debt, and is not a waiver.** `ADR-GLB-004` §5.1 (amended 2026-08-18 and
+2026-10-20) states the destructive gate as a property, met by `atlas migrate validate`, a
+destructive-statement gate and the synchronisation check: "A pipeline that implements items 1 and 2
+meets this gate. It is not a waiver, and a ROADMAP does not describe it as one." CI runs all three.
+The destructive-statement gate is squawk v2.70.0, pinned by version and checksum, over every
+migration after `20261019120000_remove_identity_verified` (`.squawk.toml`). squawk parses each
+statement, so a word in a comment is not flagged, and a reviewed approval is a rule-scoped
+`-- squawk-ignore <rule>` comment on the line before the statement. The reviewed text match stays
+over the migrations up to that cutover, whose `atlas:destructive-approved` lines cannot be edited
+without breaking `atlas.sum`, and keeps `TRUNCATE` after it, which squawk does not flag. CI pins the
+Atlas CLI to v1.3.4, the migrate image's release (§5.4).
 
-### Row-Level Security is outside the declarative schema
-
-Atlas OSS models neither `ENABLE`/`FORCE ROW LEVEL SECURITY` nor `CREATE POLICY` — verified
-against v1.3.2, whose `schema inspect` emits no trace of either. The policies therefore live in
-`internal/controldb/rls.sql`.
+**What stays Pro-only is the title.** Atlas models RLS policies in HCL only for Atlas Pro users:
+"Policies are available only to Atlas Pro users. To use this feature, run: atlas login" (`ADR-GLB-002`
+§6, amended 2026-10-20). This repository declares RLS policies, so they live outside HCL, in
+`internal/controldb/rls.sql`, which `organization-migrate -stage=post` applies after
+`atlas migrate apply`. The free CLI shows the same: v1.3.2's `schema inspect` emits no trace of
+`ENABLE`/`FORCE ROW LEVEL SECURITY` or `CREATE POLICY`.
 
 **What this does not cost.** A runtime role cannot remove a policy: neither holds DDL and neither
 owns a table. Drift heals on deploy, because `rls.sql` recreates every policy on every run and
@@ -619,12 +625,10 @@ behind `GET /readyz` (TDD-organization-control-001 1.19.0 §Verifying the Postur
 weakenings are tested and each is detected, and every one of them leaves the schema matching its
 declared state — which is why a schema tool would not have caught them.
 
-### Resolving both
+### Resolving it
 
-An Atlas Pro login with a CI token supplies the destructive analyzer and RLS in HCL. The
-alternative for the first item alone is an amendment to `ADR-GLB-004` naming a different
-mechanism; there is no alternative for the second short of writing a policy differ, which is not
-work this repository should own.
-
-Until then, neither is presented as satisfied. `ADR-GLB-004`'s destructive gate has a waiver in
-effect by substitution, and that is the honest description.
+Buying Atlas Pro stays `ADR-GLB-004`'s preferred upgrade ("not rejected, deferred", its
+Alternative C). It moves the policies into `schema.hcl`, and supplies `atlas migrate lint` (§5.1
+item 4), whose configuration `atlas.hcl` keeps. Short of it, the alternative is writing a policy
+differ, which is not work this repository should own. Until then the policies are applied by an
+idempotent stage and checked at runtime, without a diff, and that is the honest description.

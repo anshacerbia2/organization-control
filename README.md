@@ -746,10 +746,12 @@ narrower than it first looks: reconciliation happens at deploy time, and `rls.sq
 converges at deploy time. What a declarative tool would add is a **diff** — the ability to review
 a policy change as a schema change and to detect drift without applying anything.
 
-Closing that half requires Atlas Pro, which also supplies `atlas migrate lint` — the destructive
-gate `ADR-GLB-004` mandates and that CI currently stands in for with a text-level grep. One
-purchase clears both, and both are recorded as debt in [ROADMAP.md](ROADMAP.md) rather than
-presented as equivalent to the mandated mechanism.
+Closing that half requires Atlas Pro, which models policies in HCL only for its users
+(`ADR-GLB-002` §6). It is recorded as debt in [ROADMAP.md](ROADMAP.md), "RLS outside HCL (Pro
+only)". The destructive gate of `ADR-GLB-004` §5.1 is not part of it: CI meets that gate without
+Atlas Pro, with `atlas migrate validate`, squawk over the new migrations (`.squawk.toml`) and the
+synchronisation check, and "It is not a waiver". Atlas Pro would add `atlas migrate lint`, the
+preferred upgrade.
 
 ### The safety gap is closed without any vendor
 

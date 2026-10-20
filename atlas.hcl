@@ -21,9 +21,9 @@ variable "dev_url" {
 
 // The schemas Atlas owns. `platform` is absent deliberately; see schema.hcl.
 //
-// Row-Level Security is absent too, and for a different reason: Atlas OSS does not model
-// `ENABLE`/`FORCE ROW LEVEL SECURITY` or `CREATE POLICY`, so those cannot live in
-// schema.hcl. `internal/controldb/rls.sql` applies them in a stage after Atlas, and the
+// Row-Level Security is absent too, and for a different reason: Atlas models policies in HCL
+// only for Atlas Pro users (ADR-GLB-002 §6, amended 2026-10-20), so `ENABLE`/`FORCE ROW LEVEL
+// SECURITY` and `CREATE POLICY` cannot live in schema.hcl. `internal/controldb/rls.sql` applies them in a stage after Atlas, and the
 // structural test in that package is what keeps them from silently disappearing — because
 // nothing reconciles them the way Atlas reconciles a column.
 locals {
@@ -86,15 +86,15 @@ env "ci" {
     revisions_schema = "atlas"
   }
 
-  // ADR-GLB-004 requires the pipeline to block a destructive plan rather than report it, and
-  // names `atlas migrate lint` as the mechanism. Since Atlas v0.38 that command aborts on the
-  // free CLI: "'atlas migrate lint' is available only to Atlas Pro users."
+  // `atlas migrate lint`, the plan analyzer of ADR-GLB-004 §5.1 item 4. Since Atlas v0.38 it runs
+  // only with an Atlas Pro login: "Starting with v0.38, the atlas migrate lint command is available
+  // only to Atlas Pro users." This block is inert until such a login exists, and kept so the
+  // configuration is ready then.
   //
-  // This block is therefore inert today. It is kept rather than deleted because it is correct
-  // the moment an Atlas Pro login exists, and deleting it would erase the record that the
-  // mandated configuration was written. ci.yml runs `atlas migrate validate`, which is free
-  // and checks directory integrity, plus a text-level destructive gate standing in for the
-  // analyzer. That substitution is recorded as debt in ROADMAP.md.
+  // The gate does not wait for it. ci.yml runs items 1 to 3 of §5.1: `atlas migrate validate`, the
+  // destructive-statement gate (squawk over the new migrations, .squawk.toml) and the synchronisation
+  // check. "A pipeline that implements items 1 and 2 meets this gate. It is not a waiver"
+  // (ADR-GLB-004, amended 2026-10-20).
   lint {
     destructive {
       error = true
