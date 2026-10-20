@@ -219,7 +219,9 @@ jobs:
       # begun so its state is in the backup; the filled stack is backed up with deploy/dev/backup.sh,
       # its volume deleted, and restored with deploy/dev/restore.sh; schema, migration, every table,
       # sequence and role are compared, the service restarted and read, and the recovery timed against
-      # the 15-minute RTO. Last, because it deletes the database.
+      # the 15-minute RTO. It also drills backup.sh's retention, the newest 14 complete sets, and that
+      # a failed backup deletes none (STD-GLB-009 rule 9 and compliance check 7, 1.10.0). Last,
+      # because it deletes the database.
       - name: the Organization Database restores from its backup
         run: |
           # The caller's two secrets alone, as the wiring steps take them.
@@ -240,6 +242,7 @@ jobs:
             ${{ runner.temp }}/restore-drill/*.txt
             ${{ runner.temp }}/restore-drill/*.sql
             !${{ runner.temp }}/restore-drill/backup/**
+            !${{ runner.temp }}/restore-drill/retention/**
           if-no-files-found: ignore
           retention-days: 90
 

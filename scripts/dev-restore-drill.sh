@@ -19,6 +19,12 @@
 #      receipt, consumer registry, Membership, Tenant or offboarding table, or on a recovery slower
 #      than the 15-minute RTO of PAD-PLT-002 §6.2.
 #
+# Between steps 3 and 5 it also drills backup.sh's retention (STD-GLB-009 rule 9 and compliance check
+# 7, 1.10.0) in a directory of its own, seeded with 16 older complete sets, one lone file and one
+# .partial: a backup there keeps exactly the newest 14 complete sets, the one it wrote among them, and
+# leaves the lone file and the .partial alone; a backup run while the database is down, after step 4,
+# fails and deletes nothing.
+#
 # It deletes the database, so it refuses to run outside CI. The environment is the wiring proof's:
 # IDENTITY_CALLER_PASSWORD, IDENTITY_CALLER_KEY_FILE, KC_BASE_URL and IDENTITY_OPERATOR_TOTP_FILE.
 #
@@ -102,6 +108,41 @@ globals="$(sed -n 1p "$out/backup-files.txt")"
 dump="$(sed -n 2p "$out/backup-files.txt")"
 dump_bytes="$(stat -c %s "$dump")"
 
+echo "3a. retention: backup.sh keeps the newest 14 complete sets"
+retention="$out/retention"
+mkdir -p "$retention"
+# complete_sets <dir>: the <date> of every complete set, newest first, as backup.sh counts them.
+complete_sets() {
+	for file in "$1"/globals-*.sql; do
+		[ -f "$file" ] || continue
+		day="${file##*/globals-}"
+		day="${day%.sql}"
+		if [ -f "$1/$database-$day.dump" ]; then echo "$day"; fi
+	done | sort -r
+}
+for n in $(seq 1 16); do
+	day="$(date -u -d "today - $n days" +%F)"
+	echo "seeded" > "$retention/globals-$day.sql"
+	echo "seeded" > "$retention/$database-$day.dump"
+done
+lone="globals-$(date -u -d "today - 30 days" +%F).sql"
+stale="$database-$(date -u -d "today - 40 days" +%F).dump.partial"
+echo "seeded" > "$retention/$lone"
+echo "seeded" > "$retention/$stale"
+bash "$deploy/backup.sh" "$retention" > "$out/retention-files.txt" 2> "$out/retention-pruned.txt"
+written_day="$(sed -n 1p "$out/retention-files.txt" | sed -E 's/.*globals-([0-9-]+)\.sql$/\1/')"
+mapfile -t kept < <(complete_sets "$retention")
+expected_pruned="$(for n in 14 15 16; do date -u -d "today - $n days" +%F; done | sort -r | tr '\n' ' ')"
+actually_pruned="$(sed -nE 's/^pruned the set of ([0-9-]+):.*/\1/p' "$out/retention-pruned.txt" | sort -r | tr '\n' ' ')"
+retention_kept=false
+[ "${#kept[@]}" -eq 14 ] && retention_kept=true
+retention_newest_kept=false
+[ "${kept[0]:-}" = "$written_day" ] && [ "$written_day" = "$(date -u +%F)" ] && retention_newest_kept=true
+retention_pruned_oldest=false
+[ "$actually_pruned" = "$expected_pruned" ] && retention_pruned_oldest=true
+retention_incomplete_left=false
+[ -f "$retention/$lone" ] && [ -f "$retention/$stale" ] && retention_incomplete_left=true
+
 echo "4. lose the database: docker compose down --volumes"
 volume_before="$(docker volume inspect -f '{{.CreatedAt}}' "$volume")"
 compose down --volumes
@@ -109,6 +150,18 @@ if docker volume inspect "$volume" >/dev/null 2>&1; then
 	echo "::error::the database volume survived docker compose down --volumes"
 	exit 1
 fi
+
+echo "4a. retention: a backup run while the database is down fails and deletes nothing"
+sets_before="$(complete_sets "$retention" | tr '\n' ' ')"
+retention_failure_refused=false
+if bash "$deploy/backup.sh" "$retention" > "$out/retention-failed.txt" 2>&1; then
+	echo "::error::backup.sh succeeded with no database to read"
+else
+	retention_failure_refused=true
+fi
+retention_failure_deleted_nothing=false
+[ "$(complete_sets "$retention" | tr '\n' ' ')" = "$sets_before" ] && [ -f "$retention/$lone" ] &&
+	[ -f "$retention/$stale" ] && retention_failure_deleted_nothing=true
 
 echo "5. restore into an empty volume with deploy/dev/restore.sh"
 t0="$(now)"
@@ -215,6 +268,12 @@ jq -n \
 	--argjson read_equal "$read_equal" --argjson critical "$critical" --argjson critical_filled "$critical_filled" \
 	--argjson refuses_occupied "$refuses_occupied" --argjson one_row_detected "$one_row_detected" \
 	--argjson without_roles_refused "$without_roles_refused" --arg probe_table "$probe_table" \
+	--argjson retention_kept "$retention_kept" --argjson retention_newest_kept "$retention_newest_kept" \
+	--argjson retention_pruned_oldest "$retention_pruned_oldest" \
+	--argjson retention_incomplete_left "$retention_incomplete_left" \
+	--argjson retention_failure_refused "$retention_failure_refused" \
+	--argjson retention_failure_deleted_nothing "$retention_failure_deleted_nothing" \
+	--arg kept_sets "${kept[*]}" --arg pruned_sets "$actually_pruned" \
 	--slurpfile source "$out/fingerprint-source.json" \
 	'{
 	  standard: "STD-GLB-002 §Restore Evidence",
@@ -240,6 +299,13 @@ jq -n \
 	                  read_equal: $read_equal},
 	  rto: {target_seconds: $rto_seconds, recovery_seconds: $recovery_seconds, within: $within_rto,
 	        measured: "from restore.sh on an empty volume to the verified API read"},
+	  retention: {rule: "STD-GLB-009 rule 9: the newest 14 complete sets, by count", procedure: "deploy/dev/backup.sh",
+	             seeded_complete_sets: 16, kept: ($kept_sets | split(" ") | map(select(. != ""))),
+	             pruned: ($pruned_sets | split(" ") | map(select(. != ""))),
+	             fourteen_kept: $retention_kept, newest_kept: $retention_newest_kept,
+	             oldest_pruned: $retention_pruned_oldest, incomplete_left: $retention_incomplete_left,
+	             failed_backup_refused: $retention_failure_refused,
+	             failed_backup_deleted_nothing: $retention_failure_deleted_nothing},
 	  rpo: {target_seconds: 60, backup_interval_seconds: 86400, met: false,
 	        why: "A daily pg_dump loses up to 24 hours. A 1-minute RPO needs continuous WAL archiving with point-in-time recovery on the production platform; a drill of a logical dump never proves it."},
 	  older_point: {drilled: false,
@@ -249,7 +315,9 @@ jq -n \
 cat "$out/restore-evidence.json"
 
 checks=(schema_equal migration_equal tables_equal sequences_equal roles_equal critical_filled
-	volume_new refuses_occupied one_row_detected without_roles_refused ready migrate_ready read_equal within_rto)
+	volume_new refuses_occupied one_row_detected without_roles_refused ready migrate_ready read_equal within_rto
+	retention_kept retention_newest_kept retention_pruned_oldest retention_incomplete_left
+	retention_failure_refused retention_failure_deleted_nothing)
 failures=0
 for check in "${checks[@]}"; do
 	if [ "${!check}" = true ]; then
@@ -278,6 +346,7 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
 		echo "| Recovery, to the verified read | ${recovery_seconds} s, against an RTO of ${rto_seconds} s |"
 		echo "| Schema, migration, tables, sequences, roles equal | $schema_equal, $migration_equal, $tables_equal, $sequences_equal, $roles_equal |"
 		echo "| API read equal | $read_equal |"
+		echo "| Retention, 16 older sets seeded | ${#kept[@]} complete sets kept, pruned: ${actually_pruned:-none}; a backup with the database down refused: $retention_failure_refused, deleted nothing: $retention_failure_deleted_nothing |"
 		echo "| RPO | not met: a daily dump loses up to 24 h, against 1 min (STD-GLB-002 §Restore Evidence) |"
 	} >> "$GITHUB_STEP_SUMMARY"
 fi

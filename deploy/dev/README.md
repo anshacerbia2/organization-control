@@ -465,6 +465,21 @@ local socket, which the image trusts, so no password is typed or stored. In the 
 30 2 * * * /home/development/apps/organization-control/deploy/dev/backup.sh /mnt/imam-storage/backups/organization-control >/dev/null
 ```
 
+The cron line runs `backup.sh`, never a bare `pg_dump`, because the script is what writes the two
+steps and keeps the count (STD-GLB-009 rule 9, 1.10.0):
+
+- **Each file is written as `<name>.partial`**, with `umask 077`, and renamed only once its command
+  succeeded. A failed run stops there and leaves at most a `.partial`, never a file that looks like a
+  backup.
+- **Retention is by count: the newest 14 complete sets.** Once both files of the new set are in
+  place, the script deletes the complete sets older than the newest 14 and names each on stderr. A
+  set is complete when both files of one `<date>` exist under their final names. A failed run
+  deletes nothing, and the set just written is never deleted. A lone file or a `.partial` is not
+  counted and not deleted: look at it, then remove it by hand. Never prune with an age-based
+  `find -mtime +N -delete`, which deletes the last good sets once backups have stopped for N days.
+- **The directory is on this host.** A copy off the host is required before production; a
+  development server is redeployed from zero, so STD-GLB-009 accepts the gap there and nowhere else.
+
 Copy `.env` and `keys/` alongside when they change; without them a restored database has no
 credentials to match and the service no workload key.
 
@@ -501,7 +516,9 @@ would fail.
 the restore drill `scripts/dev-restore-drill.sh` (STD-GLB-002 §Restore Evidence): it begins an
 offboarding, backs the wired stack up, deletes its volume, restores, and compares schema, migration
 version, every table, sequence and role with the source. The outbox, its deliveries, the receipts
-and the consumer registry must be among the non-empty tables. It then starts the service, reads the
+and the consumer registry must be among the non-empty tables. It also seeds a directory with 16 older
+complete sets and requires `backup.sh` to keep exactly the newest 14, the one it wrote among them, and
+to fail and delete nothing while the database is down. It then starts the service, reads the
 provider grants, Organizations and offboardings through the API, and times the recovery against the
 15-minute RTO. The evidence is the job's `restore-evidence` artifact. A daily dump loses up to 24
 hours, against the 1-minute RPO of `PAD-PLT-002 §6.2`. A restore to an older point is reconciled by
