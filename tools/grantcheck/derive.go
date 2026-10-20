@@ -67,6 +67,10 @@ var wrappers = map[string]string{
 	dbPkg + ".WithConsumerScope":    consumerRole,
 	dbPkg + ".WithConsumerSnapshot": consumerRole,
 	dbPkg + ".WithSelfRead":         selfRole,
+	// Invitation acceptance (ADR-ORG-007 §5.2): the token's row read as the self role, and the write
+	// in the invitation's Tenant as the tenant role.
+	dbPkg + ".WithSelfInvitation": selfRole,
+	dbPkg + ".WithSelfInTenant":   tenantRole,
 }
 
 // wrapperInternals are the unexported helpers the wrappers share. They forward the body as a

@@ -544,6 +544,84 @@ func WithSelfRead(ctx context.Context, pool *SelfPool, fn Body) error {
 	})
 }
 
+// WithSelfInvitation runs fn in a read-only transaction as the self role, bound to the hash of the
+// invitation token the self caller presented (ADR-ORG-007 §5.2).
+//
+// It is the only code that binds app.invitation_token_hash. The self role reaches invitation.invitation
+// through one SELECT policy keyed on that setting, so fn sees at most the one row the token selects:
+// token_hash is unique across the table; unbound, the policy raises or, on a connection that bound it
+// before, matches nothing. It binds no Principal, so the self role's context policies,
+// which read app.principal_id with missing_ok false, raise rather than read if fn reaches them. It
+// records no privileged access and makes no idempotency claim: it changes nothing.
+func WithSelfInvitation(ctx context.Context, pool *SelfPool, tokenHash string, fn Body) error {
+	if pool == nil {
+		return errors.New("db: a self pool is required")
+	}
+	if tokenHash == "" {
+		return errors.New("db: an invitation read requires the token's hash")
+	}
+	scope, ok := ScopeFrom(ctx)
+	if !ok {
+		return ErrNoScope
+	}
+	if !scope.IsSelf() {
+		return fmt.Errorf("%w: only a self scope reads an invitation by its token", ErrWrongScope)
+	}
+	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+		if _, err := tx.Exec(ctx, `SET TRANSACTION READ ONLY`); err != nil {
+			return fmt.Errorf("db: enter read-only: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `SET LOCAL ROLE `+selfRole); err != nil {
+			return fmt.Errorf("db: become the self role: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`SELECT set_config('app.invitation_token_hash', $1, true)`, tokenHash); err != nil {
+			return fmt.Errorf("db: bind the invitation token: %w", err)
+		}
+		return fn(ctx, tx)
+	})
+}
+
+// WithSelfInTenant runs fn as a self caller acting inside one Tenant: the Tenant of the invitation its
+// token selected (ADR-ORG-007 §5.2, §5.4).
+//
+// It runs on the tenant pool as the tenant role, bound to tenantID, with a tenant scope in ctx whose
+// actor is the self caller, and claims the request's Idempotency-Key inside the transaction as
+// WithTenantScope does. The Tenant is an argument, which no other entry point for a non-provider
+// takes, so its one caller is held to one rule: tenantID comes from the row WithSelfInvitation read
+// for this caller's token, never from the caller's token or the request, and fn's first statement
+// reloads that row by its token hash under this Tenant's policy, so a Tenant that does not hold the
+// token's invitation finds nothing. A self caller holds no authority over the Tenant beyond what that
+// row grants it: accepting its own invitation. It records no privileged access, because it is not
+// provider access.
+func WithSelfInTenant(ctx context.Context, tenants *TenantPool, tenantID id.UUID, fn Body) error {
+	if tenants == nil {
+		return errors.New("db: a tenant pool is required")
+	}
+	scope, ok := ScopeFrom(ctx)
+	if !ok {
+		return ErrNoScope
+	}
+	switch {
+	case !scope.IsSelf():
+		return fmt.Errorf("%w: only a self scope accepts its own invitation", ErrWrongScope)
+	case tenantID.IsNil():
+		return errors.New("db: a self caller acting in a Tenant must name the invitation's Tenant")
+	}
+	acting := Scope{tenantID: tenantID, actor: scope.actor, correlation: scope.correlation}
+	ctx = WithScope(ctx, acting)
+	return tenants.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+		if err := bindTenant(ctx, tx, acting); err != nil {
+			return err
+		}
+		ctx, err := claimWithin(ctx, tx)
+		if err != nil {
+			return err
+		}
+		return fn(ctx, tx)
+	})
+}
+
 // WithProviderInTenant runs fn as a provider acting inside one Tenant.
 //
 // It requires a provider scope and a reason, and records the access on the provider pool's recorder

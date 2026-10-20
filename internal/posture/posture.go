@@ -82,7 +82,9 @@ var RuntimeRoles = []string{"organization_rt", "organization_provider_rt", "orga
 // and fresh check read both across Tenants, through a SELECT policy of its own on each.
 //
 // The three self-read policies serve a person reading their own contexts (ADR-ORG-005), as
-// organization_self_rt, which the tenant role may SET ROLE to and does not inherit.
+// organization_self_rt, which the tenant role may SET ROLE to and does not inherit. A fourth,
+// invitation_self_redeem, serves the same role reading the one invitation its token selects
+// (ADR-ORG-007 §5.2).
 //
 // membership.tenant_admin_grant is written by a provider only, as the tenant role inside one Tenant
 // (ADR-ORG-003). Two restrictive policies keep the tenant role's writes a provider's.
@@ -112,7 +114,7 @@ var AdditionalPolicies = map[string][]string{
 	"operation.offboarding":            {"offboarding_signals_read"},
 	"operation.offboarding_obligation": {"offboarding_obligation_signals_read"},
 	"tenant.provisioning_request":      {"provisioning_request_signals_read", "provisioning_request_sweep"},
-	"invitation.invitation":            {"invitation_expiry_read", "invitation_expiry"},
+	"invitation.invitation":            {"invitation_expiry_read", "invitation_expiry", "invitation_self_redeem"},
 }
 
 // TableProtection is the posture of one table.

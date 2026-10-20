@@ -243,6 +243,21 @@ CREATE POLICY tenant_admin_grant_self_read ON membership.tenant_admin_grant
     TO organization_self_rt
     USING (principal_id = current_setting('app.principal_id', false)::uuid);
 
+-- invitation.invitation, read by the self role to accept (ADR-ORG-007 §5.2).
+--
+-- db.WithSelfInvitation sets the role and binds app.invitation_token_hash to the SHA-256 of the token
+-- the caller presented, and this SELECT policy shows the one row holding that hash: token_hash is
+-- unique across the table. No other invitation is visible and nothing is writable. missing_ok is
+-- false, so an unbound read raises on a connection that never bound the setting; on one that bound it
+-- in an earlier transaction, LOCAL has left it empty, and an empty hash matches no row. The tenant role does not inherit the
+-- self role, so this reaches no tenant transaction; the contexts read binds no token hash, so it
+-- reaches no invitation either.
+DROP POLICY IF EXISTS invitation_self_redeem ON invitation.invitation;
+CREATE POLICY invitation_self_redeem ON invitation.invitation
+    FOR SELECT
+    TO organization_self_rt
+    USING (token_hash = current_setting('app.invitation_token_hash', false));
+
 -- membership.tenant_admin_grant, written by a provider only (ADR-ORG-003 §5.2).
 --
 -- The loop above gives the tenant role its policy here, as on every table in the schema. The writes
@@ -474,13 +489,13 @@ DROP POLICY IF EXISTS invitation_expiry_read ON invitation.invitation;
 CREATE POLICY invitation_expiry_read ON invitation.invitation
     FOR SELECT
     TO organization_migrator
-    USING (expires_at <= now() AND state IN ('pending', 'identity_verified', 'expired'));
+    USING (expires_at <= now() AND state IN ('pending', 'expired'));
 
 DROP POLICY IF EXISTS invitation_expiry ON invitation.invitation;
 CREATE POLICY invitation_expiry ON invitation.invitation
     FOR UPDATE
     TO organization_migrator
-    USING (expires_at <= now() AND state IN ('pending', 'identity_verified'))
+    USING (expires_at <= now() AND state = 'pending')
     WITH CHECK (state = 'expired');
 
 -- No target identifier or hash: the event the sweep publishes carries neither, so the view does not.
@@ -489,7 +504,7 @@ CREATE VIEW operation.invitation_expiry WITH (security_barrier) AS
 SELECT invitation_id, tenant_id, workspace_id, subject_type, state, correlation_id, principal_id,
        expires_at
   FROM invitation.invitation
- WHERE state IN ('pending', 'identity_verified')
+ WHERE state = 'pending'
    AND expires_at <= now();
 ALTER VIEW operation.invitation_expiry OWNER TO organization_migrator;
 COMMENT ON VIEW operation.invitation_expiry IS

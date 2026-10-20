@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.13.0
+  version: 1.14.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -29,7 +29,8 @@ obligations are met destroys data someone still needed.
 
 **In scope**
 
-- Invitation intent, expiry, and correlation with identity onboarding.
+- Invitation intent, expiry, and acceptance by the invited person, signed in as themselves
+  (1.14.0, `ADR-ORG-007`).
 - Why possession of an invitation proves nothing.
 - Enumeration resistance on the unauthenticated acceptance path.
 - Offboarding stages, obligation tracking across domains, and resumability.
@@ -49,12 +50,20 @@ obligations are met destroys data someone still needed.
 ### Invitation crosses two authorities
 
 An invitation says a Tenant administrator intends someone to hold Membership. It does
-not say who that someone is. Identity is established by the kernel, through identifier
-verification, and Membership activates only when both facts exist.
+not say who that someone is. The person is established by identity: they sign in as
+themselves, and the Identity Control API answers whether they hold the invited address as a
+proven address. Membership activates only when both facts exist, at the moment of acceptance.
 
 SAD-004 §5.5 states it directly: **invitation possession alone never proves identity.**
 A design that grants Membership on link click has authenticated an email inbox, and an
 inbox is not a Principal.
+
+**Before 1.14.0 no invitation could be accepted** (`ADR-ORG-007 §3`). Acceptance waited for a
+`verify-identity` fact that nothing produced, and it was Tenant-scoped, so it needed a token for
+a Tenant the invitee was not yet a member of. It was also not bound to the caller: any member of
+the Tenant holding the token could accept for the Principal that verification recorded. From
+1.14.0 acceptance is the invited person's own command, and the Membership is created for the
+caller alone (§Acceptance Is the Whole Join).
 
 ### Offboarding crosses many
 
@@ -72,8 +81,8 @@ delivered.
 
 | Component | Package | Responsibility |
 | :-- | :-- | :-- |
-| `InvitationService` | `internal/invitation` | Intent, expiry, acceptance, correlation |
-| `OnboardingCorrelator` | `internal/invitation` | Joins identity lifecycle facts to pending invitations |
+| `InvitationService` | `internal/invitation` | Intent, expiry, acceptance |
+| `IdentityMatcher` | `internal/identity` | Asks the Identity Control API whether a Principal holds an address as a proven address (1.14.0) |
 | `OffboardingService` | `internal/offboarding` | Stages, obligation registry, resumability |
 | `ObligationTracker` | `internal/offboarding` | Records domain completion and refuses premature finalisation |
 
@@ -82,24 +91,38 @@ delivered.
 ```mermaid
 sequenceDiagram
     participant A as Tenant Administrator
+    participant E as organization-experience
+    participant P as Invited person
     participant O as organization-control
-    participant B as Event broker
     participant I as identity-control
-    participant K as Keycloak
 
-    A->>O: Invite identifier to Tenant
-    O->>O: Persist intent, expiry, correlation
-    O-->>B: membership.invitation.requested
-    B-->>I: Resolve or create Principal
-    I->>K: Locate or create, begin verification
-    K-->>I: Identifier verified
-    I-->>B: identity.principal.identifier-verified
-    B-->>O: Correlated by invitation reference
-    O->>O: Activate Membership when every prerequisite holds
+    A->>E: Invite an address to the Tenant
+    E->>O: POST /v1/invitations (Tenant token)
+    O->>O: Persist intent, expiry, token hash
+    O-->>E: The token, once
+    E-->>A: The link /invitations/accept#token, once
+    A-->>P: The link, by the administrator's own channel (development server)
+    P->>E: Open the link, signed in as themselves, no Tenant
+    E->>O: POST /v1/invitations/accept {token} (self caller)
+    O->>O: Read the one row by token hash (self role)
+    O->>I: POST /v1/principals/{caller}/identifiers:match (workload)
+    I-->>O: {"match": true}
+    O->>O: One transaction in the invitation's Tenant: Membership for the caller
+    O-->>E: The invitation, accepted, and the Membership
 ```
 
 Membership activates on the **join** of two independent facts: an unexpired invitation,
-and a verified identity carrying the invited identifier. Either alone activates nothing.
+and the caller holding the invited address as a proven address. Either alone activates
+nothing. Both are checked when the person accepts, so no half-join waits in a state
+(`ADR-ORG-007 §5.4`). Until 1.14.0 the diagram here was a broker flow in which
+identity-control consumed `membership.invitation.requested` and published
+`identity.principal.identifier-verified`. Neither was ever built, and the event could not have
+been acted on: it carries no address (§Published Events).
+
+In production the Notification Platform delivers the link to the invited address, and the
+administrator never handles the token (`ADR-ORG-007 §5.5`). That is a production gate: this
+service requests no delivery yet, because no Notification Platform exists to request it from
+(ROADMAP §Gates).
 
 ## Data Model
 
@@ -122,7 +145,7 @@ CREATE TABLE invitation.invitation (
     accepted_at       TIMESTAMPTZ,
     revoked_at        TIMESTAMPTZ,
     CONSTRAINT invitation_state_check
-        CHECK (state IN ('pending', 'identity_verified', 'accepted', 'expired', 'revoked')),
+        CHECK (state IN ('pending', 'accepted', 'expired', 'revoked')),
     CONSTRAINT invitation_workspace_in_tenant
         FOREIGN KEY (tenant_id, workspace_id)
         REFERENCES workspace.workspace (tenant_id, workspace_id)
@@ -130,8 +153,14 @@ CREATE TABLE invitation.invitation (
 
 CREATE UNIQUE INDEX invitation_pending_unique
     ON invitation.invitation (tenant_id, target_hash, COALESCE(workspace_id, tenant_id))
-    WHERE state IN ('pending', 'identity_verified');
+    WHERE state = 'pending';
 ```
+
+**`identity_verified` is removed (1.14.0, `ADR-ORG-007 §5.4`).** It was the half-join that
+`verify-identity` recorded, and nothing ever entered it. Migration `20261019120000` returns any
+row in it to `pending` with no `principal_id`, then narrows the check and the index, so the
+acceptance that follows checks the address itself. `principal_id` is now set only by acceptance,
+to the caller's own.
 
 `expires_at` is not nullable. An invitation without expiry is a standing grant that
 nobody revokes, and it will be found years later still valid.
@@ -309,17 +338,18 @@ GET    /v1/invitations                       ?after=&limit=&state=
 POST   /v1/invitations
 GET    /v1/invitations/{invitation_id}
 POST   /v1/invitations/{invitation_id}/revoke
+
+Self caller: any human token, the Membership is the caller's own (1.14.0)
 POST   /v1/invitations/accept
 
 Provider-scoped
-POST   /v1/invitations/verify-identity
 POST   /v1/invitations/expire-lapsed
 
 Unauthenticated
 POST   /v1/invitations/lookup
 ```
 
-From 1.9.0 issuing, revoking, accepting and recording a verified identity each require an
+From 1.9.0 issuing, revoking and accepting each require an
 `Idempotency-Key`; the expiry sweep honours one and does not require it, because a repeat finds
 nothing left to expire (`TDD-organization-control-003` §The `Idempotency-Key` Is Required on
 Commands).
@@ -341,13 +371,40 @@ The list follows STD-GLB-001 1.3.0 §Pagination, the form identity-control serve
 | Cursor | `after`: the `invitation_id` of the last item of the previous page. Absent, the list starts at the first. Not a UUID: `400` |
 | Page size | `limit`: 50 when absent; a whole number from 1 to 100. Anything else, `0` included: `400`, never coerced |
 | Order | `invitation_id`, a UUIDv7, so creation order: the keyset `invitation_id > $after ORDER BY invitation_id LIMIT limit + 1` |
-| Filter | `state` = `pending` \| `identity_verified` \| `accepted` \| `expired` \| `revoked`, optional, holding for every page; any other value: `400` |
+| Filter | `state` = `pending` \| `accepted` \| `expired` \| `revoked`, optional, holding for every page; any other value, `identity_verified` included from 1.14.0: `400` |
 | Response | `{"invitations": [...], "next": "<invitation_id>" \| null}`, `next` null on the last page |
 
 Each item has the shape `GET /v1/invitations/{invitation_id}` returns, which carries neither the
 target identifier nor its hash (§Security Notes). `state` is the stored state: an invitation past
 `expires_at` that the sweep has not yet reached is still `pending`, with its `expires_at` in the
 past, and acceptance refuses it all the same (§Expiry Sweep).
+
+**Accepting** (1.14.0, `ADR-ORG-007 §5.1`). `POST /v1/invitations/accept` takes
+`{"token": "<token>"}` and an `Idempotency-Key`. It admits the self caller and no one else:
+
+- **Who.** A human token whose `principal_id` is the caller's, with or without `tenant_id`, with
+  no provider grant or one (`TDD-organization-control-001` §Caller Authority). No Membership,
+  Tenant or grant is read to admit it. The Membership is created for the caller's
+  `principal_id`, and no field of the request names a Principal.
+- **Who is refused.** A workload token is `403` before a transaction opens. A provider or Tenant
+  administrator who wants a person to hold a Membership grants it with `POST /v1/memberships`.
+- **The token** is in the body. It is never in a path or a query.
+
+| Outcome | Answer |
+| :-- | :-- |
+| Accepted | `200`, `{"invitation": <the invitation view, state accepted>, "membership": <the Membership result POST /v1/memberships answers with>}` |
+| Unknown, expired, revoked, already accepted, or the caller does not hold the invited address as a proven address | `404` `not-found`, detail `The invitation cannot be accepted`, identical for each |
+| The Tenant is not active, or the caller already holds an active Membership for the invitation's context | `409` `state-transition-refused` |
+| The Identity Control API could not be asked, or no client for it is configured | `503` `dependency-unavailable`; nothing changed |
+| A malformed token | `400` `validation-failed` |
+
+`ADR-ORG-007 §5.4` names the one refusal `invitation-not-acceptable`. The problem types are
+foundation-platform's closed registry (`httpapi.ProblemType`), which has no such type, so the
+refusal is `not-found` with one constant detail. What the ADR asks of it holds: every failed
+lookup answers the same status, type and detail. A type of its own is a foundation-platform
+change, recorded in ROADMAP §Open.
+
+The lookup's constant `next` is `accept` from 1.14.0, where it was `verify-identity`.
 
 **The offboarding routes as served**, from 1.7.0, all provider-scoped: provider authority and
 `X-Administrative-Reason`, the access recorded before the transaction runs:
@@ -496,9 +553,8 @@ Membership's own `membership.lifecycle.granted` announces the access, but a cons
 events would have to subscribe to Membership events and correlate to infer that the invitation
 closed, which is work the publisher can do once instead.
 
-`verify-identity` remains deliberately silent. It records that one of the two required facts
-arrived, and no consumer outside this service can act on half a join; the actionable event is the
-Membership that follows.
+Acceptance publishes `invitation.accepted` and the Membership's `membership.lifecycle.granted`
+in its one transaction. `verify-identity`, which published nothing, is removed (1.14.0).
 
 No invitation event carries the target identifier or the display name. STD-GLB-007 makes the
 identifier Tier-2 PII, and an event stream is read by consumers with no business knowing who was
@@ -565,28 +621,73 @@ protected, an anonymous caller can bind neither a Tenant scope nor an actor, and
 the row would have to hold cross-Tenant authority to do it.
 
 Resolution by token therefore happens on the authenticated path, where the caller has an
-identity and the correlation from the identity flow. Response-time uniformity follows from
+identity: acceptance (§Acceptance Is the Whole Join). Response-time uniformity follows from
 the same property: with no row read, there is no query whose duration could separate a
 valid token from an absent one.
 
 ### Membership Activation
 
-```text
-on identity.principal.identifier-verified:
-    find the pending invitation by correlation and verified identifier
-    if none: ignore
-    if expired: mark expired, emit, stop
+#### Acceptance Is the Whole Join
 
-BEGIN
-    reload the invitation FOR UPDATE
-    reject if state is not 'pending' or 'identity_verified'
-    reject if the Tenant is not active
-    reject if an active Membership already exists for this subject and context
-    create the Membership through MembershipService
-    set invitation state = 'accepted', principal_id, accepted_at
-    outbox.Append(membership.lifecycle.granted)
+From 1.14.0 (`ADR-ORG-007 §5.2` to `§5.4`):
+
+```text
+accept(token, caller):                                  -- caller: the self caller's principal_id
+    hash := SHA-256(token)
+    READ ONLY, as organization_self_rt, app.invitation_token_hash = hash:
+        the one row whose token_hash is hash            -- tenant, workspace, address, state, expiry
+    refuse unless found, 'pending', and not past expires_at by the clock
+    ask identity-control: does caller hold the row's address as a proven address?
+        unreachable or not configured: 503, nothing changed
+        no: refuse
+BEGIN, in the Tenant the row names, as the tenant role, the caller as actor
+    claim the Idempotency-Key
+    reload the invitation by token_hash FOR UPDATE; refuse unless still 'pending', unexpired
+    refuse unless the Tenant is active                  -- 409
+    refuse if the caller holds an active Membership for this context   -- 409
+    create the Membership for the caller's principal_id
+    set state 'accepted', principal_id = caller, accepted_at
+    outbox: invitation.accepted, membership.lifecycle.granted
 COMMIT
 ```
+
+Every refusal before the match, and the match answering no, is the same `404` with the same
+detail. A distinguishable answer would tell a token holder which tokens are live, or that a
+live invitation is addressed to someone else: "Ensure the application returns consistent
+generic error messages" (WSTG-IDNT-04, `ADR-ORG-007` [R10]). The `409`s come after the match, so
+only a person who holds the invited address learns the Tenant's state.
+
+**Why possession is not enough.** OWASP: "However, even with complex identifiers, access control
+checks are essential." and "Verify the user's permission every time an access attempt is made."
+[R6]. The token selects the row; the match against the caller's own proven address is the
+permission check. A forwarded or leaked link admits nobody else, and another member of the Tenant
+holding the token is refused like a stranger.
+
+**The narrow read.** The self role reaches `invitation.invitation` through one `SELECT` policy,
+`invitation_self_redeem`, whose predicate is `token_hash` equal to the hash the transaction bound,
+and only the columns the acceptance needs (`TDD-organization-control-001` §Roles). It cannot list
+invitations, read one by identifier, or write. `token_hash` is unique across the table, so the read
+returns at most one row.
+
+**The Tenant comes from the row.** The write runs under the Tenant scope of the invitation the
+token selected (`db.WithSelfInTenant`), never a Tenant from the caller's token or the request. The
+reload selects the row by its token hash again under that Tenant's policy, so the Tenant the write
+is bound to is the one holding that token.
+
+**Used once.** The reload takes the row `FOR UPDATE` and refuses anything but `pending`, so of two
+concurrent acceptances one commits and the other finds `accepted`. OWASP: tokens are "Single use
+and expire after an appropriate period." [R7].
+
+**Unknown is not no.** The match is asked before the transaction opens, so no lock is held across
+the call. If identity-control cannot be reached, the answer is `503` and nothing changes; the
+invitation's seven days absorb an outage (`ADR-ORG-007 §6`).
+
+**The match** is `POST /v1/principals/{principal_id}/identifiers:match` on the Identity Control
+API, `{"address": "<the invited address>"}`, answered `{"match": true|false}`. It admits this
+service's workload alone, as `POST /v1/deliveries` does, and counts only an `active` address with
+`verified_at` set (`ADR-ORG-007 §5.3`). The client authenticates with the workload access token the
+delivery dispatchers already use (§Configuration). The address leaves this service in that body
+and nowhere else; it is not logged.
 
 The Tenant is rechecked at activation. An invitation issued while a Tenant was active
 and accepted after it was suspended must not create Membership into a suspended Tenant,
@@ -851,7 +952,7 @@ expiry against the clock (§Membership Activation).
 
 The scheduled run binds no scope and files no privileged-access record. It reads and writes through
 `operation.invitation_expiry`, a `security_barrier` view the migration role owns, which returns an
-invitation `pending` or `identity_verified` past `expires_at` by the database clock, with its
+invitation `pending` past `expires_at` by the database clock, with its
 identifiers, state and expiry and never its target identifier, and lets the state change to
 `expired` and nothing else. The selection keeps `FOR UPDATE SKIP LOCKED`, so two replicas expire
 different invitations, and each expired invitation still publishes `invitation.expired` in the same
@@ -864,8 +965,20 @@ transaction. The route runs the same statements through the same view under a pr
 | `ORGANIZATION_INVITATION_TTL` | `7d` | Default invitation lifetime |
 | `ORGANIZATION_INVITATION_MAX_TTL` | `30d` | Ceiling an inviter cannot exceed |
 | `ORGANIZATION_INVITATION_SWEEP_INTERVAL` | `1h` | Expiry materialisation cadence, at least `1m`. Read from 1.12.0 (§Expiry Sweep) |
+| `ORGANIZATION_IDENTITY_CONTROL_URL` | none | The Identity Control API's base URL, an absolute `http(s)` URL, for the address match (1.14.0). Unset, acceptance answers `503`. Set, it requires `ORGANIZATION_WORKLOAD_CLIENT_ID`, `ORGANIZATION_WORKLOAD_KEY_FILE` and `ORGANIZATION_WORKLOAD_TOKEN_URL` |
+| `ORGANIZATION_IDENTITY_CONTROL_TIMEOUT` | `5s` | The bound on one match request, connection and response included (1.14.0) |
 | `ORGANIZATION_OFFBOARDING_OBLIGATION_SLA` | `30d` | Default obligation due window |
 | `ORGANIZATION_OFFBOARDING_DOMAINS` | none, required | Domains that receive obligations |
+
+**One workload credential (1.14.0).** The match client uses the workload token source the delivery
+dispatchers use: the same client, `organization-control-workload`, the same key, the same token.
+Identity Control already admits that workload as this service on `POST /v1/deliveries`, and the
+match route admits the same one (`ADR-ORG-007 §5.3`). A second client would be a second
+credential with the same owner and audience, which `STD-IAM-001 §3.7` asks to be explicit and
+rotated, for no separation the route could enforce. The source is built once and shared: its
+token is cached and renewed in one place. Go's `net/http`: "Clients and Transports are safe for
+concurrent use by multiple goroutines and for efficiency should only be created once and
+re-used" [R8].
 
 ## Testing Strategy
 
@@ -875,7 +988,20 @@ transaction. The route runs the same statements through the same view under a pr
 - A second pending invitation for the same subject, Tenant, and Workspace is refused.
 - An invitation naming a Workspace of another Tenant is rejected by the composite
   foreign key.
-- Membership is not created by acceptance alone, nor by identity verification alone.
+- Membership is not created by the token alone: the same token presented by another signed-in
+  person, a member of the Tenant included, is refused, and nothing changes (1.14.0).
+- Acceptance creates the Membership for the caller's `principal_id`, records it on the
+  invitation, and publishes `invitation.accepted` and `membership.lifecycle.granted` together.
+- A second acceptance of the same token is refused with the same answer as an unknown one.
+- Unknown, expired, revoked, accepted and mismatched tokens answer the same `404` and detail.
+- A match that cannot be asked answers `503` and changes nothing.
+- A workload token is refused `403`; a human token with or without `tenant_id`, with or without a
+  provider grant, is a self caller on this route.
+- As the self role with a token hash bound, no other invitation is readable and nothing is
+  writable; unbound, the read raises or reads nothing.
+- On every `deploy-dev` run, against the real Identity Control API: the invited person, holding
+  the address as a proven one, accepts; another member holding the token is refused first
+  (`scripts/dev-wiring-proof.ps1` step 10).
 - Acceptance into a Tenant suspended after the invitation was issued is refused.
 - An expired invitation cannot be accepted, including in the race between the sweep and
   an acceptance.
@@ -931,6 +1057,11 @@ join of two independent facts before Membership exists, the Tenant recheck at
 activation, and a lookup that discloses nothing about the organization to an
 unauthenticated holder.
 
+Acceptance is bound to the caller (1.14.0). Until then any member of the Tenant who held the
+token could accept, and the Membership went to whoever a verification had recorded. Now the
+Membership is the caller's own, and only a caller holding the invited address as a proven
+address reaches the transaction.
+
 The unauthenticated lookup is the only anonymous surface this service exposes.
 Uniformity across every outcome is what keeps the token space meaningful, because a
 distinguishable response turns an opaque token into an oracle.
@@ -963,9 +1094,17 @@ those batches: `tenant.security.suspended` was committed when offboarding began.
 | Offboarding held in `release` by an ambiguous outcome | any occurrence | over 24 hours |
 | Tenant in `offboarding` beyond the expected window | 30 days | 90 days |
 | Unauthenticated lookup rate | above baseline | sustained from one source |
+| Refused acceptances (1.14.0) | above baseline | sustained from one caller |
 
 A rising unauthenticated lookup rate from one source is token enumeration in progress,
 and the uniform response is what makes it expensive rather than impossible.
+
+**Refused acceptances are counted per caller (1.14.0, `ADR-ORG-007 §5.4`).** Each `404` adds to
+`organization.invitation.acceptances_refused`, beside the lookup count, and is logged with the
+caller's `principal_id` and no token, hash or address. The counter carries no caller label, for
+the reason the lookup's carries no source [R2]; the rate per caller is read from the log. Many
+refusals from one caller signal token guessing, and `docs/runbooks/invitation-token-enumeration.md`
+answers them. A refused acceptance is never retried by organization-experience's BFF.
 
 **Exported from 1.11.0.** The four offboarding signals are the obligation past `due_at` (warning)
 and past the contract deadline (critical), the ambiguous release, and the prolonged offboarding.
@@ -1024,6 +1163,9 @@ and sends a failed deprovisioning again. Written (1.11.0):
 | R2 | Prometheus, *Metric and label naming*, <https://prometheus.io/docs/practices/naming/>, accessed 2026-10-09: "Remember that every unique combination of key-value label pairs represents a new time series" and "Do not use labels to store dimensions with high cardinality (many different label values), such as user IDs, email addresses, or other unbounded sets of values." |
 | R3 | PostgreSQL 17, *CREATE FUNCTION*, "Writing SECURITY DEFINER Functions Safely", <https://www.postgresql.org/docs/17/sql-createfunction.html>, accessed 2026-10-09: "For security, search_path should be set to exclude any schemas writable by untrusted users." |
 | R4 | The Twelve-Factor App, *XII. Admin processes*, <https://12factor.net/admin-processes>, accessed 2026-10-19: "One-off admin processes should be run in an identical environment as the regular long-running processes of the app." and "Admin code must ship with application code to avoid synchronization issues." |
+| R6 | OWASP, *Insecure Direct Object Reference Prevention Cheat Sheet*, <https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html>, accessed 2026-10-19: "However, even with complex identifiers, access control checks are essential." and "Verify the user's permission every time an access attempt is made." |
+| R7 | OWASP, *Forgot Password Cheat Sheet*, <https://cheatsheetseries.owasp.org/cheatsheets/Forgot_Password_Cheat_Sheet.html>, accessed 2026-10-19: "Single use and expire after an appropriate period."; "adds the Referrer Policy tag with the no-referrer value in order to avoid referrer leakage"; "Implement appropriate protection to prevent users from brute-forcing tokens in the URL, such as rate limiting." |
+| R8 | The Go Project, *net/http*, type Client, <https://pkg.go.dev/net/http#Client>, accessed 2026-10-19: "Clients and Transports are safe for concurrent use by multiple goroutines and for efficiency should only be created once and re-used."; Client.Timeout: "Timeout specifies a time limit for requests made by this Client. The timeout includes connection time, any redirects, and reading the response body." |
 | R5 | The Twelve-Factor App, *X. Dev/prod parity*, <https://12factor.net/dev-prod-parity>, accessed 2026-10-19: "Keep development, staging, and production as similar as possible" and "The twelve-factor developer resists the urge to use different backing services between development and production" |
 
 ## Traceability
@@ -1033,6 +1175,9 @@ and sends a failed deprovisioning again. Written (1.11.0):
 | Parent system | SAD-004 — Scnehaux Organization Control |
 | Realizes capability | PAD-PLT-002 — invitation, onboarding correlation, offboarding coordination |
 | Governed by | ADR-ORG-001 §5.1 — Tenant offboarding and retirement coordination |
+| Governed by | ADR-ORG-007 — the invited person accepts an invitation, signed in as themselves; the caller must hold the invited address as a proven address (1.14.0) |
+| Depends on | `TDD-identity-control-008` — `POST /v1/principals/{principal_id}/identifiers:match`, Organization Control's workload alone (1.14.0) |
+| Consumed by | `TDD-organization-experience-002` — the link shown once on issue, and the acceptance page (1.14.0) |
 | Governed by | ADR-ORG-006 — a mistaken offboarding is cancelled before release, restoring what it removed (1.8.0) |
 | Conforms to | SAD-004 §5.5 — invitation possession never proves identity |
 | Conforms to | SAD-004 §5.6 — offboarding is resumable and infers completion from no single response |
@@ -1042,7 +1187,7 @@ and sends a failed deprovisioning again. Written (1.11.0):
 | Enterprise constraint | EAD-003 — deletion accounts for projections, derived products, backups, evidence, and legal hold |
 | Depends on | `TDD-organization-control-002` — Membership creation and suspension |
 | Depends on | `TDD-organization-control-003` — Tenant state transitions this flow drives |
-| Correlates with | `TDD-identity-control-001` — identity verification is the other half of the join |
+| Correlates with | `TDD-identity-control-008` — a proven address is the other half of the join (1.14.0) |
 | Follows | The Twelve-Factor App, XII Admin processes and X Dev/prod parity — the development server's stand-ins for the deprovisioning report and the owning domains are scripts calling the real routes (1.13.0) |
 | Conforms to | STD-GLB-009 1.3.0 §Development Server Deployment — a procedure step is a script CI runs (1.13.0) |
 | Conforms to | `TDD-organization-experience-003` §As Served — the obligation board offers no completion or waiver, so the development stand-in is a script (1.13.0) |

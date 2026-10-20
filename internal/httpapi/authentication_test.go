@@ -826,3 +826,59 @@ func TestAnUnreadablePauseRefusesTheCommand(t *testing.T) {
 		t.Errorf("an unreadable pause answered %d (handler ran: %v)", recorder.Code, called)
 	}
 }
+
+// Acceptance is the invited person's own command: every human token is a self caller on
+// POST /v1/invitations/accept, with or without a Tenant or a grant, and no record is read; a workload
+// is refused before the handler (ADR-ORG-007 §5.1, TDD-organization-control-001 1.26.0).
+func TestEveryHumanTokenAcceptsAsItself(t *testing.T) {
+	s := newSigner(t)
+	nobody := id.MustParse("01a0f64a-c533-7000-a956-c3f095484a30")
+	holder := id.MustParse("01a0f64a-c533-7000-a956-c3f095484a31")
+	records := testRecords()
+	records.eligible = map[id.UUID]bool{holder: true}
+	cfg := AuthenticationConfig{Records: records, Consumers: true}
+	const accept = "/v1/invitations/accept"
+
+	for name, tc := range map[string]struct {
+		principal id.UUID
+		claims    map[string]any
+	}{
+		"a person with no Tenant and no grant": {nobody, providerClaims(nobody)},
+		"a person whose token names a Tenant":  {nobody, tenantClaims(nobody, testTenant)},
+		"a Tenant administrator":               {testAdministrator, tenantClaims(testAdministrator, testTenant)},
+		"a provider":                           {testProvider, providerClaims(testProvider)},
+		"an eligible provider":                 {holder, providerClaims(holder)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			before := records.reads
+			caller, called, recorder := authenticatedWith(t, s, cfg, s.sign(t, tc.claims), http.MethodPost, accept)
+			if !called || !caller.Self || caller.Subject != tc.principal || caller.Provider || caller.Eligible ||
+				!caller.Tenant.IsNil() || caller.Consumer != "" {
+				t.Fatalf("resolved to %+v (called %t, status %d), want a self caller for %s",
+					caller, called, recorder.Code, tc.principal)
+			}
+			if records.reads != before {
+				t.Errorf("an accepting caller read %d records, want none", records.reads-before)
+			}
+		})
+	}
+
+	if _, called, recorder := authenticatedWith(t, s, cfg, s.sign(t, consumerClaims(testConsumerWorkload)),
+		http.MethodPost, accept); called || recorder.Code != http.StatusForbidden {
+		t.Errorf("a workload reached acceptance (called %t, status %d), want 403", called, recorder.Code)
+	}
+	// Only that method and path: the person is authorized as before everywhere else.
+	person := s.sign(t, providerClaims(nobody))
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, accept},
+		{http.MethodPost, accept + "/"},
+		{http.MethodPost, "/v1/invitations"},
+		{http.MethodPost, "/v1/invitations/verify-identity"},
+	} {
+		if _, called, recorder := authenticatedWith(t, s, cfg, person, tc.method, tc.path); called ||
+			recorder.Code != http.StatusForbidden {
+			t.Errorf("%s %s: a person with no Tenant and no grant reached the handler (called %t, status %d), want 403",
+				tc.method, tc.path, called, recorder.Code)
+		}
+	}
+}

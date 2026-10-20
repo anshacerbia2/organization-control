@@ -1,6 +1,6 @@
 # Runbook: invitation token enumeration
 
-Version 1.0.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
+Version 1.1.0. Owner: Core Platform Team. Last reviewed 2026-10-19.
 
 `POST /v1/invitations/lookup` is the one anonymous route this service serves. SAD-004 §8.1 permits
 it only with enumeration resistance. "A rising unauthenticated lookup rate from one source is token
@@ -15,21 +15,26 @@ at the edge.
 - The gateway or reverse proxy in front of the service reports many `POST /v1/invitations/lookup`
   from one source.
 - `http request completed` log lines with `http.path=/v1/invitations/lookup` rise.
+- From 1.1.0, refused acceptances rise: `rate(organization_invitation_acceptances_refused_total[5m])`.
+  Each refusal is also logged, `an invitation acceptance was refused`, with the caller's
+  `principal_id` and no token, hash or address (TDD-004 1.14.0 §Operational Notes). Many from one
+  `principal_id` is a signed-in person guessing tokens, or holding links that are not theirs.
 
 No alert rule reads the counter (see Gaps).
 
 ## Impact
 
-- The lookup answers `{"accepted": true, "next": "verify-identity"}` to every well-formed token, and
+- The lookup answers `{"accepted": true, "next": "accept"}` to every well-formed token, and
   `400` to a malformed one, and reads nothing to do it (TDD-004 §Acceptance, and Enumeration
   Resistance). An enumeration learns nothing from it: not whether a token exists, not a Tenant, not an
   inviter, and no timing difference, since no query runs.
 - The token is 32 random bytes (`internal/invitation`, `tokenBytes`). Guessing one is not a practical
   attack. A sustained enumeration is still a signal: someone believes the token space is worth
   probing, perhaps holding leaked links.
-- The resolution of a token happens only on authenticated paths: `POST /v1/invitations/accept` (a
-  Tenant-scoped command) and the provider's `POST /v1/invitations/verify-identity`. An anonymous
-  caller reaches neither.
+- The resolution of a token happens on one authenticated path only: `POST /v1/invitations/accept`,
+  the signed-in person's own command (`ADR-ORG-007`, 1.1.0). It grants a Membership only to a caller
+  who holds the invited address as a proven address, and answers every other caller the same `404`,
+  so a guessed or leaked token admits nobody else. An anonymous caller does not reach it.
 - Load. The route is cheap, and the platform chain sheds overload before the handler runs.
 
 ## Diagnosis
@@ -42,7 +47,10 @@ No alert rule reads the counter (see Gaps).
    lookup path is blind guessing; well-formed tokens at a high rate from one source can be a list of
    real links.
 4. If real links may have leaked, ask which Tenants issued invitations recently: each Tenant
-   administrator reads `GET /v1/invitations?state=pending` (and `state=identity_verified`) for its own Tenant.
+   administrator reads `GET /v1/invitations?state=pending` for its own Tenant.
+5. For refused acceptances: read the refusal log lines for the window and group them by
+   `principal_id`. One Principal with many refusals is the source; its Memberships and sign-ins are
+   the identity kernel's and Organization Control's ordinary records.
 
 ## Decision table
 
@@ -52,6 +60,7 @@ No alert rule reads the counter (see Gaps).
 | Well-formed tokens at a high rate | Edge block (A), and treat links as possibly leaked (B) |
 | Many sources, distributed | Edge rate limit on the route (A); escalate to security |
 | The rate rose with a product launch or a bulk invitation | No incident; record the new usual level |
+| Many refused acceptances from one `principal_id` | Treat the links that Principal may hold as leaked (B); escalate to security, who may ask a provider to suspend the person's Memberships |
 
 ## Remediation
 
@@ -62,8 +71,8 @@ No alert rule reads the counter (see Gaps).
   `POST /v1/invitations/{invitation_id}/revoke` (`Idempotency-Key` required), and issues new ones.
   A provider expires those already past their lifetime estate-wide:
   `POST /v1/invitations/expire-lapsed` `{"size": 100}` (provider, reason). A leaked token still needs
-  an authenticated Principal whose identity the identity flow verifies before it grants anything
-  (SAD-004 §5.5: invitation possession never proves identity).
+  the signed-in invited person, holding the invited address as a proven address, before it grants
+  anything (SAD-004 §5.5: invitation possession never proves identity; ADR-ORG-007 §5.3).
 
 ## Verification
 
@@ -91,6 +100,6 @@ No alert rule reads the counter (see Gaps).
 
 | # | Source |
 | :-- | :-- |
-| R1 | TDD-organization-control-004 §Acceptance, and Enumeration Resistance, §Operational Notes; SAD-004 §5.5, §8.1 |
+| R1 | TDD-organization-control-004 §Acceptance, and Enumeration Resistance, §Acceptance Is the Whole Join, §Operational Notes; SAD-004 §5.5, §8.1; ADR-ORG-007 §5.4 |
 | R2 | Prometheus, *Metric and label naming*, "Labels", <https://prometheus.io/docs/practices/naming/>, accessed 2026-10-09: "Remember that every unique combination of key-value label pairs represents a new time series, which can dramatically increase the amount of data stored. Do not use labels to store dimensions with high cardinality (many different label values), such as user IDs, email addresses, or other unbounded sets of values." |
 | R3 | NIST SP 800-61r3, §2.3, <https://doi.org/10.6028/NIST.SP.800-61r3>: "Playbooks provide actionable steps or tasks for people to perform during various scenarios or situations." |

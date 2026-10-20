@@ -59,6 +59,24 @@ func WithSelfRead(ctx context.Context, pool *SelfPool, fn Body) error {
 	})
 }
 
+func WithSelfInvitation(ctx context.Context, pool *SelfPool, tokenHash string, fn Body) error {
+	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.invitation_token_hash', $1, true)`, tokenHash); err != nil {
+			return err
+		}
+		return fn(ctx, tx)
+	})
+}
+
+func WithSelfInTenant(ctx context.Context, pool *TenantPool, tenantID string, fn Body) error {
+	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID); err != nil {
+			return err
+		}
+		return fn(ctx, tx)
+	})
+}
+
 func WithTenantScope(ctx context.Context, pool *TenantPool, fn Body) error {
 	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, ""); err != nil {

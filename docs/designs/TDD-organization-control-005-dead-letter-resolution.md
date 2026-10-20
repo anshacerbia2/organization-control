@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 2.7.0
+  version: 2.8.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -102,10 +102,14 @@ secret authenticates the delivery (`STD-IAM-001 §3`).
   the dispatcher itself, it logs the reason and checks again after
   `ORGANIZATION_DELIVERY_RETRY_INTERVAL`. A consumer is often registered after this service is
   deployed, and a misconfigured target must not stop the control plane from serving.
-- **The outbound calls are these two and no others.** The consumers' acceptance APIs, and the
-  kernel's token endpoint for the workload token. The `net/http` denial in `arch.json` and
-  `internal/httpapi`'s outbound walk still hold for every package of this repository: the clients
-  are foundation-platform's, built in `internal/delivery`.
+- **The outbound calls are these three and no others.** The consumers' acceptance APIs, the
+  kernel's token endpoint for the workload token, and, from 2.8.0, the Identity Control API's
+  address match, which acceptance asks (`ADR-ORG-007 §5.3`, `TDD-organization-control-004`
+  §Acceptance Is the Whole Join). The first two are foundation-platform's clients, built in
+  `internal/delivery`. The match has no foundation-platform client, so `internal/identity` builds
+  one `net/http` client and is the one package `arch.json` excepts to call out; `internal/httpapi`'s
+  outbound walk holds every other package, the two that serve included, to constructing none. It
+  uses the same workload token source as the dispatchers.
 - **Every consumer is delivered from here** (2.6.0). foundation-reference's own dispatcher
   (`cmd/foundation-reference-dispatcher`, with a static bearer token and its own copy of the
   publisher) is deleted, as `ADR-GLB-018` Alternative G anticipated and its 2026-10-15 amendment

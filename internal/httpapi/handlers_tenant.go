@@ -8,6 +8,8 @@ package httpapi
 
 import (
 	stdcontext "context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -391,7 +393,15 @@ type acceptInvitationResponse struct {
 }
 
 func (h *handlers) acceptInvitation(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireTenant(w, r); !ok {
+	// The self caller alone (ADR-ORG-007 §5.1). Authentication admits every human token here as one
+	// and refuses a workload, so this is unreachable for any other caller; kept so the handler does
+	// not rest its one rule on another file.
+	caller, _ := CallerFrom(r.Context())
+	if !caller.Self {
+		platform.Problem(w, r, platform.Forbidden, "An invitation is accepted by the invited person, signed in as themselves")
+		return
+	}
+	if !requireKey(w, r) {
 		return
 	}
 	body, ok := decode[acceptInvitationRequest](w, r)
@@ -401,13 +411,42 @@ func (h *handlers) acceptInvitation(w http.ResponseWriter, r *http.Request) {
 
 	answer(w, r, http.StatusOK, func(ctx stdcontext.Context) (invitation.Acceptance, error) {
 		record, result, err := h.services.Invitations.Accept(ctx, invitation.Token(body.Token))
-		return invitation.Acceptance{Invitation: record, Membership: result}, err
+		return invitation.Acceptance{Invitation: record, Membership: result}, acceptanceError(r, caller, err)
 	}, func(accepted invitation.Acceptance) acceptInvitationResponse {
 		return acceptInvitationResponse{
 			Invitation: viewInvitation(accepted.Invitation),
 			Membership: viewMembershipResult(accepted.Membership),
 		}
 	})
+}
+
+// acceptanceError counts and logs a refused acceptance, and reduces the two errors whose cause the
+// caller must not see to their bare sentinels, so the problem detail is constant.
+//
+// A refusal is logged with the caller's principal_id and nothing of the token, its hash or the
+// address: the rate per caller is the guessing signal (ADR-ORG-007 §5.4,
+// docs/runbooks/invitation-token-enumeration.md), and the counter carries no caller label. An
+// unavailable match is logged with its cause, which names a status or a transport error and no
+// address (internal/identity).
+func acceptanceError(r *http.Request, caller Caller, err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, invitation.ErrNotAcceptable):
+		s := signalsFrom(r.Context())
+		if s != nil {
+			s.acceptancesRefused.Add(r.Context(), 1)
+		}
+		s.logger(r.Context()).WarnContext(r.Context(), "an invitation acceptance was refused",
+			slog.String("principal_id", caller.Subject.String()))
+		return invitation.ErrNotAcceptable
+	case errors.Is(err, invitation.ErrIdentityUnavailable):
+		signalsFrom(r.Context()).logger(r.Context()).ErrorContext(r.Context(),
+			"an invitation acceptance could not ask the Identity Control API",
+			slog.String("principal_id", caller.Subject.String()), slog.String("error", err.Error()))
+		return invitation.ErrIdentityUnavailable
+	}
+	return err
 }
 
 // lookupResponse is deliberately the same value for every token.
@@ -418,7 +457,7 @@ func (h *handlers) acceptInvitation(w http.ResponseWriter, r *http.Request) {
 // looks nothing up.
 type lookupResponse struct {
 	// Accepted reports that the token is well formed and, if it corresponds to a live invitation,
-	// that the identity flow may proceed. It is not a statement that the invitation exists.
+	// that the person may sign in and accept. It is not a statement that the invitation exists.
 	Accepted bool `json:"accepted"`
 
 	// Next tells the caller where to go. Constant, so it cannot become a channel for the answer.
@@ -447,6 +486,6 @@ func (h *handlers) lookupInvitation(w http.ResponseWriter, r *http.Request) {
 
 	respond(w, http.StatusOK, lookupResponse{
 		Accepted: true,
-		Next:     "verify-identity",
+		Next:     "accept",
 	})
 }

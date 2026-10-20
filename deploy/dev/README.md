@@ -259,7 +259,12 @@ In this stack's `.env`, then `docker compose up -d organization-control`:
 
 ```text
 ORGANIZATION_DELIVERY_TARGETS=identity-control=http://identity-control:8090/v1/deliveries
+ORGANIZATION_IDENTITY_CONTROL_URL=http://identity-control:8090
 ```
+
+The second line is where invitation acceptance asks whether the signed-in person holds the invited
+address (`POST /v1/principals/{principal_id}/identifiers:match`, ADR-ORG-007 §5.3), with the same
+workload token the dispatcher carries. Without it, `POST /v1/invitations/accept` answers `503`.
 
 ### 6. Point identity-control here
 
@@ -289,6 +294,9 @@ IDENTITY_ORGANIZATION_BASE_URL=http://organization-control:8080
   that report, and the new user joins the Organization at the Tenant's next convergence.
 - 20 revocations are timed from acceptance to the response, to publication and to identity-control's
   applied receipt, against 100 ms (p95) and 10 s (maximum).
+- An invitation to another person's address is refused to the operator, who holds its token, and
+  stays `pending`. An invitation to the operator's own proven address is accepted by the operator
+  signed in with no Tenant, and creates the operator's Membership (step 10, ADR-ORG-007).
 
 The proof deletes a Keycloak user and registers a client and a Tenant per run, so run it only
 against a kernel and a database this server or a CI job owns.
@@ -408,6 +416,24 @@ resolved by reporting its outcome, step 6; the script accepts an `unresolved` re
 
 `deploy-dev` runs both scripts on every change (`scripts/dev-wiring-proof.ps1` step 9), so the
 procedure here is the one that was tested.
+
+## Inviting a member on the development server
+
+ADR-ORG-007. The person accepts the invitation signed in as themselves, and this service asks
+identity-control whether they hold the invited address as a proven address. It needs §Wiring to other
+services step 5 (`ORGANIZATION_IDENTITY_CONTROL_URL`); without it, acceptance answers `503`.
+
+1. **The person exists, can sign in, and has proven the invited email** in identity-control. The
+   address counts only once its holder has returned the code sent to it. On a development server the
+   code reaches identity-control's mail catcher (its `deploy/dev/README.md`).
+2. **In organization-experience, in the Tenant, as its administrator:** invite the email. The page
+   shows the acceptance link once. Nothing on a development server delivers it, so send it to the
+   person yourself. A lost link is revoked and issued again.
+3. **The person opens the link** and signs in without choosing a Tenant, then accepts. Anyone else
+   who opens the link is refused, members of the Tenant included.
+
+`deploy-dev` runs this against the real identity-control on every change
+(`scripts/dev-wiring-proof.ps1` step 10).
 
 ## Keys
 

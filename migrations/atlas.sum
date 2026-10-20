@@ -1,4 +1,4 @@
-h1:7UVX9y9n0wwxURhfWrb/EVFbya4YVZBaW6bbIgTnlmk=
+h1:banJkierlXuuidSUnd3X0+M5gsl28r8my3ZYqL+GscU=
 20260821202322_baseline_organization_schema.sql h1:iLX771m6Nv6GkIXeIDTQcEmWAMlMd3Rod+l1e3GiydA=
 20260826071822_add_projection_snapshot_mark.sql h1:NEpR7ckeg3Cr3hLh0H8f6hUBkBanqkPuwiIIEoezmMQ=
 20260827143343_add_verify_rate_signal.sql h1:IoZCJOcErFuME9vNN+FzIr9elyLD+viqIkIu5V56ayA=
@@ -21,3 +21,4 @@ h1:7UVX9y9n0wwxURhfWrb/EVFbya4YVZBaW6bbIgTnlmk=
 20261007185327_add_batch_lease_and_reconciliation_age.sql h1:GZAnrB/Imwj+12vrWGntu5ZJ4ei8au0B3VdcBA7s9pk=
 20261008200000_add_privileged_access_review.sql h1:9aaIfqW4jKg0BW37fRYp9zQvTYq/IXi+GbDtnenbdNg=
 20261009120000_add_administration_pause_and_extra_findings.sql h1:Wd9cVQy+XHc+WxpXwS9DBuGwfTlIiAT+m1ReFlm6yr0=
+20261019120000_remove_identity_verified.sql h1:jHcsiC58SvJa7+6odwV7zA47KdGQBAdd56HvbCXyVzg=

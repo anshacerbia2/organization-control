@@ -76,6 +76,10 @@ var (
 	IsolationRefusals = Instrument{Name: "organization.isolation.refusals", Unit: "{refusal}", Counter: true}
 	InvitationLookups = Instrument{Name: "organization.invitation.lookups", Unit: "{lookup}", Counter: true}
 
+	// Refused acceptances (ADR-ORG-007 §5.4, TDD-organization-control-004 1.14.0 §Operational Notes),
+	// beside the lookups. No caller label: the rate per caller is read from the refusal's log line.
+	InvitationAcceptancesRefused = Instrument{Name: "organization.invitation.acceptances_refused", Unit: "{refusal}", Counter: true}
+
 	// The scheduled sweeps (TDD-organization-control-003 §Scheduled Sweeps), labelled sweep, which
 	// internal/sweep records. Timestamps rather than ages, so `time() - x` needs no update logic and
 	// a stuck process cannot hold an age still.
@@ -89,7 +93,7 @@ var (
 		StaleDeadLetters, StaleDeadLettersOldest, ConsumerReportAge, ConsumerMaxAcceptedAge, ConsumerVerifyRatio,
 		ConsumerExtraFindings, OldestUnapplied, ObligationsOverdue, OldestOverdueObligation,
 		OffboardingsInProgress, OldestOffboarding, ProvisioningRequests, OldestProvisioning,
-		IsolationRefusals, InvitationLookups,
+		IsolationRefusals, InvitationLookups, InvitationAcceptancesRefused,
 		SweepLastSuccess, SweepLastRun, SweepInterval, SweepRuns, SweepAffected}
 	instrumentationName      = "github.com/anshacerbia2/organization-control/internal/telemetry"
 	errReaderRequired        = errors.New("telemetry: a signals reader is required")

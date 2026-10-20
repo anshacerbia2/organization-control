@@ -49,6 +49,7 @@ import (
 	"github.com/anshacerbia2/organization-control/internal/db"
 	"github.com/anshacerbia2/organization-control/internal/delivery"
 	"github.com/anshacerbia2/organization-control/internal/httpapi"
+	"github.com/anshacerbia2/organization-control/internal/identity"
 	"github.com/anshacerbia2/organization-control/internal/invitation"
 	"github.com/anshacerbia2/organization-control/internal/membership"
 	"github.com/anshacerbia2/organization-control/internal/offboarding"
@@ -236,7 +237,45 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("workspace service: %w", err)
 	}
-	invitations, err := invitation.New(tenantPool, providerPool, memberships)
+	// A person's own contexts and their invitation acceptance, on the tenant connections as
+	// organization_self_rt, which those connections SET ROLE to and do not inherit (ADR-ORG-005,
+	// ADR-ORG-007, TDD-001 §Roles).
+	selfPool, err := db.NewSelfPool(tenantConns)
+	if err != nil {
+		return fmt.Errorf("self pool: %w", err)
+	}
+	// This service's workload credential, built once and shared by the dispatchers and the address
+	// match, so its token is cached and renewed in one place (TDD-organization-control-004 1.14.0
+	// §Configuration). Absent when neither needs it.
+	var workloadTokens *clientauth.Tokens
+	if len(cfg.Delivery.Targets) > 0 || cfg.IdentityControl.URL != "" {
+		key, err := clientauth.LoadKey(cfg.Delivery.WorkloadKeyFile)
+		if err != nil {
+			return fmt.Errorf("workload key: %w", err)
+		}
+		workloadTokens, err = clientauth.NewTokens(clientauth.Config{
+			TokenURL: cfg.Delivery.WorkloadTokenURL, Audience: cfg.TokenIssuer,
+			ClientID: cfg.Delivery.WorkloadClientID, Key: key,
+		})
+		if err != nil {
+			return fmt.Errorf("workload token source: %w", err)
+		}
+	}
+	// The Identity Control API, asked whether the person accepting holds the invited address
+	// (ADR-ORG-007 §5.3). Unconfigured, acceptance answers 503: unknown is not no.
+	var matcher invitation.AddressMatcher
+	if cfg.IdentityControl.URL != "" {
+		client, err := identity.New(identity.Config{
+			BaseURL: cfg.IdentityControl.URL, Tokens: workloadTokens, Timeout: cfg.IdentityControl.Timeout,
+		})
+		if err != nil {
+			return fmt.Errorf("identity-control client: %w", err)
+		}
+		matcher = client
+	} else {
+		logger.Warn("ORGANIZATION_IDENTITY_CONTROL_URL is not set; invitation acceptance answers 503 until it is")
+	}
+	invitations, err := invitation.New(tenantPool, providerPool, selfPool, memberships, matcher)
 	if err != nil {
 		return fmt.Errorf("invitation service: %w", err)
 	}
@@ -308,12 +347,6 @@ func run() error {
 	contexts, err := occontext.New(providerPool)
 	if err != nil {
 		return fmt.Errorf("context service: %w", err)
-	}
-	// A person's own contexts, on the tenant connections as organization_self_rt, which those
-	// connections SET ROLE to for the one read and do not inherit (ADR-ORG-005, TDD-001 §Roles).
-	selfPool, err := db.NewSelfPool(tenantConns)
-	if err != nil {
-		return fmt.Errorf("self pool: %w", err)
 	}
 	contextList, err := occontext.NewContexts(providerPool, selfPool)
 	if err != nil {
@@ -551,17 +584,6 @@ func run() error {
 			return fmt.Errorf("dispatch database: %w", err)
 		}
 		defer dispatchConns.Close()
-		key, err := clientauth.LoadKey(cfg.Delivery.WorkloadKeyFile)
-		if err != nil {
-			return fmt.Errorf("workload key: %w", err)
-		}
-		tokens, err := clientauth.NewTokens(clientauth.Config{
-			TokenURL: cfg.Delivery.WorkloadTokenURL, Audience: cfg.TokenIssuer,
-			ClientID: cfg.Delivery.WorkloadClientID, Key: key,
-		})
-		if err != nil {
-			return fmt.Errorf("workload token source: %w", err)
-		}
 		deliveryTargets := make([]delivery.Target, len(targets))
 		for i, target := range targets {
 			deliveryTargets[i] = delivery.Target{Consumer: target.Consumer, Endpoint: target.Endpoint}
@@ -569,7 +591,7 @@ func run() error {
 		go func() {
 			defer close(deliveryDone)
 			_ = delivery.Run(ctx, delivery.Config{
-				Targets: deliveryTargets, Pool: dispatchConns, Tokens: tokens,
+				Targets: deliveryTargets, Pool: dispatchConns, Tokens: workloadTokens,
 				Timeout: cfg.Delivery.Timeout, RetryInterval: cfg.Delivery.RetryInterval,
 				Interval: cfg.Delivery.Interval, IdleInterval: cfg.Delivery.IdleInterval,
 				Telemetry: telemetry, Logger: logger,

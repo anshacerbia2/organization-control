@@ -48,6 +48,12 @@ func selfTarget(r *http.Request) (id.UUID, bool) {
 	return principal, true
 }
 
+// acceptRoute reports whether the request is POST /v1/invitations/accept, exactly: the second route a
+// self caller reaches (ADR-ORG-007 §5.1).
+func acceptRoute(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Path == "/v1/invitations/accept"
+}
+
 // TokenVerifier is the one thing authentication needs from a token library.
 //
 // An interface rather than *verify.Verifier so this package can be tested without an RSA key set or
@@ -201,6 +207,16 @@ func Authenticate(verifier TokenVerifier, cfg AuthenticationConfig) (Middleware,
 			// (ADR-ORG-005 §5.1). Anyone else on the route, and this person on any other, is
 			// authorized below as before.
 			if target, ok := selfTarget(r); ok && !presented.workload && target == presented.principal {
+				caller = Caller{Subject: presented.principal, Self: true}
+			} else if acceptRoute(r) {
+				// Acceptance is the invited person's own command (ADR-ORG-007 §5.1): every human token
+				// is a self caller here, with or without a Tenant or a grant, and no record is read.
+				// The Membership it creates is the caller's own. A workload accepts nothing.
+				if presented.workload {
+					platform.Problem(w, r, platform.Forbidden,
+						"An invitation is accepted by the invited person, signed in as themselves")
+					return
+				}
 				caller = Caller{Subject: presented.principal, Self: true}
 			} else {
 				caller, err = authorize(r.Context(), presented, cfg)

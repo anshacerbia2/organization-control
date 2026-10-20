@@ -34,11 +34,14 @@ const (
 	controlUnsetBinding = "unset_binding"
 )
 
-// surfaceSignals carries the logger and the two counters the surface adds to.
+// surfaceSignals carries the logger and the three counters the surface adds to.
 type surfaceSignals struct {
 	telemetry *observability.Telemetry
 	refusals  metric.Int64Counter
 	lookups   metric.Int64Counter
+
+	// acceptancesRefused counts the one refusal acceptance gives (ADR-ORG-007 §5.4).
+	acceptancesRefused metric.Int64Counter
 }
 
 func newSurfaceSignals(provider metric.MeterProvider, t *observability.Telemetry) (*surfaceSignals, error) {
@@ -56,7 +59,13 @@ func newSurfaceSignals(provider metric.MeterProvider, t *observability.Telemetry
 	if err != nil {
 		return nil, err
 	}
-	return &surfaceSignals{telemetry: t, refusals: refusals, lookups: lookups}, nil
+	acceptancesRefused, err := meter.Int64Counter(telemetry.InvitationAcceptancesRefused.Name,
+		metric.WithUnit(telemetry.InvitationAcceptancesRefused.Unit))
+	if err != nil {
+		return nil, err
+	}
+	return &surfaceSignals{telemetry: t, refusals: refusals, lookups: lookups,
+		acceptancesRefused: acceptancesRefused}, nil
 }
 
 type signalsKey struct{}

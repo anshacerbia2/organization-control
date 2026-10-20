@@ -3,7 +3,9 @@ package invitation
 // The invitation half of Week 4, against a real engine.
 //
 // The property under test is SAD-004 §5.5: Membership activates on the join of two independent
-// facts, and neither alone activates anything. Most of what follows is that sentence, taken apart.
+// facts, and neither alone activates anything. From ADR-ORG-007 the two facts are an unexpired
+// invitation and the signed-in caller holding the invited address as a proven address, both checked
+// when the caller accepts. Most of what follows is that sentence, taken apart.
 //
 // In-package, because the clock, identifier, and token seams are unexported — and the token seam
 // must be, since a test that read the token back out of the database would disprove the property
@@ -15,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,10 +34,50 @@ type recorder struct{}
 
 func (recorder) RecordProviderAccess(context.Context, db.ProviderAccess) error { return nil }
 
+// matcher stands in for the Identity Control API's identifiers:match: it answers from a table of the
+// addresses each Principal holds as proven, and records every question.
+type matcher struct {
+	mu      sync.Mutex
+	proven  map[id.UUID][]string
+	err     error
+	matched []id.UUID
+}
+
+func (m *matcher) Match(_ context.Context, principal id.UUID, address string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.matched = append(m.matched, principal)
+	if m.err != nil {
+		return false, m.err
+	}
+	for _, held := range m.proven[principal] {
+		if strings.EqualFold(held, address) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *matcher) prove(principal id.UUID, address string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.proven[principal] = append(m.proven[principal], address)
+}
+
+func (m *matcher) asked() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.matched)
+}
+
 type fixture struct {
 	setup *fdb.Pool
 
 	service     *Service
+	matcher     *matcher
+	tenantPool  *db.TenantPool
+	selfPool    *db.SelfPool
+	memberships *membership.Service
 	provider    *db.ProviderPool
 	providerCtx context.Context
 	scopeFor    func(id.UUID) context.Context
@@ -103,7 +146,12 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatalf("membership.New: %v", err)
 	}
-	service, err := New(tenantPool, provider, memberships)
+	selfPool, err := db.NewSelfPool(runtimePool)
+	if err != nil {
+		t.Fatalf("NewSelfPool: %v", err)
+	}
+	match := &matcher{proven: map[id.UUID][]string{}}
+	service, err := New(tenantPool, provider, selfPool, memberships, match)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -129,7 +177,8 @@ func newFixture(t *testing.T) *fixture {
 
 	return &fixture{
 		setup:   setup,
-		service: service, provider: provider,
+		service: service, provider: provider, matcher: match,
+		tenantPool: tenantPool, selfPool: selfPool, memberships: memberships,
 		providerCtx: db.WithScope(ctx, providerScope),
 		scopeFor: func(tenantID id.UUID) context.Context {
 			scope, err := db.TenantScope(tenantID, actor, mustID(t))
@@ -200,19 +249,33 @@ func (f *fixture) issue(t *testing.T, tenantID id.UUID, identifier string) Issue
 	return issued
 }
 
-// verify delivers the identity fact for an invitation.
-func (f *fixture) verify(t *testing.T, issued Issued, identifier string) (Invitation, id.UUID) {
+// selfFor is the context of a person signed in as themselves, with no Tenant: the self caller
+// acceptance admits (ADR-ORG-007 §5.1).
+func (f *fixture) selfFor(t *testing.T, principal id.UUID) context.Context {
 	t.Helper()
-	principalID := mustID(t)
-	record, err := f.service.RecordVerifiedIdentity(f.providerCtx, VerifiedIdentity{
-		CorrelationID: issued.Invitation.CorrelationID,
-		Identifier:    identifier,
-		PrincipalID:   principalID,
-	})
+	scope, err := db.SelfScope(principal, mustID(t))
 	if err != nil {
-		t.Fatalf("RecordVerifiedIdentity: %v", err)
+		t.Fatalf("SelfScope: %v", err)
 	}
-	return record, principalID
+	return db.WithScope(f.providerCtx, scope)
+}
+
+// invitee is a Principal holding identifier as a proven address, and its signed-in context.
+func (f *fixture) invitee(t *testing.T, identifier string) (id.UUID, context.Context) {
+	t.Helper()
+	principal := mustID(t)
+	f.matcher.prove(principal, identifier)
+	return principal, f.selfFor(t, principal)
+}
+
+// stored reads an invitation as its Tenant's administrator.
+func (f *fixture) stored(t *testing.T, tenantID, invitationID id.UUID) Invitation {
+	t.Helper()
+	current, err := f.service.Get(f.scopeFor(tenantID), invitationID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	return current
 }
 
 func (f *fixture) activeMemberships(t *testing.T, tenantID id.UUID) int {
@@ -253,15 +316,14 @@ func (f *fixture) events(t *testing.T, aggregate id.UUID) []string {
 	return types
 }
 
-// TestNeitherFactAloneCreatesMembership is SAD-004 §5.5.
+// TestNeitherFactAloneCreatesMembership is SAD-004 §5.5, as ADR-ORG-007 builds it.
 //
 // An invitation that granted Membership on token presentation would have authenticated an email
-// inbox, and an inbox is not a Principal. An identity verification that granted Membership without
-// an invitation would admit anyone the kernel happened to verify.
+// inbox, and an inbox is not a Principal. A proven address with no invitation behind it grants
+// nothing either: acceptance starts from the token.
 func TestNeitherFactAloneCreatesMembership(t *testing.T) {
 	f := newFixture(t)
 	tenantID := f.seedTenant(t, "active")
-	ctx := f.scopeFor(tenantID)
 	identifier := "invitee@example.test"
 
 	issued := f.issue(t, tenantID, identifier)
@@ -272,46 +334,30 @@ func TestNeitherFactAloneCreatesMembership(t *testing.T) {
 		t.Fatal("issuing an invitation created a Membership")
 	}
 
-	// Fact one alone: a valid token, presented before any identity was verified.
-	if _, _, err := f.service.Accept(ctx, issued.Token); !errors.Is(err, ErrTransitionRefused) {
-		t.Fatalf("accepting a pending invitation returned %v, want ErrTransitionRefused", err)
+	// Fact one alone: a valid token, presented by a signed-in person who does not hold the address.
+	stranger := mustID(t)
+	if _, _, err := f.service.Accept(f.selfFor(t, stranger), issued.Token); !errors.Is(err, ErrNotAcceptable) {
+		t.Fatalf("accepting without the invited address returned %v, want ErrNotAcceptable", err)
 	}
 	if f.activeMemberships(t, tenantID) != 0 {
 		t.Fatal("token possession alone created a Membership")
 	}
 
-	// Fact two alone: a verification whose identifier is not the invited one.
-	if _, err := f.service.RecordVerifiedIdentity(f.providerCtx, VerifiedIdentity{
-		CorrelationID: issued.Invitation.CorrelationID,
-		Identifier:    "someone-else@example.test",
-		PrincipalID:   mustID(t),
-	}); !errors.Is(err, ErrTransitionRefused) {
-		t.Fatalf("a verification for another identifier returned %v, want ErrTransitionRefused", err)
+	// Fact two alone: a person holding the address, presenting a token that is not the invitation's.
+	invitee, inviteeCtx := f.invitee(t, identifier)
+	other, _, err := NewToken()
+	if err != nil {
+		t.Fatalf("NewToken: %v", err)
 	}
-
-	// A verification with no invitation behind it correlates to nothing.
-	if _, err := f.service.RecordVerifiedIdentity(f.providerCtx, VerifiedIdentity{
-		CorrelationID: mustID(t), Identifier: identifier, PrincipalID: mustID(t),
-	}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("an uncorrelated verification returned %v, want ErrNotFound", err)
+	if _, _, err := f.service.Accept(inviteeCtx, other); !errors.Is(err, ErrNotAcceptable) {
+		t.Fatalf("accepting an unknown token returned %v, want ErrNotAcceptable", err)
 	}
 	if f.activeMemberships(t, tenantID) != 0 {
-		t.Fatal("a verification alone created a Membership")
+		t.Fatal("a proven address alone created a Membership")
 	}
 
-	// Both facts: now it works.
-	verified, principalID := f.verify(t, issued, identifier)
-	if verified.State != StateIdentityVerified {
-		t.Fatalf("state = %s, want identity_verified", verified.State)
-	}
-	if verified.PrincipalID == nil || *verified.PrincipalID != principalID {
-		t.Fatalf("principal = %v, want %s", verified.PrincipalID, principalID)
-	}
-	if f.activeMemberships(t, tenantID) != 0 {
-		t.Fatal("verification created a Membership before acceptance")
-	}
-
-	accepted, granted, err := f.service.Accept(ctx, issued.Token)
+	// Both facts: now it works, for the caller and nobody else.
+	accepted, granted, err := f.service.Accept(inviteeCtx, issued.Token)
 	if err != nil {
 		t.Fatalf("Accept with both facts: %v", err)
 	}
@@ -321,8 +367,12 @@ func TestNeitherFactAloneCreatesMembership(t *testing.T) {
 	if accepted.AcceptedAt == nil || !accepted.AcceptedAt.Equal(f.fixed) {
 		t.Errorf("accepted_at = %v, want %s", accepted.AcceptedAt, f.fixed)
 	}
-	if granted.Membership.PrincipalID != principalID {
-		t.Errorf("Membership principal = %s, want %s", granted.Membership.PrincipalID, principalID)
+	if accepted.PrincipalID == nil || *accepted.PrincipalID != invitee {
+		t.Errorf("the invitation records principal %v, want the caller %s", accepted.PrincipalID, invitee)
+	}
+	if granted.Membership.PrincipalID != invitee || granted.Membership.TenantID != tenantID {
+		t.Errorf("Membership for %s in %s, want the caller %s in %s",
+			granted.Membership.PrincipalID, granted.Membership.TenantID, invitee, tenantID)
 	}
 	if f.activeMemberships(t, tenantID) != 1 {
 		t.Errorf("active Memberships = %d, want 1", f.activeMemberships(t, tenantID))
@@ -330,6 +380,165 @@ func TestNeitherFactAloneCreatesMembership(t *testing.T) {
 	// The provenance answers the first question an access review asks.
 	if !strings.Contains(granted.Membership.Provenance, issued.Invitation.InvitationID.String()) {
 		t.Errorf("provenance = %q, want it to name the invitation", granted.Membership.Provenance)
+	}
+	stored := f.stored(t, tenantID, issued.Invitation.InvitationID)
+	if stored.State != StateAccepted || stored.PrincipalID == nil || *stored.PrincipalID != invitee {
+		t.Errorf("stored %s for %v, want accepted for the caller", stored.State, stored.PrincipalID)
+	}
+	events := f.events(t, issued.Invitation.InvitationID)
+	if len(events) != 2 || !strings.HasSuffix(events[1], ".invitation.accepted") {
+		t.Errorf("the invitation's events are %v, want requested then accepted", events)
+	}
+	if got := f.events(t, granted.Membership.MembershipID); len(got) != 1 || !strings.HasSuffix(got[0], ".membership.lifecycle.granted") {
+		t.Errorf("the Membership's events are %v, want one grant", got)
+	}
+}
+
+// TestAnotherMemberHoldingTheTokenIsRefused is the defect ADR-ORG-007 closes: before it, acceptance
+// took the token alone, and any member of the Tenant who held it could accept. A member who does not
+// hold the invited address is refused like a stranger, and nothing changes: the invitee can still
+// accept afterwards.
+func TestAnotherMemberHoldingTheTokenIsRefused(t *testing.T) {
+	f := newFixture(t)
+	tenantID := f.seedTenant(t, "active")
+	identifier := "invited@example.test"
+	issued := f.issue(t, tenantID, identifier)
+
+	member := mustID(t)
+	f.matcher.prove(member, "member@example.test")
+	f.exec(t, `INSERT INTO membership.membership
+	    (membership_id, principal_id, tenant_id, subject_type, status, membership_version, valid_from, provenance)
+	    VALUES ($1, $2, $3, 'human', 'active', 1, now(), 'seeded')`,
+		mustID(t).String(), member.String(), tenantID.String())
+	// The administrator who issued it holds the token too.
+	for name, who := range map[string]id.UUID{"another member": member, "the inviter": f.actor} {
+		if _, _, err := f.service.Accept(f.selfFor(t, who), issued.Token); !errors.Is(err, ErrNotAcceptable) {
+			t.Fatalf("%s accepting returned %v, want ErrNotAcceptable", name, err)
+		}
+	}
+	if current := f.stored(t, tenantID, issued.Invitation.InvitationID); current.State != StatePending || current.PrincipalID != nil {
+		t.Fatalf("after the refusals the invitation is %s for %v, want pending for nobody", current.State, current.PrincipalID)
+	}
+	if f.activeMemberships(t, tenantID) != 1 {
+		t.Fatalf("active Memberships = %d, want the member's one", f.activeMemberships(t, tenantID))
+	}
+
+	invitee, inviteeCtx := f.invitee(t, identifier)
+	_, granted, err := f.service.Accept(inviteeCtx, issued.Token)
+	if err != nil || granted.Membership.PrincipalID != invitee {
+		t.Fatalf("the invitee's acceptance: %v, for %s", err, granted.Membership.PrincipalID)
+	}
+}
+
+// TestEveryFailedLookupIsTheSameRefusal is ADR-ORG-007 §5.4: unknown, expired, revoked, accepted and
+// mismatched answer the same sentinel and the same message, so no answer tells a token holder which
+// tokens are live. Only a pending, unexpired invitation reaches the match.
+func TestEveryFailedLookupIsTheSameRefusal(t *testing.T) {
+	f := newFixture(t)
+	tenantID := f.seedTenant(t, "active")
+	ctx := f.scopeFor(tenantID)
+
+	expired := f.issue(t, tenantID, "lapsed@example.test")
+	f.exec(t, `UPDATE invitation.invitation SET expires_at = $2 WHERE invitation_id = $1`,
+		expired.Invitation.InvitationID.String(), f.fixed.Add(-time.Minute))
+	revoked := f.issue(t, tenantID, "withdrawn@example.test")
+	if _, err := f.service.Revoke(ctx, revoked.Invitation.InvitationID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	accepted := f.issue(t, tenantID, "done@example.test")
+	_, doneCtx := f.invitee(t, "done@example.test")
+	if _, _, err := f.service.Accept(doneCtx, accepted.Token); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	unknown, _, err := NewToken()
+	if err != nil {
+		t.Fatalf("NewToken: %v", err)
+	}
+	mismatched := f.issue(t, tenantID, "someone@example.test")
+
+	// The caller holds every address, so only the invitation's own state can refuse it.
+	caller := mustID(t)
+	for _, address := range []string{"lapsed@example.test", "withdrawn@example.test", "done@example.test"} {
+		f.matcher.prove(caller, address)
+	}
+	callerCtx := f.selfFor(t, caller)
+	before := f.matcher.asked()
+	var messages []string
+	for name, token := range map[string]Token{
+		"unknown": unknown, "expired": expired.Token, "revoked": revoked.Token, "accepted": accepted.Token,
+	} {
+		_, _, err := f.service.Accept(callerCtx, token)
+		if !errors.Is(err, ErrNotAcceptable) {
+			t.Errorf("%s returned %v, want ErrNotAcceptable", name, err)
+			continue
+		}
+		messages = append(messages, err.Error())
+	}
+	if f.matcher.asked() != before {
+		t.Errorf("the match was asked %d times for invitations that were not pending", f.matcher.asked()-before)
+	}
+	_, _, err = f.service.Accept(callerCtx, mismatched.Token)
+	if !errors.Is(err, ErrNotAcceptable) {
+		t.Fatalf("a mismatched address returned %v, want ErrNotAcceptable", err)
+	}
+	messages = append(messages, err.Error())
+	for _, message := range messages {
+		if message != ErrNotAcceptable.Error() {
+			t.Errorf("a refusal reads %q, want the one message %q", message, ErrNotAcceptable.Error())
+		}
+	}
+	// And the second acceptance of the accepted one: used once.
+	if _, _, err := f.service.Accept(doneCtx, accepted.Token); !errors.Is(err, ErrNotAcceptable) {
+		t.Errorf("a second acceptance returned %v, want ErrNotAcceptable", err)
+	}
+}
+
+// TestUnknownIsNotNo: a match that cannot be asked, or no client configured, refuses with
+// ErrIdentityUnavailable and changes nothing (ADR-ORG-007 §5.3).
+func TestUnknownIsNotNo(t *testing.T) {
+	f := newFixture(t)
+	tenantID := f.seedTenant(t, "active")
+	identifier := "unknown@example.test"
+	issued := f.issue(t, tenantID, identifier)
+	_, inviteeCtx := f.invitee(t, identifier)
+
+	f.matcher.err = errors.New("connection refused")
+	if _, _, err := f.service.Accept(inviteeCtx, issued.Token); !errors.Is(err, ErrIdentityUnavailable) {
+		t.Fatalf("an unreachable match returned %v, want ErrIdentityUnavailable", err)
+	}
+	f.matcher.err = nil
+
+	unconfigured, err := New(f.tenantPool, f.provider, f.selfPool, f.memberships, nil)
+	if err != nil {
+		t.Fatalf("New without a matcher: %v", err)
+	}
+	unconfigured.now = f.service.now
+	if _, _, err := unconfigured.Accept(inviteeCtx, issued.Token); !errors.Is(err, ErrIdentityUnavailable) {
+		t.Fatalf("no matcher returned %v, want ErrIdentityUnavailable", err)
+	}
+	if current := f.stored(t, tenantID, issued.Invitation.InvitationID); current.State != StatePending {
+		t.Fatalf("state = %s, want pending: an unknown answer changed the invitation", current.State)
+	}
+	if f.activeMemberships(t, tenantID) != 0 {
+		t.Fatal("an unknown answer created a Membership")
+	}
+}
+
+// TestOnlyASelfScopeAccepts: a Tenant administrator's or a provider's scope reaching Accept is a
+// wiring defect, refused before anything is read, so the Membership cannot go to whoever that scope
+// names.
+func TestOnlyASelfScopeAccepts(t *testing.T) {
+	f := newFixture(t)
+	tenantID := f.seedTenant(t, "active")
+	issued := f.issue(t, tenantID, "scoped@example.test")
+	f.matcher.prove(f.actor, "scoped@example.test")
+	for name, ctx := range map[string]context.Context{"tenant": f.scopeFor(tenantID), "provider": f.providerCtx} {
+		if _, _, err := f.service.Accept(ctx, issued.Token); !errors.Is(err, db.ErrWrongScope) {
+			t.Errorf("a %s scope returned %v, want ErrWrongScope", name, err)
+		}
+	}
+	if f.matcher.asked() != 0 {
+		t.Error("a refused scope reached the match")
 	}
 }
 
@@ -341,28 +550,24 @@ func TestNeitherFactAloneCreatesMembership(t *testing.T) {
 func TestTheInvitationAndTheMembershipCommitTogether(t *testing.T) {
 	f := newFixture(t)
 	tenantID := f.seedTenant(t, "active")
-	ctx := f.scopeFor(tenantID)
 	identifier := "atomic@example.test"
 
 	issued := f.issue(t, tenantID, identifier)
-	f.verify(t, issued, identifier)
+	_, inviteeCtx := f.invitee(t, identifier)
 
 	injected := errors.New("failure between the state change and the grant")
 	f.service.beforeGrant = func(context.Context) error { return injected }
 
-	if _, _, err := f.service.Accept(ctx, issued.Token); !errors.Is(err, injected) {
+	if _, _, err := f.service.Accept(inviteeCtx, issued.Token); !errors.Is(err, injected) {
 		t.Fatalf("error = %v, want the injected failure", err)
 	}
 
-	current, err := f.service.Get(ctx, issued.Invitation.InvitationID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
+	current := f.stored(t, tenantID, issued.Invitation.InvitationID)
+	if current.State != StatePending {
+		t.Errorf("state = %s after a rolled-back acceptance, want pending", current.State)
 	}
-	if current.State != StateIdentityVerified {
-		t.Errorf("state = %s after a rolled-back acceptance, want identity_verified", current.State)
-	}
-	if current.AcceptedAt != nil {
-		t.Errorf("accepted_at = %v after a rolled-back acceptance", current.AcceptedAt)
+	if current.AcceptedAt != nil || current.PrincipalID != nil {
+		t.Errorf("accepted_at %v, principal %v after a rolled-back acceptance", current.AcceptedAt, current.PrincipalID)
 	}
 	if f.activeMemberships(t, tenantID) != 0 {
 		t.Error("a rolled-back acceptance left a Membership")
@@ -371,7 +576,7 @@ func TestTheInvitationAndTheMembershipCommitTogether(t *testing.T) {
 	// The same acceptance succeeds once the injection is removed, so the rollback left the row
 	// usable rather than merely unchanged.
 	f.service.beforeGrant = nil
-	if _, _, err := f.service.Accept(ctx, issued.Token); err != nil {
+	if _, _, err := f.service.Accept(inviteeCtx, issued.Token); err != nil {
 		t.Fatalf("Accept after the rollback: %v", err)
 	}
 	if f.activeMemberships(t, tenantID) != 1 {
@@ -385,15 +590,14 @@ func TestTheInvitationAndTheMembershipCommitTogether(t *testing.T) {
 func TestAcceptanceIntoASuspendedTenantIsRefused(t *testing.T) {
 	f := newFixture(t)
 	tenantID := f.seedTenant(t, "active")
-	ctx := f.scopeFor(tenantID)
 	identifier := "suspended@example.test"
 
 	issued := f.issue(t, tenantID, identifier)
-	f.verify(t, issued, identifier)
+	_, inviteeCtx := f.invitee(t, identifier)
 
 	f.exec(t, `UPDATE tenant.tenant SET status = 'suspended' WHERE tenant_id = $1`, tenantID.String())
 
-	if _, _, err := f.service.Accept(ctx, issued.Token); !errors.Is(err, ErrTenantNotActive) {
+	if _, _, err := f.service.Accept(inviteeCtx, issued.Token); !errors.Is(err, ErrTenantNotActive) {
 		t.Fatalf("error = %v, want ErrTenantNotActive", err)
 	}
 	if f.activeMemberships(t, tenantID) != 0 {
@@ -403,7 +607,7 @@ func TestAcceptanceIntoASuspendedTenantIsRefused(t *testing.T) {
 	// Restoring the Tenant lets the same invitation complete: the refusal was about the Tenant's
 	// state at that moment, not about the invitation.
 	f.exec(t, `UPDATE tenant.tenant SET status = 'active' WHERE tenant_id = $1`, tenantID.String())
-	if _, _, err := f.service.Accept(ctx, issued.Token); err != nil {
+	if _, _, err := f.service.Accept(inviteeCtx, issued.Token); err != nil {
 		t.Fatalf("Accept after the Tenant was restored: %v", err)
 	}
 }
@@ -416,40 +620,23 @@ func TestAcceptanceIntoASuspendedTenantIsRefused(t *testing.T) {
 func TestAnExpiredInvitationCannotBeAccepted(t *testing.T) {
 	f := newFixture(t)
 	tenantID := f.seedTenant(t, "active")
-	ctx := f.scopeFor(tenantID)
 	identifier := "expired@example.test"
 
 	issued := f.issue(t, tenantID, identifier)
-	f.verify(t, issued, identifier)
+	_, inviteeCtx := f.invitee(t, identifier)
 
-	// Lapse it without running the sweep: the state is still identity_verified.
+	// Lapse it without running the sweep: the state is still pending.
 	f.exec(t, `UPDATE invitation.invitation SET expires_at = $2 WHERE invitation_id = $1`,
 		issued.Invitation.InvitationID.String(), f.fixed.Add(-time.Minute))
 
-	before, err := f.service.Get(ctx, issued.Invitation.InvitationID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if before.State != StateIdentityVerified {
+	if before := f.stored(t, tenantID, issued.Invitation.InvitationID); before.State != StatePending {
 		t.Fatalf("state = %s; the sweep should not have run yet", before.State)
 	}
-	if _, _, err := f.service.Accept(ctx, issued.Token); !errors.Is(err, ErrExpired) {
-		t.Fatalf("error = %v, want ErrExpired", err)
+	if _, _, err := f.service.Accept(inviteeCtx, issued.Token); !errors.Is(err, ErrNotAcceptable) {
+		t.Fatalf("error = %v, want ErrNotAcceptable", err)
 	}
 	if f.activeMemberships(t, tenantID) != 0 {
 		t.Error("an expired invitation created a Membership")
-	}
-
-	// And a verification arriving after expiry is refused for the same reason.
-	second := f.issue(t, tenantID, "expired2@example.test")
-	f.exec(t, `UPDATE invitation.invitation SET expires_at = $2 WHERE invitation_id = $1`,
-		second.Invitation.InvitationID.String(), f.fixed.Add(-time.Minute))
-	if _, err := f.service.RecordVerifiedIdentity(f.providerCtx, VerifiedIdentity{
-		CorrelationID: second.Invitation.CorrelationID,
-		Identifier:    "expired2@example.test",
-		PrincipalID:   mustID(t),
-	}); !errors.Is(err, ErrExpired) {
-		t.Fatalf("verification after expiry returned %v, want ErrExpired", err)
 	}
 }
 
@@ -532,10 +719,11 @@ func TestRevokeWithdrawsTheIntentAndIsTerminal(t *testing.T) {
 		t.Errorf("revoked_at = %v, want %s", revoked.RevokedAt, f.fixed)
 	}
 
-	// Terminal, and it says so rather than reporting a refused transition: a client retrying
-	// acceptance on a revoked invitation has a different problem from one retrying too early.
-	if _, _, err := f.service.Accept(ctx, issued.Token); !errors.Is(err, ErrSettled) {
-		t.Errorf("accepting a revoked invitation returned %v, want ErrSettled", err)
+	// Acceptance refuses it as it refuses every failed lookup (ADR-ORG-007 §5.4), even for the
+	// person holding the address.
+	_, inviteeCtx := f.invitee(t, identifier)
+	if _, _, err := f.service.Accept(inviteeCtx, issued.Token); !errors.Is(err, ErrNotAcceptable) {
+		t.Errorf("accepting a revoked invitation returned %v, want ErrNotAcceptable", err)
 	}
 	if _, err := f.service.Revoke(ctx, issued.Invitation.InvitationID); !errors.Is(err, ErrSettled) {
 		t.Errorf("revoking twice returned %v, want ErrSettled", err)
@@ -601,9 +789,10 @@ func TestTheTokenIsNeverStored(t *testing.T) {
 	tenantID := f.seedTenant(t, "active")
 	issued := f.issue(t, tenantID, "token@example.test")
 
+	// Read on the owner connection: from ADR-ORG-007 the provider role holds nothing on the table.
 	var stored string
-	if err := db.WithProviderScope(f.providerCtx, f.provider, "invitation suite read",
-		func(ctx context.Context, tx db.Tx) error {
+	if err := f.setup.InTx(f.providerCtx,
+		func(ctx context.Context, tx fdb.Tx) error {
 			return tx.QueryRow(ctx, `SELECT token_hash FROM invitation.invitation
 			    WHERE invitation_id = $1`, issued.Invitation.InvitationID.String()).Scan(&stored)
 		}); err != nil {
@@ -618,8 +807,8 @@ func TestTheTokenIsNeverStored(t *testing.T) {
 	}
 	// And the whole row carries the token nowhere else.
 	var row string
-	if err := db.WithProviderScope(f.providerCtx, f.provider, "invitation suite read",
-		func(ctx context.Context, tx db.Tx) error {
+	if err := f.setup.InTx(f.providerCtx,
+		func(ctx context.Context, tx fdb.Tx) error {
 			return tx.QueryRow(ctx, `SELECT to_jsonb(i)::text FROM invitation.invitation i
 			    WHERE invitation_id = $1`, issued.Invitation.InvitationID.String()).Scan(&row)
 		}); err != nil {
@@ -645,10 +834,6 @@ func TestAnInvitationInAnotherTenantIsNotFound(t *testing.T) {
 	if _, err := f.service.Revoke(otherCtx, issued.Invitation.InvitationID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Revoke from another Tenant returned %v, want ErrNotFound", err)
 	}
-	// Even holding the token, which is the point: the token is not authority.
-	if _, _, err := f.service.Accept(otherCtx, issued.Token); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Accept from another Tenant returned %v, want ErrNotFound", err)
-	}
 }
 
 // TestAcceptanceIsRefusedWhenTheSubjectAlreadyHoldsMembership. The partial unique index would
@@ -656,11 +841,10 @@ func TestAnInvitationInAnotherTenantIsNotFound(t *testing.T) {
 func TestAcceptanceIsRefusedWhenTheSubjectAlreadyHoldsMembership(t *testing.T) {
 	f := newFixture(t)
 	tenantID := f.seedTenant(t, "active")
-	ctx := f.scopeFor(tenantID)
 	identifier := "duplicate@example.test"
 
 	issued := f.issue(t, tenantID, identifier)
-	_, principalID := f.verify(t, issued, identifier)
+	principalID, ctx := f.invitee(t, identifier)
 
 	// The same Principal already holds an active Membership in this context.
 	f.exec(t, `INSERT INTO membership.membership
@@ -736,14 +920,11 @@ func TestAnIdentifierDifferingOnlyInCaseIsTheSamePerson(t *testing.T) {
 
 // TestTheMachineIsWalkedWholeAndRefusesEverythingElse.
 func TestTheMachineIsWalkedWholeAndRefusesEverythingElse(t *testing.T) {
-	states := []State{StatePending, StateIdentityVerified, StateAccepted, StateExpired, StateRevoked}
+	states := []State{StatePending, StateAccepted, StateExpired, StateRevoked}
 	permitted := map[string]State{
-		"verify-identity|pending":  StateIdentityVerified,
-		"accept|identity_verified": StateAccepted,
-		"revoke|pending":           StateRevoked,
-		"revoke|identity_verified": StateRevoked,
-		"expire|pending":           StateExpired,
-		"expire|identity_verified": StateExpired,
+		"accept|pending": StateAccepted,
+		"revoke|pending": StateRevoked,
+		"expire|pending": StateExpired,
 	}
 
 	covered := map[string]bool{}
@@ -792,12 +973,19 @@ func TestTheMachineIsWalkedWholeAndRefusesEverythingElse(t *testing.T) {
 	if _, err := Resolve(Action("resend"), StatePending); !errors.Is(err, ErrUnknownAction) {
 		t.Errorf("an action outside the machine returned %v", err)
 	}
+	// The half-join is gone (ADR-ORG-007 §5.4): neither the state nor its action is in the machine.
+	if State("identity_verified").Valid() {
+		t.Error("identity_verified is still a valid state")
+	}
+	if _, err := Resolve(Action("verify-identity"), StatePending); !errors.Is(err, ErrUnknownAction) {
+		t.Errorf("verify-identity returned %v, want ErrUnknownAction", err)
+	}
 }
 
-// TestEveryActionEitherPublishesOrIsDeclaredSilent. `verify-identity` records that one of two
-// facts arrived, and no consumer outside this service can act on half a join.
+// TestEveryActionEitherPublishesOrIsDeclaredSilent. Since `verify-identity` was removed, the one
+// silent action, every action publishes.
 func TestEveryActionEitherPublishesOrIsDeclaredSilent(t *testing.T) {
-	silent := map[Action]bool{ActionVerifyIdentity: true}
+	silent := map[Action]bool{}
 
 	for _, action := range Actions() {
 		eventType, publishes, err := EventType(action)
