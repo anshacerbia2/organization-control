@@ -510,6 +510,30 @@ this domain — projected context representation, session removal granularity, c
 switch mechanism — are answered in `identity-kernel` and consumed by `identity-control`.
 They change how Membership reaches Keycloak, not what Membership is.
 
+## API specification (ADR-GLB-010 §5.1)
+
+✅ `api/openapi.yaml` is this service's published HTTP contract, an OpenAPI 3.1 document kept by hand
+beside `internal/httpapi/routes.go` (2026-10-20). ADR-GLB-010 §5.1, accepted 2026-10-20, asks that
+"Each served API SHALL publish its specification (OpenAPI for HTTP) as a versioned artifact".
+
+- **Published as a versioned artifact in this repository.** A consumer pins it by commit. It is not
+  served by the deployable: nothing reads it at run time, and serving it would add an unauthenticated
+  route.
+- **`info.version`** follows ADR-GLB-006: major for a change that breaks a client, minor for an
+  addition, patch for a correction of the text. It is bumped in the commit that changes the routes.
+- **Each operation names its mux pattern** in `x-mux-pattern`, exactly as routes.go writes it, and
+  its caller in `x-route-class`: probe, anonymous, tenant, provider, eligible, consumer-or-provider,
+  self, provider-or-reporter:provisioning and reporter:obligation.
+- **Checked in CI, twice.** `internal/httpapi/openapi_test.go` fails when routes.go registers a route
+  no operation names, or an operation names a route routes.go does not register or a path that route
+  does not serve. The verify job's step "the API specification lints" runs Redocly CLI 2.55.0, pinned
+  by digest, with every rule of its recommended set an error (`api/redocly.yaml`).
+- **Not checked yet: the schemas against the handlers.** The request and response schemas are read
+  from the handlers and `views.go` by hand. A contract test that sends each documented body to the
+  handler is a later item.
+- **The BFF's client is organization-experience's.** ADR-GLB-010 §5.1 has a hand-written client
+  contract-tested in CI against this document; that test lives in organization-experience.
+
 ## Not this service
 
 Recorded so scope creep is visible rather than convenient:

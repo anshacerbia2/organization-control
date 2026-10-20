@@ -105,6 +105,7 @@ every other consumer uses; sharing a foundation grants no privileged interface.
 | `internal/projection/` | Snapshots, consumer registry, reconciliation |
 | `tools/grantcheck/` | Derives which role runs which statement and has PostgreSQL judge the grants; `make grantcheck` |
 | `docs/designs/` | Technical Design Documents |
+| `api/` | `openapi.yaml`, the published HTTP contract (ADR-GLB-010 §5.1), and its lint configuration |
 
 Outbox, dispatcher, event envelope, deduplication, idempotency, problem details, and
 telemetry are imported from `foundation-platform` rather than reimplemented here.

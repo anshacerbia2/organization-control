@@ -1,0 +1,4 @@
+# The lint configuration CI runs on openapi.yaml (ci.yml, "the API specification lints"). Every rule of
+# Redocly's recommended set is an error, so a warning fails the build too.
+extends:
+  - recommended-strict

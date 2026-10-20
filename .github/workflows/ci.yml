@@ -126,6 +126,18 @@ jobs:
       - name: build
         run: go build ./...
 
+      # ADR-GLB-010 §5.1: "Each served API SHALL publish its specification (OpenAPI for HTTP) as a
+      # versioned artifact". api/openapi.yaml is that artifact, so an invalid document fails here.
+      # Redocly CLI is pinned by version and digest and runs with no network; api/redocly.yaml makes
+      # every rule of its recommended set an error, and .redocly.lint-ignore.yaml names the two probe
+      # exceptions. That the document describes every route in routes.go, and nothing else, is
+      # internal/httpapi/openapi_test.go's, run with the tests below.
+      - name: the API specification lints
+        run: >-
+          docker run --rm --network none -e REDOCLY_TELEMETRY=off -v "$PWD/api":/api:ro -w /api
+          redocly/cli:2.55.0@sha256:224477ac49f5e8fdfd3f244d30ed1db9d74f57263a46117a09d5894f6751a2a0
+          lint openapi.yaml
+
       # The dev issuer is behind its build tag, so the three steps above never compile it. Its client
       # credentials grant is what foundation-reference's system proof obtains this service's
       # delivery token from, and its refusals (RFC 7523 §3) are tested here, under the tag.
