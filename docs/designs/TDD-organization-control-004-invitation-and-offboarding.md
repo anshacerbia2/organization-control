@@ -423,11 +423,11 @@ a replay to "respond with the result of the previously completed operation": the
 invitation. A link lost that way is revoked and issued again. A response the surface records after
 the handler is withheld the same way, and one lacking the member is not recorded at all, so the key
 stays claimed rather than holding a renamed secret. `TestTheIssueRecordHoldsNoToken` reads the record
-and the replay against the engine. Organization Experience is to show a replay as such and use a new
-key after each answer (`TDD-organization-experience-002`). Until 1.16.0 this said it already did. It
-does not on organization-experience's `main` of 2026-10-20: its create form keeps one key per set
-of values across a reset, so issuing again with the same values replays the first issue, and the
-replay carries no token for the link. The fix is that repository's alignment work, not yet merged.
+and the replay against the engine. Organization Experience shows a replay as such, a `201` without
+`token` shown as "already issued" with no link, and uses a new key after each answer
+(organization-experience #22, `TDD-organization-experience-002`). Before #22 its create form kept one
+key per set of values across a reset, so issuing again with the same values replayed the first issue
+with no token for the link.
 
 **Resolving an invitation for an enrolment** (1.16.0, planned, not built; `ADR-IAM-011 §5.1`, §5.6,
 accepted 2026-10-20). An invited person with no account enrols at identity-control's anonymous
