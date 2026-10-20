@@ -186,6 +186,9 @@ $eventTypes = @(
 $null = Require "identity-control registered as a consumer" (Send-Json "POST" "$organizationApi/v1/projections/consumers" (@{
             consumer_id = "identity-control"; principal_id = $identityWorkload.principal_id; projection_version = "v1"
             max_accepted_age_seconds = 60; stale_behavior = "fail_closed"; event_types = $eventTypes
+            # identity-control reconciles itself every IDENTITY_ORGANIZATION_RECONCILE_INTERVAL, 15 minutes
+            # by default (ADR-ORG-001 §5.7): the interval it declares is that one, so the alerts measure it.
+            reconciliation_interval_seconds = 900
         } | ConvertTo-Json -Compress) $token "wire-consumer") 201
 
 Write-Host "5. deliver to identity-control"
