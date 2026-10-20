@@ -580,6 +580,31 @@ against 900 s. Two gaps stay recorded, not claimed:
   and `scripts/dev-deprovisioning.ps1`. How a domain's workload authenticates to the resolution route,
   and is bound to the domain it names, is open with the provisioning system's question above.
 
+## Repository governance
+
+**2026-10-20: `ee98ec4` reached `main` without a pull request, and stays in history.** STD-GLB-009
+1.10.0 §Security & Access Governance asks a commit that reached a default branch otherwise to be
+"recorded and dispositioned, never rewritten", in its repository's ROADMAP. This is that record.
+
+- **What it changed.** `ee98ec4`, committed 2026-10-07 16:08 UTC, "systemproof: pin
+  foundation-reference at the proof that names the version", changed one line of
+  `systemproof/foundation-reference.rev`, from `3d20d84` to `20fdd6a`. It is on `main`'s
+  first-parent history, between the merges of #56 and #57, not inside a pull request's merge.
+- **What superseded it.** Pull request #60 replaced that line the same day: its commit `179316d`
+  (19:38 UTC) changed `20fdd6a` to `4a93d9d`, and the pull request merged at 19:48 UTC. `e559ac3`
+  replaced it again on 2026-10-15 (`de3619a`). None of its content is on `main`: `20fdd6a` appears in
+  no file there.
+- **When the ruleset took effect.** Ruleset 24664127, "main via PR only", was created at 16:32 UTC
+  that day, 24 minutes after the commit. It targets the default branch with `deletion`,
+  `non_fast_forward` and `pull_request`, and has no bypass actors (GitHub API, read 2026-10-20).
+- **Why it is neither rewritten nor reverted.** History is not rewritten: "Rebasing (or any other
+  form of rewriting) a branch that others have based work on is a bad idea: anyone downstream of it is
+  forced to manually fix their history". A revert is used only when the content is still there to
+  undo, because "git revert is used to record some new commits to reverse the effect of some earlier
+  commits", and here nothing of it is left. The record is what NIST CM-3 asks: "Document
+  configuration change decisions associated with the system", including "unscheduled or unauthorized
+  changes" (all three as STD-GLB-009 quotes them).
+
 ## Debt, named rather than implied
 
 One item. Until 2026-10-20 there were two; the first was never debt, and is folded into the one
