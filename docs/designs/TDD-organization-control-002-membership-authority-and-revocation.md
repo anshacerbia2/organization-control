@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.16.0
+  version: 1.17.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -981,8 +981,17 @@ before an older grant.
 - **The two Tenant versions answer different questions.** `tenant_version` orders two states of one
   Tenant, and `tenant_security_version` decides whether a held context is stale. A transition that
   does not increment the security version publishes the same value twice, so it cannot order them.
-- **The consumer that needs it** is identity-control, which projects each Tenant's status into the
-  kernel (`TDD-identity-control-002` 2.0.0).
+- **The consumers that need it** are identity-control, which projects each Tenant's status into the
+  kernel (`TDD-identity-control-002` 2.0.0), and foundation-reference, which refuses every member of
+  a Tenant that is not active (ROADMAP backlog item 16).
+- **Both order a Tenant by the pair** (1.17.0, `ADR-ORG-003 §5.5`, amended 2026-10-20). A consumer
+  applies a Tenant event or snapshot row only when its (`tenant_security_version`, `tenant_version`)
+  is greater than the pair it holds, compared left to right as PostgreSQL compares two row
+  constructors. By the security version alone, an activation, which moves only `tenant_version`, is
+  discarded after a snapshot of the Tenant in provisioning; by `tenant_version` alone, a restored
+  Tenant's withdrawal can be discarded. identity-control orders by the pair from its #114, and
+  foundation-reference from its #30, both merged on 2026-10-20. Nothing changes here: every Tenant
+  event and snapshot row already carries both versions.
 
 ### Bootstrap Contract
 
@@ -1166,8 +1175,9 @@ the key ranges it hosts (`ADR-ORG-001` [R6][R7]).
 - **Declared at registration.** `POST /v1/projections/consumers` takes
   `reconciliation_interval_seconds`, from 60 to 604800 (one minute to a week). Absent, it is 86400, one
   day, so a registration written before the field still registers (foundation-reference's system
-  proof does). `projection.consumer.reconciliation_interval` holds it, checked by the database with
-  the same bounds, and the consumer read and list serve it as `reconciliation_interval_seconds`.
+  proof did until its #30, which declares one). `projection.consumer.reconciliation_interval` holds
+  it, checked by the database with the same bounds, and the consumer read and list serve it as
+  `reconciliation_interval_seconds`.
 - **The consumer runs it as itself.** `POST /v1/projections/reconcile` admits a registered consumer
   for its own `consumer_id`, with no `X-Administrative-Reason`, as its other own routes do; a body
   naming another consumer is `403`, and the service refuses it again where it reads the registry row,
@@ -1188,9 +1198,19 @@ the key ranges it hosts (`ADR-ORG-001` [R6][R7]).
   "at least enough time for 2 full runs of the batch job" (`ADR-ORG-001` [R8][R9]). The interval is a
   series of its own, so no threshold is copied out of the registry into the rule file, and promtool
   tests both edges (`observability/alerts/organization-control.test.yml`).
-- **Not built here.** The schedulers are the consumers': identity-control and foundation-reference
-  each add one and declare their interval (reported to the owner with this change). Until they do,
-  the age alerts fire one interval after registration, which is the signal that nobody reconciles.
+- **The schedulers are the consumers', and both are built** (1.17.0). Until 1.17.0 this said they
+  were not.
+  - **identity-control** reconciles itself every `IDENTITY_ORGANIZATION_RECONCILE_INTERVAL`, 15 minutes
+    by default (identity-control #114, `TDD-identity-control-002` 2.6.0). `scripts/dev-wire.ps1` and
+    `deploy/dev/README.md` §Wiring step 4 register it with `reconciliation_interval_seconds` 900, the
+    same 15 minutes, so the alerts measure the interval it runs on.
+  - **foundation-reference** reads its own registration once a minute and runs when a run is due: none
+    recorded yet, a restore asked for one, or the last run is within a check of the declared interval
+    (foundation-reference #30). Its scheduler is off when `REFERENCE_AUTHORITY_BASE_URL` is unset. Its
+    system proof declares the interval at registration, a week and then a minute, and asserts that
+    the consumer's own runs are recorded here.
+  - A consumer whose scheduler stops still shows: its age alert fires one interval after its last
+    recorded run.
 
 ### After a Restore to an Older Point
 
@@ -1272,14 +1292,21 @@ every active consumer: reconciliation_requested_at := now()
 - **Every consumer reconciles.** etcd marks the bumped revisions compacted so "all watches are
   terminated" (`ADR-ORG-003` [R9]). Here `reconciliation_requested_at` raises
   `ReconciliationRequestedAfterRestore` for each consumer, and its next recorded reconciliation clears
-  it (§Reconciliation Interval). Until the consumers' schedulers exist, the restore runbook runs each
-  one's reconciliation as a provider.
+  it (§Reconciliation Interval). Since 1.17.0 both consumers' schedulers are built: foundation-reference
+  runs within a minute of the request, identity-control at its next 15-minute run. The restore runbook
+  still runs each one's reconciliation as a provider, because it reads the findings as lost changes.
 - **No consumer contract changes.** identity-control and foundation-reference apply only a higher
   version and check no gap, so a jump of 10^9 is applied like any later version. It also ends "the
   same version, two states" for Tenants and grants: no version a consumer holds can equal a new one.
   The versions are `bigint`, and no row changes 10^9 times within a backup window.
 - **Memberships are not bumped.** Each is advanced from the consumer's report, as above, which knows
   how far the consumer holds it.
+- **It is run once per restore, and it is not idempotent** (1.17.0, as `restore.Bump` states). A
+  second run adds the margin again and publishes the withdrawals again at the new versions. That
+  never lowers a version and never widens access, so it is harmless, but it is not a no-op:
+  `restore.sh` runs it once, after the restore and before the service serves, and nothing else does.
+  A retry after a failed run is safe, because the run is one transaction and a failure commits
+  nothing.
 
 The drill (`scripts/dev-restore-drill.sh` step 8) runs it on the restored database and asserts the
 versions, that only withdrawals were published, the reconcile request, and that identity-control
@@ -1526,6 +1553,8 @@ as a provider. Written (1.15.0): `docs/runbooks/fresh-check-misuse.md`.
 | Governed by | ADR-ORG-001 §5.7 (amended 2026-10-20) — a consumer reconciles itself on a declared interval, alerted at one and two (1.16.0, §Reconciliation Interval) |
 | Governed by | ADR-ORG-003 §5.5 (amended 2026-10-20) — the restore bump; §5.6 — a provider suspends or revokes one Membership inside a Tenant (1.16.0) |
 | Conforms to | STD-GLB-002 3.3.0 §A restore to an older point — the drill proves the bump (1.16.0) |
+| Governed by | ADR-ORG-003 §5.5 (amended 2026-10-20) — identity-control and foundation-reference order a Tenant by (`tenant_security_version`, `tenant_version`); the bump runs once per restore (1.17.0) |
+| Governed by | ADR-ORG-001 §5.7 (amended 2026-10-20) — both consumers' schedulers are built, identity-control registered at 900 s (1.17.0) |
 | Governed by | ADR-GLB-003 — Transactional Outbox |
 | Governed by | ADR-GLB-006 — Event Versioning |
 | Conforms to | STD-IAM-001 §3.3 — one active Tenant context per token; the Membership set is never placed in a token |

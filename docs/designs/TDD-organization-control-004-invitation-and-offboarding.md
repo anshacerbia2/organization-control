@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.15.0
+  version: 1.16.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -351,6 +351,9 @@ POST   /v1/invitations/expire-lapsed
 
 Unauthenticated
 POST   /v1/invitations/lookup
+
+Planned, not built (1.16.0, ADR-IAM-011 §5.6): identity-control's workload alone
+POST   /v1/invitations/resolve
 ```
 
 From 1.9.0 issuing, revoking and accepting each require an
@@ -420,8 +423,28 @@ a replay to "respond with the result of the previously completed operation": the
 invitation. A link lost that way is revoked and issued again. A response the surface records after
 the handler is withheld the same way, and one lacking the member is not recorded at all, so the key
 stays claimed rather than holding a renamed secret. `TestTheIssueRecordHoldsNoToken` reads the record
-and the replay against the engine. Organization Experience shows a replay as such and uses a new key
-after each answer (`TDD-organization-experience-002`).
+and the replay against the engine. Organization Experience is to show a replay as such and use a new
+key after each answer (`TDD-organization-experience-002`). Until 1.16.0 this said it already did. It
+does not on organization-experience's `main` of 2026-10-20: its create form keeps one key per set
+of values across a reset, so issuing again with the same values replays the first issue, and the
+replay carries no token for the link. The fix is that repository's alignment work, not yet merged.
+
+**Resolving an invitation for an enrolment** (1.16.0, planned, not built; `ADR-IAM-011 §5.1`, §5.6,
+accepted 2026-10-20). An invited person with no account enrols at identity-control's anonymous
+`POST /v1/enrolments`, and identity-control asks this service, as its workload, which invitation the
+token names. `ADR-IAM-011 §5.6` assigns this design `POST /v1/invitations/resolve`:
+
+- **Who.** identity-control's workload alone. Every other caller is refused.
+- **What it answers.** The invitation's identifier and its target address, and only for an
+  invitation that is `pending` and not past its expiry. It names no Tenant (`ADR-IAM-011 §5.1`).
+- **What it does not do.** It changes nothing. Acceptance stays `POST /v1/invitations/accept`, by the
+  person, signed in, once the enrolment has made an account.
+
+Three points are not decided by `ADR-IAM-011` and are settled here before the route is built: how
+this service recognises identity-control's workload (its consumer registration, a reporter-style
+record, or another record); the answer for a token that resolves to nothing, which must not tell an
+unknown, expired, revoked and accepted token apart (`ADR-IAM-011 §5.1`, WSTG-IDNT-04); and the read
+path, which today is the self caller's (`db.WithSelfInvitation`). ROADMAP backlog item 56 tracks it.
 
 The lookup's constant `next` is `accept` from 1.14.0, where it was `verify-identity`.
 
@@ -1212,6 +1235,7 @@ and sends a failed deprovisioning again. Written (1.11.0):
 | Governed by | ADR-ORG-001 §5.1 — Tenant offboarding and retirement coordination |
 | Governed by | ADR-ORG-001 §5.11 (amended 2026-10-20) — the provisioning system and each obligation-owning domain report as registered reporter workloads (1.15.0) |
 | Governed by | ADR-ORG-007 §5.4, §5.5 (amended 2026-10-20) — the refusal's own type; a retry answers the invitation without its token (1.15.0) |
+| Governed by | ADR-IAM-011 §5.1, §5.6 (accepted 2026-10-20) — `POST /v1/invitations/resolve` for identity-control's workload, planned, not built (1.16.0) |
 | Conforms to | STD-GLB-001 1.7.0 — the problem type registry; a secret answered once is never in the idempotency record, tested (1.15.0) |
 | Governed by | ADR-ORG-007 — the invited person accepts an invitation, signed in as themselves; the caller must hold the invited address as a proven address (1.14.0) |
 | Depends on | `TDD-identity-control-008` — `POST /v1/principals/{principal_id}/identifiers:match`, Organization Control's workload alone (1.14.0) |
