@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-003
   title: Organization, Tenant, and Workspace Lifecycle
   owner: Core Platform Team
-  version: 1.18.0
+  version: 1.18.1
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -541,8 +541,9 @@ command in `command`; a test fails on a `POST` that is in neither. A key is refu
 (1.18.0.) Until 1.18.0 nothing removed a key, so every response a command recorded was kept for ever.
 The IETF draft asks for an expiry, published: "The resource MAY require time based idempotency keys
 to be able to purge or delete a key upon its expiry. The resource SHOULD define such expiration
-policy and publish it in the documentation" (§2.3) [R9]. `STD-GLB-001` 1.7.0 makes it a rule. This is
-the policy:
+policy and publish it in the documentation" (§2.3) [R9]. `STD-GLB-001` 1.7.0 makes it a rule, and
+`STD-GLB-001` 1.8.0 (scnehaux-architecture #108) sets the window: "The window is 7 days from
+completion", and "A service MAY publish a longer window, never a shorter one". This is the policy:
 
 - **A completed key is kept 7 days after it completed, then purged.** The daily maintenance stage,
   `organization-migrate -stage=maintenance`, calls foundation-platform's `idempotency.PurgeCompleted`
@@ -1235,6 +1236,7 @@ three.
 | Conforms to | STD-GLB-009 1.3.0 §Development Server Deployment — a procedure step is a script CI runs (1.15.0) |
 | Follows | The Twelve-Factor App, XII Admin processes and X Dev/prod parity — the deprovisioning report's stand-in, `scripts/dev-deprovisioning.ps1`, calls the real route (1.16.0) |
 | Conforms to | STD-GLB-001 1.7.0 and draft-ietf-httpapi-idempotency-key-header-07 §2.3 — completed keys are kept 7 days, then purged, and the window is published (1.18.0) |
+| Conforms to | STD-GLB-001 1.8.0 §Commands Require an Idempotency-Key — the 7-day window from completion is the standard's (1.18.1) |
 
 | # | Source |
 | :-- | :-- |

@@ -1,6 +1,6 @@
 # Runbook: Organization Database restore
 
-Version 1.2.0. Owner: Core Platform Team. Last reviewed 2026-10-20.
+Version 1.3.0. Owner: Core Platform Team. Last reviewed 2026-10-20.
 
 The Organization Database is the authority for Organizations, Tenants, Memberships, provider grants
 and offboardings, and it holds the outbox every consumer's projection is built from. This runbook
@@ -178,9 +178,17 @@ Run under the pause, in this order. Every call is a provider call with the incid
 - **Only the procedure is timed.** The drill measures it on CI data, not on a production-sized
   database, and it does not exercise `.env`, `keys/`, the server's cron, `PAUSE_REASON` or the
   Membership version advance. It does run the restore bump on the restored database (its step 8).
-- **The consumers' schedulers are not built.** Until identity-control and foundation-reference
-  reconcile themselves on their declared interval, step 1 is run for each consumer by hand, and
-  `ReconciliationRequestedAfterRestore` holds until it is.
+- **The consumers' own runs do not replace step 1** (1.3.0). Both schedulers are built (ADR-ORG-001
+  §5.7; TDD-organization-control-002 1.17.0 §Reconciliation Interval): foundation-reference runs
+  within a minute of the restore's request, and identity-control at its next 15-minute run. Either
+  run clears `ReconciliationRequestedAfterRestore`. For a Membership the consumer holds at a higher
+  version, its repair carries authority's lower version, which the consumer discards. It does not
+  read the findings as lost changes or advance a version, so step 1 is still run for each consumer by
+  hand. Until 1.3.0 this said the schedulers were not built.
+- **The restore bump runs once** (1.3.0). `restore.sh` runs it once, before the service serves. It is
+  not idempotent: a second run adds the margin again and publishes the withdrawals again. That is
+  harmless, never lowering a version or widening access, but do not run `restore-bump` by hand
+  (TDD-organization-control-002 1.17.0 §After a Restore to an Older Point).
 
 ## References
 

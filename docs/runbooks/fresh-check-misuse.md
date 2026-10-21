@@ -1,6 +1,6 @@
 # Runbook: consumer misuse of the fresh-check path
 
-Version 1.0.0. Owner: Core Platform Team. Last reviewed 2026-10-09.
+Version 1.0.1. Owner: Core Platform Team. Last reviewed 2026-10-20.
 
 `POST /v1/context/verify` is the authoritative fresh check. It is reserved for high-risk and
 irreversible operations and for a consumer whose `stale_behavior` is `revalidate` and whose projection
@@ -86,8 +86,10 @@ projection.
   reporting keeps its last ratio until it reports again.
 - The counter does not separate granted from refused checks, so probing is established from the
   consumer's side.
-- The one-interval warning on reconciliation age and an alert on a consumer that stops reporting its
-  rate are not built: no reporting interval is declared per consumer.
+- An alert on a consumer that stops reporting its rate is not built: no reporting interval is
+  declared per consumer. The reconciliation age is alerted since 2026-10-20, a warning past the
+  consumer's declared interval and critical past two (TDD-organization-control-002 1.16.0
+  §Reconciliation Interval, ADR-ORG-001 §5.7); until 1.0.1 this runbook said it was not.
 
 ## References
 

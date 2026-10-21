@@ -40,7 +40,9 @@ Two departures from the skeleton, kept on purpose:
   network, and has moved to `identity-control-api` (its README §Moving a server). This stack joins
   both networks, so it starts after them.
 - You can get a provider token from identity-control (its README §Calling the API): the ceremony's
-  Principal, `bootstrap-operator`.
+  Principal, `bootstrap-operator`. identity-control's ceremony takes two named people, an operator
+  and a witness, who are never the same (`STD-IAM-001 §3.10`): `bootstrap.sh <operator> <witness>
+  <reason>`. `deploy-dev` passes `ci@scnehaux.local` and `ci-witness@scnehaux.local`.
 - Docker with Compose v2, and your user in the `docker` group.
 - PowerShell 7 (`pwsh`) for the wiring scripts in §Wiring to other services.
 - On a network that SSL-inspects `proxy.golang.org`, as the development server's does, set
@@ -245,8 +247,15 @@ POST /v1/projections/consumers
                 "com.scnehaux.organization.membership.security.suspended","com.scnehaux.organization.membership.security.revoked",
                 "com.scnehaux.organization.tenant.lifecycle.activated","com.scnehaux.organization.tenant.lifecycle.retired",
                 "com.scnehaux.organization.tenant.security.suspended","com.scnehaux.organization.tenant.security.restored",
-                "com.scnehaux.organization.projection.repair.reconciled"]}
+                "com.scnehaux.organization.projection.repair.reconciled"],
+ "reconciliation_interval_seconds":900}
 ```
+
+`reconciliation_interval_seconds` is 900 because identity-control reconciles itself every
+`IDENTITY_ORGANIZATION_RECONCILE_INTERVAL`, 15 minutes by default (ADR-ORG-001 §5.7,
+TDD-organization-control-002 §Reconciliation Interval). This service alerts on a consumer's
+reconciliation age against the interval it declared, a warning past one and critical past two, so
+the two must agree. Change both together.
 
 The Membership, Tenant and repair types are identity-control's Tenant context projection
 (identity-control `TDD-identity-control-002` 2.3.0, `ADR-IAM-006`): it projects each Tenant as a

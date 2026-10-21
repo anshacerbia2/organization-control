@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.27.0
+  version: 1.28.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -1189,7 +1189,10 @@ daily `maintenance` stage logs each Principal with an overdue access at `WARN`, 
 the route reads, and does not fail on one, as it reports an overdue emergency grant
 (§Emergency Grant Validation).
 
-**Retention.** (1.27.0, `STD-GLB-007` 1.1.0, `ADR-ORG-002 §5.6` amended 2026-10-20.) An audit
+#### Retention
+
+(1.27.0, `STD-GLB-007` 1.1.0, `ADR-ORG-002 §5.6` amended 2026-10-20; the heading from 1.28.0, because
+`STD-GLB-007` 1.2.0 cites this design's §Retention.) An audit
 record is kept 7 years, purged after that by the maintenance stage, and never purged by a Tenant's
 decommissioning. `STD-GLB-007` names the period: audit logs are "Retained in immutable storage for
 `7 years`", and it counts this record, its reviews and the emergency uses among them. AU-11 leaves
@@ -1234,7 +1237,7 @@ the period to the organization [R7]; CIS asks for "a minimum of 90 days" (Safegu
 - **An unreviewed access leaves the report when it is purged.** The weekly report will have named it
   as overdue for 7 years by then.
 
-**The tradeoffs.**
+#### The Tradeoffs of the Review
 
 - **Providers review providers.** The reviewers also administer access, which AC-5's discussion asks
   to keep apart from administering audit [R7]. No one administers this record at runtime, the review
@@ -1297,17 +1300,17 @@ the request's `X-Administrative-Reason`; the latest row is the state. The provid
 `SELECT` and `INSERT` and no `UPDATE`, so a decision is never rewritten. No row means not paused.
 Each read and each decision is also a privileged access, recorded with the reason.
 
-**What the pause leaves to the owner.** A Membership withdrawal lost by the restore is a Tenant
-administrator's command to re-apply, and the pause refuses it; no provider route transitions one
-Membership. Meanwhile the consumer, holding the withdrawal at a higher version, keeps refusing, but
-authority and the fresh check answer granted. The containment available is a Tenant suspension, a
-provider act. The options: (a) a provider route that suspends or revokes one Membership inside a
-Tenant, through `db.WithProviderInTenant` with its reason recorded, as the offboarding freeze already
-suspends a Tenant's Memberships; (b) a pause that exempts named Tenants, so their administrators
-re-apply while the rest stay paused; (c) the Tenant suspension alone, as now. Recommendation: (a),
-because it keeps the repair with the operator who knows what was lost and leaves the Tenant
-administrator out of an incident it did not cause, and it is the act the freeze already performs.
-It widens what a provider does inside a Tenant, so it is the owner's decision (ADR-ORG-003).
+**A lost Membership withdrawal is re-applied by a provider, under the pause** (1.28.0, decided
+2026-10-20, `ADR-ORG-003 §5.6`). The pause refuses a Tenant administrator's command, so a Membership
+withdrawal the restore lost cannot be re-applied by the Tenant's own administrators. Until 1.28.0
+this section left that to the owner, with three options: (a) a provider route that suspends or
+revokes one Membership inside a Tenant; (b) a pause that exempts named Tenants; (c) the Tenant
+suspension alone. The owner chose (a). A provider in force sends
+`POST /v1/tenants/{tenant_id}/memberships/{membership_id}/suspend` or `/revoke`, with a reason, an
+`Idempotency-Key` and the expected version, through `db.WithProviderInTenant`, recorded naming the
+Tenant, which its administrators read in `GET /v1/provider-access` (§Privileged Access Review). It
+never restores or grants one (`TDD-organization-control-002` §A Provider Withdraws One Membership,
+ROADMAP backlog item 55). Provider acts are not paused, so it runs during the pause.
 
 **From before the service starts.** A pause made through the API after a restore leaves the time
 between the service starting and the call in which a Tenant administrator can still change authority.
@@ -1789,6 +1792,9 @@ administrative connection is explicitly not accepted as evidence.
   restores it, and compares every table, sequence, role and the schema with owners, grants and RLS
   policies against the source. The restarted service must answer three provider reads identically.
 - A second `restore.sh` over the restored database is refused.
+- `backup.sh` keeps exactly the newest 14 complete sets of 16 seeded, leaves a lone file and a
+  `.partial` alone, and a run against a stopped database fails and deletes nothing (§Restore Evidence
+  steps 3a and 4a, 1.28.0).
 - The drill's checks are load-bearing. One row of `platform.delivery_receipt` removed inside a
   transaction that rolls back must change the fingerprint, and the same dump restored into a
   cluster without its roles must stop on a role that does not exist.
@@ -1913,7 +1919,16 @@ the posture §Verifying the Posture at Runtime refuses to start on.
    with owners, grants, default privileges and RLS policies.
 3. `deploy/dev/backup.sh`, the operator's cron line, writes `pg_dumpall --globals-only` and
    `pg_dump --format=custom`.
+
+   3a. **Retention by count** (1.28.0, `STD-GLB-009` rule 9, 1.10.0). In a directory of its own,
+   seeded with 16 older complete sets, one lone file and one `.partial`, a backup must keep exactly
+   the newest 14 complete sets, the one it wrote among them, and leave the lone file and the
+   `.partial` alone. The rule prunes by count, never by age, so a backup that stops deletes no
+   good set.
 4. `docker compose down --volumes` deletes the volume, and the drill checks that it is gone.
+
+   4a. **A failed backup deletes nothing** (1.28.0, the same rule). A backup run while the database is
+   down must fail and leave the seeded directory as it was.
 5. `deploy/dev/restore.sh` restores into the new, empty volume: the roles, then
    `pg_restore --create --exit-on-error`. The drill fingerprints again before the migrate job runs,
    and a second `restore.sh` must refuse the now-occupied cluster.
@@ -1921,6 +1936,12 @@ the posture §Verifying the Posture at Runtime refuses to start on.
    privilege shape on the restored database. Then `/readyz`, and the three reads again.
 7. `restore-evidence.json` and the fingerprints are kept as the job's `restore-evidence` artifact
    for 90 days. The backup files are never uploaded: they hold role password hashes.
+8. **The restore bump** (1.28.0, `ADR-ORG-003 §5.5`, `STD-GLB-002` 3.3.0). Step 5 restores with
+   `RESTORE_BUMP=0`, so the comparison sees the tables as backed up. The drill then runs the bump on
+   the restored database and requires every Tenant version and security version at 10^9 or above,
+   each withdrawn Tenant published at its new version and no active one, every active consumer asked
+   to reconcile, and identity-control applying a bumped Tenant version
+   (`TDD-organization-control-002` §After a Restore to an Older Point).
 
 It fails unless schema, migration version, every table, every sequence and the roles are equal, and
 the three reads are identical. These tables must hold rows in the source: `platform.outbox`,
@@ -1949,8 +1970,11 @@ runs after the restore, so `roles.sql`, `rls.sql`, `grants.sql` and the login ro
   already holds, which the consumer discards. SAD-004 §6.6 requires a reconciliation and
   containment plan for this. From 1.22.0 the containment is §Pausing Tenant Administration and the
   reconciliation of Memberships is `TDD-organization-control-002` §After a Restore to an Older Point;
-  `docs/runbooks/organization-database-restore.md` runs both. Tenant security versions and provider
-  grant versions are not reconciled, and the drill exercises neither part.
+  `docs/runbooks/organization-database-restore.md` runs both. From 1.28.0 this records what changed
+  on 2026-10-20: Tenant versions, Tenant security versions and provider grant versions are bumped by
+  10^9 before the service serves (`ADR-ORG-003 §5.5`), and the drill proves the bump (step 8). The
+  Membership advance and the pause are proven by integration tests, not by the drill, which restores
+  to the instant of its own backup.
 - **Production size.** The duration is measured on CI data.
 - **Erasure.** This service has no right-to-erasure path, so it keeps no tombstones for a restore
   to re-apply (`STD-GLB-007` §GDPR Right-to-Erasure). When one is built, the drill proves it.
@@ -2189,6 +2213,29 @@ not pulled.
 | R19 | The Go Project, Go vulnerability database entry GO-2026-6617 (CVE-2026-97032, published 2026-10-08), <https://vuln.go.dev/ID/GO-2026-6617.json>, accessed 2026-10-18: "HTTP/2 server crash due to HPACK encoder race in net/http"; "the server modifies the HPACK encoder from two goroutines without synchronization: one uses the encoder to encode a HEADERS frame as part of a response sent to a client and the other modifies the encoder's table size when handling a SETTINGS frame containing SETTINGS_HEADER_TABLE_SIZE that a client sends. A malicious client can repeatedly send a request while changing the header table size to crash the server." Fixed in go1.26.9 and golang.org/x/net v0.60.0. |
 | R20 | Ariga, `arigaio/atlas` on Docker Hub, tag `1.3.4` (pushed 2026-10-14, `sha256:3cd6883d5ec2703741f750fd5f9efed3a61f8e164b9dcea93ab7a7be429a1b5b`), <https://hub.docker.com/r/arigaio/atlas/tags>, accessed 2026-10-18. Its `/atlas` reports `atlas version v1.3.4`, and `go version -m` on it reads `go1.26.9`, `golang.org/x/net v0.60.0` and `google.golang.org/grpc v1.83.2`. |
 
+### The Build Context
+
+1.28.0. `docker compose build` sends the build context to the builder, and the Dockerfile's build
+stage runs `COPY . .`, so every file in the context reaches a layer of the build image. `deploy-dev`
+checks sibling repositories out into this workspace (`.kernel/`, `.identity/`), and the kernel's
+`deploy/dev/keys/signing` holds its realm keystore. `.dockerignore` (from 2026-10-20, `ad76d3e`)
+leaves out the sibling checkouts, every `keys/` directory, `*.pem`, `.env`, a server's
+`compose.override.yaml`, a local `.token`, and version control and local output. The Dockerfile reads
+`go.mod`, `go.sum`, the Go source, `atlas.hcl`, `schema.hcl`, `migrations/`,
+`scripts/login-roles.sql` and `deploy/dev/migrate.sh`, and none of them is excluded.
+
+- **Why.** Docker: "You can use a `.dockerignore` file to exclude files or directories from the
+  build context" [R22]. A secret copied into a layer stays there, as one passed to the build does:
+  "Build arguments and environment variables are inappropriate for passing secrets to your build,
+  because they persist in the final image" [R23].
+- **The same file in identity-control.** identity-control made the same change (`aa31462`). No
+  standard states the rule yet; it is reported for `STD-GLB-009` §Container Images.
+
+| Ref | Source |
+| :-- | :-- |
+| R22 | Docker, *Build context*, <https://docs.docker.com/build/concepts/context/>, accessed 2026-10-20: "You can use a `.dockerignore` file to exclude files or directories from the build context." |
+| R23 | Docker, *Build secrets*, <https://docs.docker.com/build/building/secrets/>, accessed 2026-10-20: "Build arguments and environment variables are inappropriate for passing secrets to your build, because they persist in the final image." |
+
 ## Traceability
 
 | Relationship | Target |
@@ -2202,6 +2249,10 @@ not pulled.
 | Governed by | ADR-ORG-007 §5.1, §5.2 — the self caller accepts an invitation; the token selects one row through the self role (1.26.0) |
 | Governed by | ADR-ORG-002 §5.6 — the privileged-access record is read and reviewed (1.21.0); kept 7 years, purged by maintenance, never by decommissioning (amended 2026-10-20, 1.27.0) |
 | Conforms to | STD-GLB-007 1.1.0 §Data Retention Lifecycle and compliance check 4 — audit records kept 7 years, purged through a delete-only control, exempt from decommissioning (1.27.0) |
+| Conforms to | STD-GLB-007 1.2.0 §Data Retention Lifecycle and compliance check 4 — the `BEFORE DELETE` and `BEFORE TRUNCATE` triggers it describes as this service's, under the §Retention heading it cites (1.28.0) |
+| Conforms to | STD-GLB-007 1.2.1 enforcement item 4, "Where it stands" — names this service as implementing the purge, the triggers and the tests (organization-control #75, `TestTheAuditPurgeDeletesOnlyRecordsOlderThanSevenYears`, `TestTheDatabaseRefusesToDeleteAYoungAuditRecord`) (1.28.0) |
+| Governed by | ADR-ORG-003 §5.5, §5.6 (amended 2026-10-20) — the drill proves the restore bump; a provider re-applies a lost Membership withdrawal under the pause (1.28.0) |
+| Conforms to | STD-GLB-009 2.0.0 rule 9 — `backup.sh` keeps the newest 14 complete sets, and the drill proves it (1.28.0, §Restore Evidence steps 3a and 4a) |
 | Conforms to | STD-GLB-001 1.6.0 §Pagination — the list form and its time window |
 | Conforms to | STD-IAM-002 §3.1.1, §3.2, §3.5 — the grant's holder checks its own record; `principal_id` is the persisted identifier |
 | Conforms to | STD-GLB-002 — `FORCE ROW LEVEL SECURITY`, non-owner runtime role, no `SUPERUSER`/`BYPASSRLS`, isolation proven as the runtime role |
