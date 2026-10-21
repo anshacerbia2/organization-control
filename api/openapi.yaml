@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Organization Control API
-  version: 1.0.0
+  version: 1.1.0
   summary: The authority for Organizations, Tenants, Workspaces, Memberships and provider authority (SAD-004).
   description: |
     The HTTP contract of organization-control, published as a versioned artifact under ADR-GLB-010
@@ -1413,6 +1413,40 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/tenants/{tenant_id}/memberships/{membership_id}":
+    get:
+      operationId: getTenantMembership
+      summary: A provider's read of one Membership, in the Tenant the path names.
+      description: |
+        A provider in force, by an activation or an emergency grant, with the authority of the
+        provider's suspension and revocation and no more. Recorded as privileged access naming the
+        Tenant, which its administrator reads in GET /v1/provider-access. Answers what
+        `GET /v1/memberships/{membership_id}` answers; a Membership that is not in that Tenant is
+        `404`, as an absent one is. A safe read: no `Idempotency-Key`.
+      tags: [memberships]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/tenants/{tenant_id}/memberships/{membership_id}"
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/MembershipID"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          description: The Membership.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Membership"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/Unavailable"
   "/v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement":
