@@ -1237,7 +1237,7 @@ the period to the organization [R7]; CIS asks for "a minimum of 90 days" (Safegu
   stopped being in force, and is never purged while in force. A row a current decision depends on is
   state and is kept while it does. The three tables here are evidence rows: an access, a review and
   the last use of an emergency grant, which `EmergencyValidation` already reads as "never used" once
-  purged (above). None is a record of a grant or a standing, so the later-of count has no row to apply
+  purged (above); the 90-day validation reads only recent uses, so it is evidence, not state. None is a record of a grant or a standing, so the later-of count has no row to apply
   to; the grants are `organization.provider_grant`, which is not purged. The sources are the
   standard's: CA/Browser Forum BR §5.4.3 and §5.5.2, NIST AU-11, OMB M-21-31.
 - **Decommissioning purges none.** Retiring a Tenant through offboarding deletes no audit record,

@@ -935,8 +935,8 @@ POST /v1/tenants/{tenant_id}/memberships/{membership_id}/revoke     {"expected_v
     changes the record or reads it, and the privileged-access row names the Tenant, so the Tenant's
     administrators see the read in `GET /v1/provider-access` (`ADR-ORG-003 §5.6`; AC-6, AC-6(9)).
   - **The reason header.** `X-Administrative-Reason` is required, like the commands. An eligible holder
-    is refused before a transaction opens. The owner may drop it for a read; that is recorded as an
-    open choice in `ADR-ORG-003`.
+    is refused before a transaction opens. A read needs it too: the decision is `ADR-ORG-003 §5.6`
+    (amended 2026-10-21).
   - **One Membership, `404` otherwise.** It answers that Membership's identifier, state and
     `expected_version`, in the shape of the Tenant administrator's `GET /v1/memberships/{membership_id}`.
     The Membership is read under the path Tenant's policy, so one that is not in that Tenant answers

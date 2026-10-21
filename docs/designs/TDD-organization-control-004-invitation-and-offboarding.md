@@ -474,8 +474,8 @@ built (ROADMAP backlog item 56).
   `reporter` and, in its detail, the registry entry's purpose `invitation:resolve`, because NIST AU-3
   asks a record to establish "What type of event occurred" (`ADR-IAM-011 §5.7`). It names no Tenant: a
   call that finds nothing names none, and a call that finds an invitation must not differ. It is
-  reviewed through the workload's owner. A new authority value would be cleaner and needs a schema
-  change; that is the owner's open choice in `ADR-IAM-011`.
+  reviewed through the workload's owner. The authority is `reporter` and the purpose is in the
+  detail; no new authority value and no schema change (`ADR-IAM-011 §5.7`, `ADR-ORG-001 §5.11`).
 - **Calls are bounded** by identity-control's limits per invitation and per client address
   (`ADR-IAM-011 §5.2`).
 
