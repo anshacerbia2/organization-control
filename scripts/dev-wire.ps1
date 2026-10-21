@@ -13,7 +13,11 @@
 #   6b. the development reporters: a workload per stand-in of STD-GLB-009 rule 13, each with its own key,
 #      registered here for what it reports (ADR-ORG-001 §5.11, amended 2026-10-20): provisioning, and
 #      obligation:product, :hcm, :billing and :audit. scripts/dev-provisioning.ps1, dev-deprovisioning.ps1
-#      and dev-obligation.ps1 report as them.
+#      and dev-obligation.ps1 report as them;
+#   6c. identity-control's own workload registered here as the invitation:resolve entry, which admits it
+#      to POST /v1/invitations/resolve alone (ADR-IAM-011 §5.7 (a), ADR-ORG-001 §5.11, amended
+#      2026-10-21). It is the workload step 2 made, with the key identity-control signs in with: no
+#      second client and no development flag. Its consumer registration (step 4) is another entry.
 #
 # It is run once per pair of databases. Each creation is refused when it was made before, and the
 # script stops there.
@@ -231,6 +235,17 @@ foreach ($reports in @("provisioning", "obligation:product", "obligation:hcm", "
     $reporters[$reports] = [ordered]@{ client_id = $name; key_file = (Join-Path $callerKeys "$name.pem")
         principal_id = $workload.principal_id }
 }
+
+Write-Host "6c. identity-control's invitation:resolve entry"
+# The same workload and key as identity-control's consumer, registered for a second, separate act:
+# each route has its own entry (ADR-IAM-011 §5.7 (a), NIST SP 800-53 AC-6). The state names it beside
+# the reporters so scripts/dev-wiring-proof.ps1 step 11 can sign in as it where the key is readable.
+$null = Require "identity-control-workload registered as the invitation:resolve entry" (Send-Json "POST" "$organizationApi/v1/reporters" (@{
+            principal_id = $identityWorkload.principal_id; reports = "invitation:resolve"
+            purpose = "identity-control resolves an invitation token for an enrolment (ADR-IAM-011 §5.7)"
+        } | ConvertTo-Json -Compress) $token "wire-reporter-invitation-resolve") 201
+$reporters["invitation:resolve"] = [ordered]@{ client_id = "identity-control-workload"
+    key_file = (Join-Path $identityDeploy "keys/identity-control-workload.pem"); principal_id = $identityWorkload.principal_id }
 
 @{ operator_principal_id = $operatorPrincipal; organization_workload_principal_id = $organizationWorkload.principal_id
     identity_workload_principal_id = $identityWorkload.principal_id; caller_client_id = "dev-provider-caller"

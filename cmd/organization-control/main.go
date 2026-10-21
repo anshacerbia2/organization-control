@@ -279,6 +279,17 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("invitation service: %w", err)
 	}
+	// identity-control's resolve of an invitation token for an enrolment, on the tenant connections as
+	// organization_invitation_resolver_rt, each call recorded by the provider-side recorder
+	// (ADR-IAM-011 §5.7 (a), (c)).
+	invitationResolverPool, err := db.NewInvitationResolverPool(tenantConns, recorder)
+	if err != nil {
+		return fmt.Errorf("invitation resolver pool: %w", err)
+	}
+	invitationResolver, err := invitation.NewResolver(invitationResolverPool)
+	if err != nil {
+		return fmt.Errorf("invitation resolver: %w", err)
+	}
 	offboardings, err := offboarding.New(providerPool, tenantPool, tenants, memberships)
 	if err != nil {
 		return fmt.Errorf("offboarding service: %w", err)
@@ -431,7 +442,8 @@ func run() error {
 			Memberships: memberships, Tenants: tenants, Provisioning: provisioning,
 			Organizations: organizations,
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
-			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts, ContextList: contextList,
+			InvitationResolver: invitationResolver,
+			Registry:           registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts, ContextList: contextList,
 			Replayer: replayer, Resolver: resolver, DeadLetters: deadLetters,
 			ProviderGrants:       providerGrants,
 			ProviderActivations:  providerActivations,

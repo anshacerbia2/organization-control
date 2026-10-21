@@ -82,6 +82,15 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_consumer_rt') THEN
         CREATE ROLE organization_consumer_rt NOLOGIN NOSUPERUSER NOCREATEDB NOBYPASSRLS;
     END IF;
+
+    -- identity-control's workload resolving an invitation token for an enrolment (ADR-IAM-011 §5.7
+    -- (c)). No login of its own: the tenant connections SET LOCAL ROLE to it for that one read, and
+    -- grants.sql makes it a role organization_rt may set and does not inherit. It reads two columns of
+    -- the one pending, unexpired invitation its bound token hash selects, and writes nothing
+    -- (TDD-organization-control-001 §Roles).
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'organization_invitation_resolver_rt') THEN
+        CREATE ROLE organization_invitation_resolver_rt NOLOGIN NOSUPERUSER NOCREATEDB NOBYPASSRLS;
+    END IF;
 END
 $$;
 
@@ -101,6 +110,7 @@ ALTER ROLE organization_dispatch_rt   NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROL
 ALTER ROLE organization_resolution_rt NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 ALTER ROLE organization_consumer_rt   NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 ALTER ROLE organization_self_rt       NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+ALTER ROLE organization_invitation_resolver_rt NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
 
 -- The schemas are NOT created here. Atlas creates them, and that differs from
 -- identity-control on purpose.

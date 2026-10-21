@@ -260,6 +260,25 @@ CREATE POLICY invitation_self_redeem ON invitation.invitation
     TO organization_self_rt
     USING (token_hash = current_setting('app.invitation_token_hash', false));
 
+-- invitation.invitation, read by the invitation resolver role (ADR-IAM-011 §5.7 (c)).
+--
+-- db.WithInvitationResolver sets the role and binds app.invitation_resolve_hash to the SHA-256 of the
+-- token identity-control presented, and this SELECT policy shows the one row holding that hash, and
+-- only while it is pending and not past its expiry. PostgreSQL: rows "for which the expression returns
+-- false or null will not be visible" (CREATE POLICY). So an unknown, expired, revoked or accepted
+-- token is one empty result, made by the database. The role reads two columns and no statement it runs
+-- names the hash: token_hash is unique across the table, so at most one row is visible. now() is the
+-- transaction's start, one instant for the whole read. missing_ok is false, as for the self role. Not a
+-- view of the pending invitations, which would let the role list every pending address across Tenants
+-- (STD-GLB-002 §Aggregate Reads Under Row-Level Security).
+DROP POLICY IF EXISTS invitation_resolver_read ON invitation.invitation;
+CREATE POLICY invitation_resolver_read ON invitation.invitation
+    FOR SELECT
+    TO organization_invitation_resolver_rt
+    USING (token_hash = current_setting('app.invitation_resolve_hash', false)
+           AND state = 'pending'
+           AND expires_at > now());
+
 -- membership.tenant_admin_grant, written by a provider only (ADR-ORG-003 §5.2).
 --
 -- The loop above gives the tenant role its policy here, as on every table in the schema. The writes

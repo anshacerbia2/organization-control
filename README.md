@@ -268,7 +268,7 @@ names, and `sub` is not read.
 | Tenant administrator | `subject_type` `human`, `tenant_id`, `acr` `aal2` or higher, `auth_time` | in that Tenant: an active Membership, the Tenant active, and a tenant administration grant (ADR-ORG-003) |
 | Provider | `subject_type` `human`, `acr`, `auth_time`, no `tenant_id` | a provider grant for the `principal_id` |
 | Projection consumer | `subject_type` `workload`, `workload_owner`, no `tenant_id` | an active consumer registered with the `principal_id` |
-| Reporter (2026-10-20) | `subject_type` `workload`, `workload_owner`, no `tenant_id`, on a report route | an active reporter registered with the `principal_id` for what the route reports: `provisioning` on the three provisioning reports, `obligation:<domain>` on that domain's `/resolve` (ADR-ORG-001 §5.11, `GET /v1/reporters`) |
+| Reporter (2026-10-20) | `subject_type` `workload`, `workload_owner`, no `tenant_id`, on a report route | an active reporter registered with the `principal_id` for what the route reports: `provisioning` on the three provisioning reports, `obligation:<domain>` on that domain's `/resolve`, `invitation:resolve` on `POST /v1/invitations/resolve` alone (ADR-ORG-001 §5.11, ADR-IAM-011 §5.7, `GET /v1/reporters`) |
 | Self | `subject_type` `human`, with or without `tenant_id`, on `GET /v1/principals/{own principal_id}/contexts` (ADR-ORG-005) or `POST /v1/invitations/accept` (ADR-ORG-007) | none: the route reaches the caller's own rows, and acceptance creates the caller's own Membership |
 
 A revoked grant, a retired consumer, a revoked Membership or a suspended Tenant stops at the next
@@ -284,6 +284,18 @@ The token selects one invitation. The Identity Control API is asked whether the 
 invited address as a proven address, and the Membership is created for the caller alone. Every
 failed lookup and a mismatch answer the same `404`. `POST /v1/invitations/verify-identity` and the
 `identity_verified` state are gone.
+
+**identity-control resolves an invitation token for an enrolment** (ADR-IAM-011 §5.7, TDD-004 1.18.0):
+
+```text
+POST  /v1/invitations/resolve         {"token": "..."}    identity-control's invitation:resolve entry alone
+```
+
+It answers `{"invitation_id", "target_identifier"}` for a `pending`, unexpired invitation, and one
+`404` `invitation-not-acceptable`, the same bytes, for an unknown, expired, revoked or accepted token.
+It names no Tenant and changes nothing. It reads as `organization_invitation_resolver_rt`, whose one
+policy admits the row of the bound token hash only while it is pending and unexpired, and each call
+is recorded with the authority `reporter` and the reason `invitation:resolve`.
 
 **A Tenant's administrators** are granted by a provider, with `X-Administrative-Reason`:
 

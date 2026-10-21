@@ -49,13 +49,17 @@ type Services struct {
 	Organizations *organization.Service
 	Workspaces    *workspace.Service
 	Invitations   *invitation.Service
-	Offboardings  *offboarding.Service
-	Registry      *projection.Registry
-	Frontier      *projection.FrontierReader
-	Publisher     *projection.Publisher
-	Reconciler    *projection.Reconciler
-	Replayer      *projection.Replayer
-	Resolver      *projection.Resolver
+
+	// InvitationResolver answers identity-control's resolve of an invitation token for an enrolment,
+	// as organization_invitation_resolver_rt (ADR-IAM-011 §5.7).
+	InvitationResolver *invitation.Resolver
+	Offboardings       *offboarding.Service
+	Registry           *projection.Registry
+	Frontier           *projection.FrontierReader
+	Publisher          *projection.Publisher
+	Reconciler         *projection.Reconciler
+	Replayer           *projection.Replayer
+	Resolver           *projection.Resolver
 
 	// DeadLetters lists one consumer's dead letters (TDD-organization-control-005 2.5.0).
 	DeadLetters *projection.DeadLetterReader
@@ -229,6 +233,10 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// Tenant needed. The token in the body selects the invitation, and its row names the Tenant.
 	api.HandleFunc("POST /v1/invitations/accept", command(h.acceptInvitation))
 
+	// identity-control's workload alone, from its invitation:resolve registry entry (ADR-IAM-011 §5.7
+	// (a)). It changes nothing, so it takes no Idempotency-Key.
+	api.HandleFunc("POST /v1/invitations/resolve", h.resolveInvitation)
+
 	// Provider-scoped.
 	api.HandleFunc("POST /v1/invitations/expire-lapsed", h.expireLapsedInvitations)
 
@@ -386,6 +394,8 @@ func (s Services) validate() error {
 		return errors.New("httpapi: the workspace service is required")
 	case s.Invitations == nil:
 		return errors.New("httpapi: the invitation service is required")
+	case s.InvitationResolver == nil:
+		return errors.New("httpapi: the invitation resolver is required")
 	case s.Offboardings == nil:
 		return errors.New("httpapi: the offboarding service is required")
 	case s.Registry == nil:

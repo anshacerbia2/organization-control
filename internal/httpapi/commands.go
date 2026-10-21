@@ -82,6 +82,8 @@ var keyOptional = map[string]string{
 		"other direction: the same outcome sent again records the same state",
 	"POST /v1/provisioning/sweep-unresolved": "a sweep: a repeat finds nothing left to age",
 	"POST /v1/invitations/expire-lapsed":     "a sweep: a repeat finds nothing left to expire",
+	"POST /v1/invitations/resolve": "a read: it changes nothing, so a repeat answers the same and " +
+		"records one more access (ADR-IAM-011 §5.7)",
 	"POST /v1/dead-letters/{event_id}/consumers/{consumer}/replay": "honoured, not required, by " +
 		"TDD-organization-control-005: a replay re-sends a delivery the consumer deduplicates by event_id",
 	"POST /v1/dead-letters/{event_id}/consumers/{consumer}/resolve": "honoured, not required, by " +

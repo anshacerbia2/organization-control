@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.17.0
+  version: 1.18.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -352,7 +352,7 @@ POST   /v1/invitations/expire-lapsed
 Unauthenticated
 POST   /v1/invitations/lookup
 
-Planned, not built (1.16.0, ADR-IAM-011 §5.6, §5.7 in 1.17.0): identity-control's workload alone, registry entry `invitation:resolve`
+Reporter `invitation:resolve` (built 1.18.0, ADR-IAM-011 §5.7): identity-control's workload alone
 POST   /v1/invitations/resolve
 ```
 
@@ -429,8 +429,8 @@ and the replay against the engine. Organization Experience shows a replay as suc
 key per set of values across a reset, so issuing again with the same values replayed the first issue
 with no token for the link.
 
-**Resolving an invitation for an enrolment** (1.16.0, planned, not built; `ADR-IAM-011 §5.1`, §5.6,
-accepted 2026-10-20). An invited person with no account enrols at identity-control's anonymous
+**Resolving an invitation for an enrolment** (1.16.0, designed in 1.17.0, built in 1.18.0;
+`ADR-IAM-011 §5.1`, §5.6, accepted 2026-10-20, §5.7 amended 2026-10-21). An invited person with no account enrols at identity-control's anonymous
 `POST /v1/enrolments`, and identity-control asks this service, as its workload, which invitation the
 token names. `ADR-IAM-011 §5.6` assigns this design `POST /v1/invitations/resolve`:
 
@@ -441,8 +441,8 @@ token names. `ADR-IAM-011 §5.6` assigns this design `POST /v1/invitations/resol
   person, signed in, once the enrolment has made an account.
 
 Three points `ADR-IAM-011 §5.1` left to this design are decided in `ADR-IAM-011 §5.7` (amended
-2026-10-21) and `ADR-ORG-001 §5.11`, and the design follows them (1.17.0). The code is planned, not
-built (ROADMAP backlog item 56).
+2026-10-21) and `ADR-ORG-001 §5.11`, and the design follows them (1.17.0). Built in 1.18.0 (ROADMAP
+item 56), as below.
 
 - **(a) The caller is admitted from a registry row, for this route alone.** The reporter registry
   (§Reporters in `TDD-organization-control-001`) gains a third kind of `reports`, `invitation:resolve`,
@@ -478,6 +478,45 @@ built (ROADMAP backlog item 56).
   detail; no new authority value and no schema change (`ADR-IAM-011 §5.7`, `ADR-ORG-001 §5.11`).
 - **Calls are bounded** by identity-control's limits per invitation and per client address
   (`ADR-IAM-011 §5.2`).
+
+**As built (1.18.0).** `POST /v1/invitations/resolve` takes `{"token": "<token>"}` and no
+`Idempotency-Key`: it changes nothing, so a repeat answers the same and records one more access
+(`internal/httpapi/commands.go` names it key-optional with that reason).
+
+| Outcome | Answer |
+| :-- | :-- |
+| A `pending` invitation not past its expiry | `200` `{"invitation_id": "<uuid>", "target_identifier": "<address as stored>"}`, `Cache-Control: no-store`; no Tenant, Workspace or state |
+| Unknown, expired, revoked or accepted | `404` `invitation-not-acceptable`, detail `The invitation cannot be accepted`, the same bytes for each: type, title, status, detail and instance are constants or the route, and `correlation_id` is the request's own |
+| A body that is not `{"token": ...}`, an unknown field, or a token that is not well formed | `400` `validation-failed`, before any read and any record |
+| Any caller but the `invitation:resolve` entry: a person, a provider, a Tenant administrator, another reporter, a consumer, an unregistered workload | `403` |
+| The records could not be read | `503` |
+
+- **Admission.** `invitation:resolve` is the third kind of `reports` (`authority.ReportsInvitationResolve`),
+  and the registry's check constraint admits it from migration `20261021132136`. Authentication
+  classes the route as the report `invitation` and admits a workload whose active reporter entry is
+  `invitation:resolve`, and no other; that entry fails every other report route's check, and on a route
+  that is no report it is authorized as any workload is, so it reaches nothing it is not separately
+  registered for. The handler refuses anyone else again before it reads the body.
+- **The scope and the read.** The caller resolves to `db.InvitationResolverScope`, which names no
+  Tenant, carries the reporter authority and opens `db.WithInvitationResolver` alone; every other entry
+  point refuses it. That wrapper writes the access record first, on the recorder's own connection, then
+  opens a read-only transaction on the tenant connections, sets `organization_invitation_resolver_rt`
+  LOCAL and binds `app.invitation_resolve_hash` to the token's SHA-256. The role has no login, is a role
+  `organization_rt` may set and does not inherit, and holds `SELECT (invitation_id, target_identifier)`
+  on `invitation.invitation` and nothing else (`internal/controldb/roles.sql`, `grants.sql`). The one
+  statement is `SELECT invitation_id::text, target_identifier FROM invitation.invitation`, with no
+  `WHERE`: `invitation_resolver_read` (`rls.sql`) admits the row whose `token_hash` is the bound value,
+  `state = 'pending'` and `expires_at > now()`, so the database returns that row or nothing. A
+  policy's columns need no grant, so the role cannot read the hash, the Tenant, the state or the expiry
+  it is filtered by. The policy is in `posture.AdditionalPolicies` and the role in `posture.RuntimeRoles`.
+- **One lookup, one record, whatever the outcome.** Every well-formed request writes one record and runs
+  one statement. The record names the workload, authority `reporter`, reason `invitation:resolve`
+  (`db.InvitationResolvePurpose`), the route, and no Tenant, even when the row has one: the record does
+  not differ between a token that names an invitation and one that names nothing. A record that cannot
+  be written stops the read.
+- **Expiry is the database's clock.** The policy compares `expires_at` with the transaction's `now()`,
+  so an invitation past its expiry that the sweep has not reached is not resolved, as acceptance refuses
+  it (§Expiry Sweep).
 
 The lookup's constant `next` is `accept` from 1.14.0, where it was `verify-identity`.
 
@@ -1103,6 +1142,16 @@ re-used" [R8].
 ### Enumeration
 
 - Absent, expired, revoked, and accepted invitations produce identical responses.
+- The resolve (1.18.0): bound to a pending, unexpired token's hash, the resolver role reads that one
+  invitation's identifier and address with a statement naming no row; bound to an expired, revoked,
+  accepted or unknown one it reads nothing; it cannot read `token_hash`, `tenant_id`, `state` or
+  `expires_at`, any other table, or write; unbound it raises or reads nothing; the tenant role gains
+  nothing from its policy (`internal/controldb`). The service answers the one refusal for the four
+  outcomes and writes one identical record for every call, the pending one included
+  (`internal/invitation`). Only the `invitation:resolve` entry is admitted, and it is refused on every
+  other report route (`internal/httpapi`). On every `deploy-dev` run, against the real kernel and the
+  development registration, an unknown, a revoked and an accepted token's refusals are compared byte
+  for byte, and each resolve's record is read back (`scripts/dev-wiring-proof.ps1` step 11).
 - The lookup discloses no Tenant name, inviter, or target identifier.
 - Response time distributions do not separate a valid token from an absent one.
 
@@ -1270,6 +1319,8 @@ and sends a failed deprovisioning again. Written (1.11.0):
 | Governed by | ADR-ORG-007 §5.4, §5.5 (amended 2026-10-20) — the refusal's own type; a retry answers the invitation without its token (1.15.0) |
 | Governed by | ADR-IAM-011 §5.1, §5.6 (accepted 2026-10-20) — `POST /v1/invitations/resolve` for identity-control's workload, planned, not built (1.16.0) |
 | Governed by | ADR-IAM-011 §5.7 (amended 2026-10-21) and ADR-ORG-001 §5.11 — the `invitation:resolve` registry entry, the one `404`, `db.WithInvitationResolver`, the audit purpose (1.17.0, §API / Interface) |
+| Governed by | ADR-IAM-011 §5.7 (a) to (c) — `POST /v1/invitations/resolve` built: the entry, the resolver scope and role, `invitation_resolver_read`, one record per call (1.18.0, §API / Interface) |
+| Consumed by | `TDD-identity-control-001` §Enrolment From an Invitation — the resolve client (1.18.0) |
 | Conforms to | STD-GLB-001 1.7.0 — the problem type registry; a secret answered once is never in the idempotency record, tested (1.15.0) |
 | Governed by | ADR-ORG-007 — the invited person accepts an invitation, signed in as themselves; the caller must hold the invited address as a proven address (1.14.0) |
 | Depends on | `TDD-identity-control-008` — `POST /v1/principals/{principal_id}/identifiers:match`, Organization Control's workload alone (1.14.0) |

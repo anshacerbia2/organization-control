@@ -22,6 +22,7 @@ import (
 var runtimeRoles = []string{
 	"organization_rt", "organization_provider_rt", "organization_consumer_rt",
 	"organization_resolution_rt", "organization_dispatch_rt", "organization_self_rt",
+	"organization_invitation_resolver_rt",
 }
 
 // TestNoRuntimeRoleCanPurgeIdempotencyKeys: the purge is the maintenance stage's, as the table's

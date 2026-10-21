@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Organization Control API
-  version: 1.1.0
+  version: 1.2.0
   summary: The authority for Organizations, Tenants, Workspaces, Memberships and provider authority (SAD-004).
   description: |
     The HTTP contract of organization-control, published as a versioned artifact under ADR-GLB-010
@@ -50,6 +50,10 @@ info:
     - `reporter:obligation`: a registered reporter workload for `obligation:<domain>`, and only for an
       obligation raised against that domain; the body's `domain` must be the reporter's. Anyone else,
       a provider included, is answered `403`.
+    - `reporter:invitation-resolve`: identity-control's registered workload, from its
+      `invitation:resolve` reporter entry (ADR-IAM-011 §5.7 (a), 1.2.0). That entry reaches this route
+      alone, and anyone else, a provider and every other reporter included, is answered `403`. Each
+      call is recorded with the authority `reporter` and the purpose `invitation:resolve`.
 
     **Commands** (STD-GLB-001 §Commands Require an Idempotency-Key, TDD-organization-control-003
     §The Idempotency-Key Is Required on Commands). Every POST is classified in
@@ -117,7 +121,7 @@ tags:
   - name: recovery
     description: "Recovery after a restore to an older point (TDD-organization-control-001, -002)."
   - name: reporters
-    description: "Registered reporter workloads: the provisioning system and the domains owning offboarding obligations."
+    description: "Registered reporter workloads: the provisioning system, the domains owning offboarding obligations, and identity-control resolving an invitation token."
 paths:
   "/healthz":
     get:
@@ -882,6 +886,50 @@ paths:
           $ref: "#/components/responses/InvitationNotAcceptable"
         "409":
           $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/invitations/resolve":
+    post:
+      operationId: resolveInvitation
+      summary: Resolve an invitation token for identity-control's enrolment (ADR-IAM-011 §5.1, §5.7).
+      description: |
+        identity-control's registered workload alone (route class `reporter:invitation-resolve`),
+        asking which invitation a token names before an account exists. It answers the invitation's
+        identifier and target address, only for an invitation that is `pending` and not past its
+        expiry, and names no Tenant. An unknown, expired, revoked or accepted token is one `404` of
+        type `invitation-not-acceptable`, with the same status, type, title, detail and instance, and
+        no field derived from a row; identity-control never forwards it. One lookup by the token's
+        hash runs whatever the outcome. A malformed body or token is `400` and says nothing about
+        invitations. It changes nothing, so it takes no `Idempotency-Key`. Added in 1.2.0.
+      tags: [invitations]
+      x-route-class: reporter:invitation-resolve
+      x-mux-pattern: "POST /v1/invitations/resolve"
+      requestBody:
+        $ref: "#/components/requestBodies/InvitationToken"
+      responses:
+        "200":
+          description: The pending, unexpired invitation the token names. Sent with `Cache-Control` `no-store`.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [invitation_id, target_identifier]
+                properties:
+                  invitation_id:
+                    type: string
+                    format: uuid
+                  target_identifier:
+                    type: string
+                    description: The invited address, as the invitation stores it.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/InvitationNotAcceptable"
         "503":
           $ref: "#/components/responses/Unavailable"
   "/v1/invitations/expire-lapsed":
@@ -3565,7 +3613,7 @@ paths:
           $ref: "#/components/responses/Unavailable"
     post:
       operationId: registerReporter
-      summary: Register a workload as a reporter for provisioning or for one domain's obligations.
+      summary: Register a workload as a reporter for provisioning, for one domain's obligations, or for the invitation resolve.
       description: A principal_id already registered, in any state, is answered 409 state-transition-refused.
       tags: [reporters]
       x-route-class: provider
@@ -4277,8 +4325,8 @@ components:
       enum: [provider:organization-control, provider:identity-control]
     ReporterReports:
       type: string
-      pattern: "^(provisioning|obligation:[a-z0-9-]{1,63})$"
-      description: What the reporter reports. `provisioning`, or `obligation:<domain>` for one domain's obligations.
+      pattern: "^(provisioning|invitation:resolve|obligation:[a-z0-9-]{1,63})$"
+      description: What the reporter reports. `provisioning`, `obligation:<domain>` for one domain's obligations, or `invitation:resolve` for identity-control's resolve of an invitation token (1.2.0).
 
     Membership:
       type: object

@@ -67,7 +67,7 @@ var RLSSchemas = []string{"tenant", "workspace", "membership", "invitation", "op
 // RuntimeRoles are the roles that carry request traffic under Row-Level Security. None may own a
 // table or hold an attribute that would make a policy inert.
 var RuntimeRoles = []string{"organization_rt", "organization_provider_rt", "organization_consumer_rt",
-	"organization_self_rt"}
+	"organization_self_rt", "organization_invitation_resolver_rt"}
 
 // AdditionalPolicies are the policies a table may carry beyond its tenant-scope and provider-scope
 // pair, by name. Anything else found on a protected table is a problem.
@@ -85,6 +85,10 @@ var RuntimeRoles = []string{"organization_rt", "organization_provider_rt", "orga
 // organization_self_rt, which the tenant role may SET ROLE to and does not inherit. A fourth,
 // invitation_self_redeem, serves the same role reading the one invitation its token selects
 // (ADR-ORG-007 §5.2).
+//
+// invitation_resolver_read serves identity-control's resolve of an invitation token for an enrolment,
+// as organization_invitation_resolver_rt, which the tenant role may SET ROLE to and does not inherit:
+// the one pending, unexpired row the bound token hash selects (ADR-IAM-011 §5.7 (c)).
 //
 // membership.tenant_admin_grant is written by a provider only, as the tenant role inside one Tenant
 // (ADR-ORG-003). Two restrictive policies keep the tenant role's writes a provider's.
@@ -114,7 +118,8 @@ var AdditionalPolicies = map[string][]string{
 	"operation.offboarding":            {"offboarding_signals_read"},
 	"operation.offboarding_obligation": {"offboarding_obligation_signals_read"},
 	"tenant.provisioning_request":      {"provisioning_request_signals_read", "provisioning_request_sweep"},
-	"invitation.invitation":            {"invitation_expiry_read", "invitation_expiry", "invitation_self_redeem"},
+	"invitation.invitation": {"invitation_expiry_read", "invitation_expiry", "invitation_self_redeem",
+		"invitation_resolver_read"},
 }
 
 // TableProtection is the posture of one table.

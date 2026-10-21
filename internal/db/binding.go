@@ -77,6 +77,7 @@ type Scope struct {
 	provider    bool
 	consumer    bool
 	self        bool
+	resolver    bool
 	actor       id.UUID
 	correlation id.UUID
 
@@ -213,8 +214,28 @@ func SelfScope(actor, correlation id.UUID) (Scope, error) {
 	return Scope{self: true, actor: actor, correlation: correlation}, nil
 }
 
+// InvitationResolverScope resolves identity-control's registered workload asking which invitation a
+// token names, for an enrolment (ADR-IAM-011 §5.7 (c)).
+//
+// It names no Tenant, because a token is resolved before one is known, and it is not the provider
+// scope, which needs a Tenant, an actor and recorded access for provider work (§5.7 (c)). It opens
+// only WithInvitationResolver; every other entry point refuses it. Its authority is a reporter's, so
+// the access record each call writes says it was a registered workload and not provider personnel.
+func InvitationResolverScope(actor, correlation id.UUID) (Scope, error) {
+	if actor.IsNil() {
+		return Scope{}, errors.New("db: an invitation resolver scope requires an acting subject")
+	}
+	if correlation.IsNil() {
+		return Scope{}, errors.New("db: an invitation resolver scope requires a correlation identifier")
+	}
+	return Scope{resolver: true, actor: actor, correlation: correlation, authority: ReporterAuthority()}, nil
+}
+
 // IsSelf reports whether this scope is a person's own.
 func (s Scope) IsSelf() bool { return s.self }
+
+// IsInvitationResolver reports whether this scope is identity-control's invitation resolve.
+func (s Scope) IsInvitationResolver() bool { return s.resolver }
 
 // IsProvider reports whether this scope is the cross-Tenant provider one.
 func (s Scope) IsProvider() bool { return s.provider }
@@ -585,6 +606,83 @@ func WithSelfInvitation(ctx context.Context, pool *SelfPool, tokenHash string, f
 		}
 		if _, err := tx.Exec(ctx,
 			`SELECT set_config('app.invitation_token_hash', $1, true)`, tokenHash); err != nil {
+			return fmt.Errorf("db: bind the invitation token: %w", err)
+		}
+		return fn(ctx, tx)
+	})
+}
+
+// InvitationResolverPool carries identity-control's resolve of an invitation token (ADR-IAM-011 §5.7
+// (c)). It holds the tenant connections and runs every transaction as
+// `organization_invitation_resolver_rt`, which `organization_rt` may SET ROLE to and does not inherit,
+// and the privileged-access recorder, without which it cannot be constructed: each call is recorded
+// (§5.7 (a)).
+type InvitationResolverPool struct {
+	tx       Transactor
+	recorder PrivilegedRecorder
+}
+
+// NewInvitationResolverPool wraps the tenant connections for the invitation resolve.
+func NewInvitationResolverPool(tx Transactor, recorder PrivilegedRecorder) (*InvitationResolverPool, error) {
+	if tx == nil {
+		return nil, errors.New("db: a transaction source is required")
+	}
+	if recorder == nil {
+		return nil, errors.New("db: an invitation resolver pool requires a privileged-access recorder")
+	}
+	return &InvitationResolverPool{tx: tx, recorder: recorder}, nil
+}
+
+// invitationResolverRole is the role every invitation resolve runs as.
+const invitationResolverRole = "organization_invitation_resolver_rt"
+
+// InvitationResolvePurpose is the reason each resolve's privileged-access record carries: the
+// registry entry's purpose, so the record says what type of event occurred (NIST SP 800-53 AU-3,
+// ADR-IAM-011 §5.7 (a)). The authority alone, reporter, would not.
+const InvitationResolvePurpose = "invitation:resolve"
+
+// WithInvitationResolver runs fn in a read-only transaction as the invitation resolver role, bound to
+// the hash of the token identity-control presented (ADR-IAM-011 §5.7 (c)).
+//
+// It is the only code that binds app.invitation_resolve_hash. The role reaches invitation.invitation
+// through one SELECT policy, invitation_resolver_read, which admits the row holding that hash only
+// while it is pending and unexpired, and the role is granted its identifier and target address alone.
+// So fn sees at most one row, and an unknown, expired, revoked or accepted invitation is the same empty
+// result, made by the database rather than by fn.
+//
+// The access is recorded first, on the recorder's own connection, with the reporter authority, the
+// purpose invitation:resolve and no Tenant, for every call whatever it finds (§5.7 (a)): the record
+// is the same for a token that names an invitation and one that names nothing. It makes no
+// idempotency claim: it changes nothing.
+func WithInvitationResolver(ctx context.Context, pool *InvitationResolverPool, tokenHash string, fn Body) error {
+	if pool == nil {
+		return errors.New("db: an invitation resolver pool is required")
+	}
+	if tokenHash == "" {
+		return errors.New("db: an invitation resolve requires the token's hash")
+	}
+	scope, ok := ScopeFrom(ctx)
+	if !ok {
+		return ErrNoScope
+	}
+	if !scope.IsInvitationResolver() {
+		return fmt.Errorf("%w: only the invitation resolver scope resolves an invitation token", ErrWrongScope)
+	}
+	access := scope.Evidence(ctx, InvitationResolvePurpose)
+	// The resolve names no Tenant, so its record names none, whatever the route context says.
+	access.Tenant = id.UUID{}
+	if err := pool.recorder.RecordProviderAccess(ctx, access); err != nil {
+		return fmt.Errorf("db: record invitation resolve: %w", err)
+	}
+	return pool.tx.InTx(ctx, func(ctx context.Context, tx Tx) error {
+		if _, err := tx.Exec(ctx, `SET TRANSACTION READ ONLY`); err != nil {
+			return fmt.Errorf("db: enter read-only: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `SET LOCAL ROLE `+invitationResolverRole); err != nil {
+			return fmt.Errorf("db: become the invitation resolver role: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`SELECT set_config('app.invitation_resolve_hash', $1, true)`, tokenHash); err != nil {
 			return fmt.Errorf("db: bind the invitation token: %w", err)
 		}
 		return fn(ctx, tx)

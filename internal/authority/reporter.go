@@ -4,8 +4,9 @@ package authority
 // §Reporters).
 //
 // A reporter is a workload Principal this platform registered to report one kind of outcome: the
-// provisioning system reports the three provisioning outcomes, and an obligation-owning domain
-// resolves the obligations raised against it. It is admitted from this record, never from a role or
+// provisioning system reports the three provisioning outcomes, an obligation-owning domain
+// resolves the obligations raised against it, and identity-control resolves an invitation token for an
+// enrolment (invitation:resolve, ADR-IAM-011 §5.7 (a), amended 2026-10-21). It is admitted from this record, never from a role or
 // a scope in its token: "Access should also be granted with the least privileges needed to complete
 // the task" (NIST SP 800-207 §2.1), and a record here is retired here, without a change to the
 // kernel.
@@ -50,6 +51,11 @@ var (
 // POST /v1/provisioning/failed and POST /v1/offboardings/{offboarding_id}/deprovisioning.
 const ReportsProvisioning = "provisioning"
 
+// ReportsInvitationResolve is identity-control's entry: POST /v1/invitations/resolve, and nothing else
+// (ADR-IAM-011 §5.7 (a), ADR-ORG-001 §5.11 as amended 2026-10-21). It is the record's purpose too,
+// which each call's privileged-access row carries (NIST SP 800-53 AU-3).
+const ReportsInvitationResolve = "invitation:resolve"
+
 // obligationPrefix starts what an obligation-owning domain reports: obligation:<domain>.
 const obligationPrefix = "obligation:"
 
@@ -57,12 +63,13 @@ const obligationPrefix = "obligation:"
 // domains raised today are (product, hcm, billing, audit).
 var domainPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
-// Reports is what a reporter may report: ReportsProvisioning, or obligation:<domain>.
+// Reports is what a reporter may report: ReportsProvisioning, obligation:<domain>, or
+// ReportsInvitationResolve.
 type Reports string
 
 // Valid reports whether the value is one a reporter may hold.
 func (r Reports) Valid() bool {
-	if r == ReportsProvisioning {
+	if r == ReportsProvisioning || r == ReportsInvitationResolve {
 		return true
 	}
 	domain, ok := strings.CutPrefix(string(r), obligationPrefix)
@@ -71,6 +78,10 @@ func (r Reports) Valid() bool {
 
 // Provisioning reports whether the reporter reports provisioning outcomes.
 func (r Reports) Provisioning() bool { return r == ReportsProvisioning }
+
+// InvitationResolve reports whether the entry is identity-control's, which resolves an invitation
+// token for an enrolment and reaches nothing else.
+func (r Reports) InvitationResolve() bool { return r == ReportsInvitationResolve }
 
 // Domain is the obligation domain an obligation reporter resolves for, or "" for any other.
 func (r Reports) Domain() string {
@@ -174,7 +185,7 @@ func (r *Reporters) Register(ctx context.Context, req ReporterRegistration) (Rep
 	case req.Principal.IsNil():
 		return Reporter{}, fmt.Errorf("%w: a principal_id is required", ErrReporterInvalid)
 	case !req.Reports.Valid():
-		return Reporter{}, fmt.Errorf("%w: reports is provisioning or obligation:<domain>, the domain lowercase letters, digits and hyphens",
+		return Reporter{}, fmt.Errorf("%w: reports is provisioning, invitation:resolve or obligation:<domain>, the domain lowercase letters, digits and hyphens",
 			ErrReporterInvalid)
 	case purpose == "" || len(purpose) > 500:
 		return Reporter{}, fmt.Errorf("%w: a purpose of 1 to 500 characters is required", ErrReporterInvalid)
@@ -284,7 +295,7 @@ func (r *Reporters) List(ctx context.Context, query ReporterQuery, reason string
 		return ReporterPage{}, fmt.Errorf("%w: %w", ErrReporterInvalid, err)
 	}
 	if query.Reports != "" && !Reports(query.Reports).Valid() {
-		return ReporterPage{}, fmt.Errorf("%w: reports is provisioning or obligation:<domain>", ErrReporterInvalid)
+		return ReporterPage{}, fmt.Errorf("%w: reports is provisioning, invitation:resolve or obligation:<domain>", ErrReporterInvalid)
 	}
 	if query.State != "" && query.State != "active" && query.State != "retired" {
 		return ReporterPage{}, fmt.Errorf("%w: state is active or retired", ErrReporterInvalid)

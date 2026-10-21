@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.29.0
+  version: 1.30.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -136,6 +136,12 @@ CREATE ROLE organization_consumer_rt NOLOGIN;
 -- connections, never inherited.
 CREATE ROLE organization_self_rt NOLOGIN;
 GRANT organization_self_rt TO organization_rt WITH INHERIT FALSE, SET TRUE;
+
+-- identity-control's workload resolving an invitation token for an enrolment (1.30.0,
+-- ADR-IAM-011 §5.7 (c)). Reached only by SET LOCAL ROLE from the tenant connections, never
+-- inherited, as the self role.
+CREATE ROLE organization_invitation_resolver_rt NOLOGIN;
+GRANT organization_invitation_resolver_rt TO organization_rt WITH INHERIT FALSE, SET TRUE;
 
 -- No runtime role owns a table, holds SUPERUSER, holds BYPASSRLS,
 -- or holds any DDL privilege.
@@ -335,6 +341,21 @@ but a self scope:
   the token selected, never from the caller's token or the request. The invitation service reloads
   that row by its token hash under the Tenant's policy as its first statement, so a Tenant that
   does not hold the token's invitation finds nothing and the acceptance is refused.
+
+**One entry point serves the invitation resolve** (1.30.0, `ADR-IAM-011 §5.7` (c)), and it refuses
+every scope but the one it serves:
+
+- `WithInvitationResolver(ctx, pool *InvitationResolverPool, tokenHash string, fn Body)` records
+  the access first, on the recorder's own connection, with the reporter authority, the reason
+  `invitation:resolve` and no Tenant, then runs fn read-only on the tenant connections as
+  `organization_invitation_resolver_rt`, with `app.invitation_resolve_hash` bound to the hash of the
+  token identity-control presented. It is the only code that binds that setting. The scope it takes,
+  `InvitationResolverScope`, names no Tenant and opens no other entry point. The role holds `SELECT`
+  on `invitation_id` and `target_identifier` of `invitation.invitation` alone, through the `SELECT`
+  policy `invitation_resolver_read`, which admits the row of the bound hash only while it is
+  `pending` and `expires_at > now()`. Not a sixth use of the self role: that role is the signed-in
+  invitee's, and the ADR asks for "a dedicated database role" (`TDD-organization-control-004`
+  §API / Interface, 1.18.0).
 
 **`WithProviderInTenant` is the one that takes a Tenant as an argument from a
 provider.** A provider already holds authority over every Tenant. Naming one Tenant narrows
@@ -638,7 +659,7 @@ grant and a client assertion signed by its own key.
 CREATE TABLE organization.reporter (
     reporter_id     UUID        PRIMARY KEY,
     principal_id    UUID        NOT NULL UNIQUE,      -- retired rows included: one reporter for good
-    reports         TEXT        NOT NULL,             -- provisioning, or obligation:<domain>
+    reports         TEXT        NOT NULL,             -- provisioning, obligation:<domain>, or invitation:resolve
     purpose         TEXT        NOT NULL,
     version         BIGINT      NOT NULL DEFAULT 1,
     registered_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -650,7 +671,8 @@ CREATE TABLE organization.reporter (
 );
 ```
 
-`reports` is `provisioning` or `obligation:` and a lowercase domain of letters, digits and hyphens.
+`reports` is `provisioning`, `invitation:resolve` (1.30.0), or `obligation:` and a lowercase domain
+of letters, digits and hyphens.
 The provider role reads and inserts the table and updates the retirement columns and the version
 alone; nobody deletes a row. Authentication reads it on the raw provider connections, as it reads
 the consumer registry (`authority.Reader.ReporterFor`).
@@ -664,6 +686,16 @@ consumer's when one is registered with it, and refused otherwise. No OAuth scope
 roles stay out of tokens (`STD-IAM-002 §3.2`) and retiring a reporter is a change to this record, not
 to the kernel. Least privilege: "Access should also be granted with the least privileges needed to
 complete the task" (NIST SP 800-207 §2.1, cited in `ADR-ORG-001` [R14]).
+
+**identity-control's resolve (1.30.0, `ADR-IAM-011 §5.7` (a), `ADR-ORG-001 §5.11` amended
+2026-10-21).** An `invitation:resolve` entry reaches `POST /v1/invitations/resolve` and no other
+report: each other report route's check refuses it, and the resolve refuses every other entry. It is
+not identity-control's consumer registration, which admits that workload to the consumer routes only:
+each route has its own entry (AC-6). It resolves to `db.InvitationResolverScope`, not the provider
+scope, because the resolve reads one invitation before any Tenant is known and writes nothing. Its
+access row carries the authority `reporter` and the reason `invitation:resolve`, the entry's purpose,
+because NIST SP 800-53 AU-3 asks a record to establish "What type of event occurred", and it names no
+Tenant (`TDD-organization-control-004` §API / Interface).
 
 **Its scope.** A reporter resolves to the provider scope under the authority `reporter`, because
 the reports change records only the provider role writes. `requireProvider` refuses it on every
@@ -1500,7 +1532,8 @@ of place:
 
 - A scope wrapper in `internal/db`. `WithTenantScope`, `WithTenantRead`,
   `WithProviderInTenant` and `WithSelfInTenant` are `organization_rt`. `WithSelfRead` and
-  `WithSelfInvitation` are `organization_self_rt`.
+  `WithSelfInvitation` are `organization_self_rt`. `WithInvitationResolver` is
+  `organization_invitation_resolver_rt` (1.30.0).
   `WithProviderScope` and `WithProviderSnapshot` are `organization_provider_rt`.
   `WithResolutionScope` is `organization_resolution_rt`. `WithConsumerScope` and
   `WithConsumerSnapshot` are `organization_consumer_rt`. `WithConsumerReconciliation` and
@@ -1912,7 +1945,7 @@ Written: `docs/runbooks/provider-access-review.md`, which reads the record throu
 outbox and the projection cursor state (`ROADMAP.md` §Gates, SAD-004 §6.6, STD-GLB-002 §Restore
 Evidence). It belongs here because a restore lives or dies on the roles of §Roles: every table is
 owned by `organization_migrator` and granted to the `_rt` roles, the five login roles inherit them,
-and `organization_self_rt` is reached by `SET LOCAL ROLE`. A database dump carries none of those
+and `organization_self_rt` and `organization_invitation_resolver_rt` are reached by `SET LOCAL ROLE`. A database dump carries none of those
 roles, so a restore that skips them fails on its first owner. One that recreates them by hand risks
 the posture §Verifying the Posture at Runtime refuses to start on.
 
@@ -2263,6 +2296,7 @@ leaves out the sibling checkouts, every `keys/` directory, `*.pem`, `.env`, a se
 | Governed by | ADR-ORG-003 — Tenant Administration Is a Recorded Grant, Checked with Current Membership |
 | Governed by | ADR-ORG-005 §5.1 — a self caller reads its own contexts, on one route, with no provider record (1.17.0) |
 | Governed by | ADR-ORG-007 §5.1, §5.2 — the self caller accepts an invitation; the token selects one row through the self role (1.26.0) |
+| Governed by | ADR-IAM-011 §5.7 (a), (c), ADR-ORG-001 §5.11 (amended 2026-10-21) — the `invitation:resolve` reporter entry, `InvitationResolverScope`, `WithInvitationResolver` and `organization_invitation_resolver_rt` (1.30.0) |
 | Governed by | ADR-ORG-002 §5.6 — the privileged-access record is read and reviewed (1.21.0); kept 7 years, purged by maintenance, never by decommissioning (amended 2026-10-20, 1.27.0) |
 | Conforms to | STD-GLB-007 1.1.0 §Data Retention Lifecycle and compliance check 4 — audit records kept 7 years, purged through a delete-only control, exempt from decommissioning (1.27.0) |
 | Conforms to | STD-GLB-007 1.3.0 §Data Retention Lifecycle — how the 7 years count, evidence against state (1.29.0, §Retention) |
