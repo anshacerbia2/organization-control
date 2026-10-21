@@ -147,7 +147,7 @@ dropped (§Never do).
 Use plain ASCII in every `X-Administrative-Reason`. Anything else is refused with `400`
 (STD-GLB-001 §Request Header Values).
 
-**Run it as a script.** `scripts/dev-wire.ps1` is steps 1 to 6b below, and `scripts/dev-wiring-proof.ps1`
+**Run it as a script.** `scripts/dev-wire.ps1` is steps 1 to 6c below, and `scripts/dev-wiring-proof.ps1`
 is step 7. They are the files CI runs against the three stacks on every change and every night
 (`.github/workflows/deploy-dev.yml`, STD-GLB-009 1.3.0), so the procedure on the server is the
 procedure that was tested:
@@ -307,6 +307,24 @@ of `provisioning`, `obligation:product`, `obligation:hcm`, `obligation:billing` 
 
 `GET /v1/reporters` lists them. A reporter is retired with `POST /v1/reporters/{reporter_id}/retire`
 `{"expected_version"}`, which stops its next report.
+
+### 6c. identity-control's invitation resolve
+
+identity-control asks this service, as its own workload, which invitation a token names when a person
+with no account enrols (ADR-IAM-011 §5.7, ROADMAP item 56). That workload is admitted to
+`POST /v1/invitations/resolve` alone, from its own reporter entry, and not by its consumer
+registration of step 4: each route has its own entry. `dev-wire.ps1` registers it with step 2's
+`identity-control-workload`, the key identity-control signs in with, and no development flag:
+
+```text
+POST /v1/reporters
+{"principal_id":"<identity-control-workload's principal_id>","reports":"invitation:resolve",
+ "purpose":"identity-control resolves an invitation token for an enrolment (ADR-IAM-011 §5.7)"}
+```
+
+It writes the entry into the state file's `reporters` too, with identity-control's key file. Each
+resolve writes a privileged-access row with the authority `reporter` and the reason
+`invitation:resolve`, reviewed through the workload's owner.
 
 ### 7. What you should see
 

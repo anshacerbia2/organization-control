@@ -37,7 +37,18 @@
 #      an invitation to the operator's own address, into a Workspace, is accepted by the operator
 #      signed in with no Tenant, creates the Membership for the operator alone, and is refused a
 #      second time. Skipped, and said so, only when the identity-control checkout serves no
-#      identifiers:match at all.
+#      identifiers:match at all;
+#  11. identity-control's workload resolves an invitation token for an enrolment (ADR-IAM-011 §5.7,
+#      TDD-organization-control-004 1.18.0), signed in with its own key through dev-wire.ps1 step 6c's
+#      invitation:resolve entry: a pending invitation answers its identifier and address and stays
+#      pending; an unknown, a revoked and step 10's accepted token answer one 404, the same bytes for
+#      each; a malformed token is 400; the provisioning reporter and the operator are refused, and the
+#      resolver is refused on a provisioning report; every resolve is recorded with the authority
+#      reporter and the reason invitation:resolve, and no Tenant. Skipped, and said so, when the wiring
+#      state names no such entry, or where identity-control's key is not readable by this user (it
+#      belongs to the service on a server; CI owns it). Until identity-control's enrolment command
+#      exists, this step signs in as that workload itself; the key, the client and the entry are the
+#      ones identity-control uses.
 #
 # Environment and SECRETS: as dev-wire.ps1, plus the kernel's console administrator for steps 4 and 5,
 # which read the kernel's Organizations and delete a user the way identity-control's Proof B does:
@@ -676,6 +687,104 @@ if (-not $matchServed) {
         Expect "it is accepted, by the caller" "$($closed.state) $(Get-Prop $closed 'principal_id')" "accepted $($s.operator_principal_id)"
         $again = Call "POST" "$organizationApi/v1/invitations/accept" @{ token = $mine.token } (Provider-Token) "proof-accept-again"
         Expect "a second acceptance is the one refusal" $again.code 404
+    } catch {
+        Write-Host "  FAIL  $($_.Exception.Message)"
+        $failures++
+    }
+}
+
+Write-Host ""
+Write-Host "11. identity-control's workload resolves an invitation token for an enrolment (ADR-IAM-011 §5.7)"
+. (Join-Path $PSScriptRoot "dev-reporter.ps1")
+$resolverEntry = Get-ReporterEntry $s "invitation:resolve"
+$resolverKeyReadable = $false
+if ($null -ne $resolverEntry) {
+    try { [System.IO.File]::OpenRead($resolverEntry.key_file).Dispose(); $resolverKeyReadable = $true } catch { $resolverKeyReadable = $false }
+}
+if ($null -eq $resolverEntry) {
+    Write-Host "  SKIP  the wiring state names no invitation:resolve entry (scripts/dev-wire.ps1 step 6c)"
+} elseif (-not $resolverKeyReadable) {
+    Write-Host "  SKIP  identity-control's workload key is not readable by this user; it belongs to the service"
+} else {
+    try {
+        if ($null -eq $tenantId) { throw "step 4 left no Tenant to invite into" }
+        # Resolve-Token posts one token with a fixed correlation identifier, so two refusals can be
+        # compared byte for byte: the body's correlation_id is the request's own, and nothing else in it
+        # may differ (ADR-IAM-011 §5.7 (b)).
+        function Resolve-Token([string] $bearer, [string] $token, [string] $correlation, [string] $raw) {
+            $request = New-Object System.Net.Http.HttpRequestMessage("POST", "$organizationApi/v1/invitations/resolve")
+            $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $bearer)
+            if ($correlation) { $request.Headers.Add("X-Correlation-ID", $correlation) }
+            $json = if ($raw) { $raw } else { @{ token = $token } | ConvertTo-Json -Compress }
+            $request.Content = New-Object System.Net.Http.StringContent($json, [System.Text.Encoding]::UTF8, "application/json")
+            $response = $client.SendAsync($request).Result
+            $text = $response.Content.ReadAsStringAsync().Result
+            $parsed = $null
+            if ($text) { try { $parsed = $text | ConvertFrom-Json } catch { $parsed = $null } }
+            $id = $null
+            if ($response.Headers.Contains("X-Correlation-ID")) { $id = @($response.Headers.GetValues("X-Correlation-ID"))[0] }
+            return @{ code = [int]$response.StatusCode; text = $text; json = $parsed; correlation = $id
+                cache = "$($response.Headers.CacheControl)" }
+        }
+        $resolverToken = Get-ReporterToken $s "invitation:resolve"
+        $address = "wiring.enrolment.$run@scnehaux.local"
+        $pending = Require "the administrator invites an address with no account" (Call "POST" "$organizationApi/v1/invitations" @{
+                target_identifier = $address; subject_type = "human"; reason = "deploy-dev: the wiring proof" } (Tenant-Token) "proof-resolve-invite") 201
+        $withdrawn = Require "and a second one" (Call "POST" "$organizationApi/v1/invitations" @{
+                target_identifier = "wiring.withdrawn.$run@scnehaux.local"; subject_type = "human"
+                reason = "deploy-dev: the wiring proof" } (Tenant-Token) "proof-resolve-invite-revoked") 201
+        $null = Require "which it revokes" (Call "POST" "$organizationApi/v1/invitations/$($withdrawn.invitation.invitation_id)/revoke" `
+                $null (Tenant-Token) "proof-resolve-revoke") 200
+
+        $first = Resolve-Token $resolverToken $pending.token $null $null
+        Expect "the pending invitation resolves" $first.code 200
+        Expect "to its identifier" (Get-Prop $first.json "invitation_id") $pending.invitation.invitation_id
+        Expect "and its address" (Get-Prop $first.json "target_identifier") $address
+        Expect "and nothing else" ((@($first.json.PSObject.Properties.Name) | Sort-Object) -join ",") "invitation_id,target_identifier"
+        Expect "with no-store" $first.cache "no-store"
+        $correlation = $first.correlation
+        if (-not $correlation) { throw "the resolve answered no X-Correlation-ID" }
+
+        $unknownBytes = New-Object byte[] 32
+        [System.Security.Cryptography.RandomNumberGenerator]::Fill($unknownBytes)
+        $unknown = [Convert]::ToBase64String($unknownBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        $refusals = [ordered]@{ unknown = $unknown; revoked = $withdrawn.token }
+        if ((Get-Variable -Name mine -Scope Script -ErrorAction SilentlyContinue) -and $null -ne $mine) {
+            $refusals["accepted"] = $mine.token
+        } else {
+            Write-Host "  SKIP  no accepted invitation from step 10 to resolve"
+        }
+        $resolves = 1
+        $baseline = $null
+        foreach ($name in $refusals.Keys) {
+            $answer = Resolve-Token $resolverToken $refusals[$name] $correlation $null
+            $resolves++
+            Expect "an $name token is the one 404" $answer.code 404
+            Expect "  typed invitation-not-acceptable" (Get-Prop $answer.json "type") "https://problems.scnehaux.com/invitation-not-acceptable"
+            if ($null -eq $baseline) { $baseline = $answer.text }
+            else { Expect "  the same bytes as the first refusal" ($answer.text -ceq $baseline) $true }
+        }
+        $malformed = Resolve-Token $resolverToken "" $correlation '{"token":"not-a-token"}'
+        Expect "a malformed token is 400" $malformed.code 400
+        Expect "  and says nothing about invitations" ($malformed.text -match "invitation-not-acceptable") $false
+
+        $provisioner = Resolve-Token (Get-ReporterToken $s "provisioning") $pending.token $null $null
+        Expect "the provisioning reporter is refused the resolve" $provisioner.code 403
+        $operator = Resolve-Token (Provider-Token) $pending.token $null $null
+        Expect "a provider is refused the resolve" $operator.code 403
+        $report = Call "POST" "$organizationApi/v1/provisioning/realized" @{ correlation_id = [Guid]::NewGuid().ToString() } $resolverToken "proof-resolve-report"
+        Expect "the resolver is refused a provisioning report" $report.code 403
+
+        $still = Require "the resolved invitation read" (Call "GET" "$organizationApi/v1/invitations/$($pending.invitation.invitation_id)" $null (Tenant-Token) $null) 200
+        Expect "it is still pending" $still.state "pending"
+        $records = Require "the resolves' access records read" (Call "GET" `
+            "$organizationApi/v1/privileged-access?correlation_id=$correlation&actor_id=$($resolverEntry.principal_id)&limit=100" `
+            $null (Provider-Token) $null) 200
+        $accesses = @($records.accesses)
+        Expect "one record per well-formed resolve" $accesses.Count $resolves
+        $shaped = @($accesses | Where-Object { $_.authority -eq "reporter" -and $_.reason -eq "invitation:resolve" -and
+                $null -eq $_.tenant_id -and $_.operation -eq "POST /v1/invitations/resolve" })
+        Expect "each with the authority reporter, the purpose, the route and no Tenant" $shaped.Count $accesses.Count
     } catch {
         Write-Host "  FAIL  $($_.Exception.Message)"
         $failures++

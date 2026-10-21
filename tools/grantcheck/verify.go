@@ -175,10 +175,12 @@ func (v *verifier) plan(ctx context.Context, tx fdb.Tx, role, sql string) (map[R
 			return nil, err
 		}
 		// The bindings the scope wrappers set. EXPLAIN evaluates no policy predicate, but a
-		// statement reading these settings itself would otherwise fail on an unset parameter.
+		// statement reading these settings itself would otherwise fail on an unset parameter, and so
+		// does the invitation resolver's read: its policy's current_setting is folded at planning.
 		if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', gen_random_uuid()::text, true),
 		                                  set_config('app.provider_scope', 'true', true),
-		                                  set_config('app.principal_id', gen_random_uuid()::text, true)`); err != nil {
+		                                  set_config('app.principal_id', gen_random_uuid()::text, true),
+		                                  set_config('app.invitation_resolve_hash', '', true)`); err != nil {
 			return nil, err
 		}
 		// A generic plan, so the relations reported for the matrix are not thinned by folding the

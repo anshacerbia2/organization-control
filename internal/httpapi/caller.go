@@ -65,7 +65,7 @@ type Caller struct {
 	// Reporter is the registered reporter workload this caller is, and the nil identifier for every
 	// other caller (ADR-ORG-001 §5.11, amended 2026-10-20). Authentication sets it on the report
 	// routes alone, from the reporter registry by the token's principal_id, and Reports says what the
-	// record admits it to report: provisioning, or obligation:<domain>.
+	// record admits it to report: provisioning, obligation:<domain>, or invitation:resolve.
 	Reporter id.UUID
 	Reports  authority.Reports
 
@@ -167,6 +167,12 @@ func resolve(caller Caller, correlation id.UUID) (db.Scope, error) {
 	if !caller.Reporter.IsNil() {
 		if caller.Provider || caller.Eligible || caller.Consumer != "" || !caller.Tenant.IsNil() {
 			return db.Scope{}, errors.New("httpapi: a reporter caller carries no other authority")
+		}
+		// identity-control's resolve opens a scope of its own, which names no Tenant and opens only the
+		// invitation resolver pool (ADR-IAM-011 §5.7 (c)): it reads one invitation before any Tenant is
+		// known and writes nothing, so it is not provider work.
+		if caller.Reports.InvitationResolve() {
+			return db.InvitationResolverScope(caller.Subject, correlation)
 		}
 		// A reporter opens the provider scope, whose role writes what the reports change, under an
 		// authority its access record names as a reporter's. The routes it reaches are its own

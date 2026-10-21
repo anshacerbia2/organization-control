@@ -55,17 +55,20 @@ func acceptRoute(r *http.Request) bool {
 }
 
 // The report routes a registered reporter workload reaches, and no other (ADR-ORG-001 §5.11, amended
-// 2026-10-20). reportProvisioning are the provisioning system's three; reportObligation is a domain's
-// resolution of its own obligation.
+// 2026-10-20 and 2026-10-21). reportProvisioning are the provisioning system's three; reportObligation
+// is a domain's resolution of its own obligation; reportInvitation is identity-control's resolve of an
+// invitation token for an enrolment (ADR-IAM-011 §5.7 (a)).
 const (
 	reportProvisioning = "provisioning"
 	reportObligation   = "obligation"
+	reportInvitation   = "invitation"
 )
 
 // reportRoute names the report a request is, by method and path exactly: POST
 // /v1/provisioning/realized or /failed, POST /v1/offboardings/{offboarding_id}/deprovisioning (not
-// its /resend, which is an operator's command), and POST /v1/obligations/{obligation_id}/resolve.
-// Every other request is no report, and a reporter's token on it is authorized as any workload's.
+// its /resend, which is an operator's command), POST /v1/obligations/{obligation_id}/resolve, and
+// POST /v1/invitations/resolve. Every other request is no report, and a reporter's token on it is
+// authorized as any workload's.
 func reportRoute(r *http.Request) (string, bool) {
 	if r.Method != http.MethodPost {
 		return "", false
@@ -74,6 +77,8 @@ func reportRoute(r *http.Request) (string, bool) {
 	switch path {
 	case "/v1/provisioning/realized", "/v1/provisioning/failed":
 		return reportProvisioning, true
+	case "/v1/invitations/resolve":
+		return reportInvitation, true
 	}
 	if rest, ok := strings.CutPrefix(path, "/v1/offboardings/"); ok {
 		if segment, ok := strings.CutSuffix(rest, "/deprovisioning"); ok && segment != "" && !strings.Contains(segment, "/") {
@@ -504,6 +509,9 @@ func authorize(ctx context.Context, p presented, report string, cfg Authenticati
 		case report == reportObligation && reports.Domain() == "":
 			return Caller{}, errors.New("the workload's reporter record admits it to report " + string(reports) +
 				", not an obligation")
+		case report == reportInvitation && !reports.InvitationResolve():
+			return Caller{}, errors.New("the workload's reporter record admits it to report " + string(reports) +
+				", not to resolve an invitation")
 		}
 		return Caller{Subject: p.principal, Reporter: reporter, Reports: reports}, nil
 	}

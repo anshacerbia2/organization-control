@@ -288,13 +288,14 @@ table "provider_grant" {
 
 // A reporter: a workload Principal registered to report one kind of outcome (ADR-ORG-001 §5.11,
 // amended 2026-10-20; TDD-organization-control-001 §Reporters). The provisioning system reports the
-// provisioning outcomes, and an obligation-owning domain resolves the obligations raised against it.
-// A workload token is a reporter's when its principal_id is an active row here, and it reaches the
+// provisioning outcomes, an obligation-owning domain resolves the obligations raised against it, and
+// identity-control resolves an invitation token for an enrolment (`invitation:resolve`, ADR-IAM-011
+// §5.7 (a), amended 2026-10-21). A workload token is a reporter's when its principal_id is an active row here, and it reaches the
 // routes `reports` names and no other. Not tenant-scoped, like the provider grant: a reporter reports
 // for every Tenant. The provider role reads and inserts it and updates the retirement columns alone.
 table "reporter" {
   schema  = schema.organization
-  comment = "Workload Principals admitted to report provisioning or one domain's obligations. Checked for every report."
+  comment = "Workload Principals admitted to report provisioning or one domain's obligations, or to resolve an invitation token. Checked for every report."
 
   column "reporter_id" {
     null = false
@@ -357,7 +358,7 @@ table "reporter" {
   }
 
   check "reporter_reports_check" {
-    expr = "(reports = 'provisioning') OR (reports ~ '^obligation:[a-z0-9][a-z0-9-]{0,62}$')"
+    expr = "(reports = 'provisioning') OR (reports = 'invitation:resolve') OR (reports ~ '^obligation:[a-z0-9][a-z0-9-]{0,62}$')"
   }
   check "reporter_purpose_check" {
     expr = "(btrim(purpose) <> '') AND (length(purpose) <= 500)"

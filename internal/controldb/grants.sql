@@ -228,6 +228,9 @@ GRANT SELECT ON membership.offboarding_freeze TO organization_provider_rt;
 --                                                     removed with ADR-ORG-007
 --   organization_self_rt     SELECT on eight columns  acceptance's read of the one row the token
 --                                                     selects (the self role, below)
+--   organization_invitation_resolver_rt
+--                            SELECT on two columns    identity-control's resolve of the one pending,
+--                                                     unexpired row the token selects (below)
 GRANT USAGE ON SCHEMA invitation TO organization_rt;
 GRANT SELECT, INSERT, UPDATE ON invitation.invitation TO organization_rt;
 
@@ -791,3 +794,25 @@ ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA tenant
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_self_rt;
 ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA invitation
     REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_self_rt;
+
+-- ---------------------------------------------------------------------------------------------
+-- The invitation resolver role
+-- ---------------------------------------------------------------------------------------------
+--
+-- identity-control's workload asking which invitation a token names, for an enrolment, before any
+-- Tenant is known and with no person signed in (ADR-IAM-011 §5.7 (c), TDD-organization-control-004
+-- 1.18.0). It has no login. The tenant role may SET ROLE to it and does not inherit it, as the self
+-- role above, so db.WithInvitationResolver, which sets it LOCAL in a read-only transaction, holds none
+-- of the tenant role's privileges and no tenant transaction holds this role's policy.
+GRANT organization_invitation_resolver_rt TO organization_rt WITH INHERIT FALSE, SET TRUE;
+
+-- The invitation's identifier and target address, and nothing else (ADR-IAM-011 §5.7 (c): "The role
+-- is granted the invitation's identifier and target address only"). invitation_resolver_read in
+-- rls.sql names token_hash, state and expires_at, and a policy's columns need no grant of their own:
+-- the statement may not name them, so the database, not the statement, picks the row.
+GRANT USAGE ON SCHEMA invitation TO organization_invitation_resolver_rt;
+GRANT SELECT (invitation_id, target_identifier) ON invitation.invitation TO organization_invitation_resolver_rt;
+
+-- Nothing inherited: a table added later must be granted deliberately.
+ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA invitation
+    REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM organization_invitation_resolver_rt;

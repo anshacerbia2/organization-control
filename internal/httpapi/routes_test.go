@@ -84,6 +84,10 @@ func testSurface(t *testing.T) Surface {
 	must(err, "invitation self pool")
 	invitations, err := invitation.New(tenantPool, providerPool, invitationSelf, memberships, nil)
 	must(err, "invitation service")
+	invitationResolverPool, err := db.NewInvitationResolverPool(transactor, stubRecorder{})
+	must(err, "invitation resolver pool")
+	invitationResolver, err := invitation.NewResolver(invitationResolverPool)
+	must(err, "invitation resolver")
 	offboardings, err := offboarding.New(providerPool, tenantPool, tenants, memberships)
 	must(err, "offboarding service")
 	registry, err := projection.NewRegistry(providerPool)
@@ -128,7 +132,8 @@ func testSurface(t *testing.T) Surface {
 			Memberships: memberships, Tenants: tenants, Provisioning: provisioning,
 			Organizations: organizations,
 			Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
-			Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
+			InvitationResolver: invitationResolver,
+			Registry:           registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 			ContextList: contextList, Replayer: replayer, Resolver: resolver, DeadLetters: deadLetters,
 			Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
 			TenantAdministrators: tenantAdministrators, AccessReview: accessReview, Reporters: reporters,
@@ -542,6 +547,8 @@ func testSurfaceServices(t *testing.T) Services {
 	workspaces, _ := workspace.New(tenantPool)
 	invitationSelf, _ := db.NewSelfPool(transactor)
 	invitations, _ := invitation.New(tenantPool, providerPool, invitationSelf, memberships, nil)
+	invitationResolverPool, _ := db.NewInvitationResolverPool(transactor, stubRecorder{})
+	invitationResolver, _ := invitation.NewResolver(invitationResolverPool)
 	offboardings, _ := offboarding.New(providerPool, tenantPool, tenants, memberships)
 	registry, _ := projection.NewRegistry(providerPool)
 	publisher, _ := projection.NewPublisher(providerPool, registry)
@@ -566,7 +573,8 @@ func testSurfaceServices(t *testing.T) Services {
 		Memberships: memberships, Tenants: tenants, Provisioning: provisioning,
 		Organizations: organizations,
 		Workspaces:    workspaces, Invitations: invitations, Offboardings: offboardings,
-		Registry: registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
+		InvitationResolver: invitationResolver,
+		Registry:           registry, Publisher: publisher, Reconciler: reconciler, Contexts: contexts,
 		ContextList: contextList, Replayer: replayer, Resolver: resolver, DeadLetters: deadLetters,
 		Frontier: frontier, ProviderGrants: providerGrants, ProviderActivations: providerActivations,
 		TenantAdministrators: tenantAdministrators, AccessReview: accessReview, Reporters: reporters,

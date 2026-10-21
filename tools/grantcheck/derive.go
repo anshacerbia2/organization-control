@@ -49,12 +49,16 @@ const (
 	// selfRole has no login. db.WithSelfRead sets it LOCAL on the tenant connections, so its
 	// statements run as it and are planned as it here, as every other role's are.
 	selfRole = "organization_self_rt"
+
+	// invitationResolverRole has no login either. db.WithInvitationResolver sets it LOCAL on the tenant
+	// connections for identity-control's resolve of an invitation token (ADR-IAM-011 §5.7 (c)).
+	invitationResolverRole = "organization_invitation_resolver_rt"
 )
 
 // Roles are the runtime roles whose privileges this tool derives. organization_dispatch_rt is
 // absent on purpose: the dispatcher's statements live in foundation-platform and run in
 // foundation-reference, so no code path in this repository exercises that role.
-var Roles = []string{tenantRole, providerRole, resolutionRole, consumerRole, selfRole}
+var Roles = []string{tenantRole, providerRole, resolutionRole, consumerRole, selfRole, invitationResolverRole}
 
 // wrappers are the scope entry points, by SSA function name, and the role their pool connects as.
 var wrappers = map[string]string{
@@ -74,6 +78,8 @@ var wrappers = map[string]string{
 	// in the invitation's Tenant as the tenant role.
 	dbPkg + ".WithSelfInvitation": selfRole,
 	dbPkg + ".WithSelfInTenant":   tenantRole,
+	// identity-control's resolve of an invitation token for an enrolment (ADR-IAM-011 §5.7 (c)).
+	dbPkg + ".WithInvitationResolver": invitationResolverRole,
 }
 
 // wrapperInternals are the unexported helpers the wrappers share. They forward the body as a

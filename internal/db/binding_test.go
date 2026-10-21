@@ -789,3 +789,100 @@ func TestASelfCallerActsInTheInvitationsTenant(t *testing.T) {
 		t.Errorf("a refused scope opened %d transactions", source.opened-opened)
 	}
 }
+
+// TestAnInvitationResolveIsRecordedAndBindsTheTokenHashAlone: identity-control's resolve records one
+// access before its transaction, with the reporter authority, the purpose invitation:resolve and no
+// Tenant whatever the route says; then it is read-only, becomes the resolver role before it binds
+// anything, and binds app.invitation_resolve_hash as a parameter and nothing else. Every other scope,
+// a blank hash and a failed record open no transaction (ADR-IAM-011 §5.7 (a), (c)).
+func TestAnInvitationResolveIsRecordedAndBindsTheTokenHashAlone(t *testing.T) {
+	actor, correlation := mustUUID(t), mustUUID(t)
+	scope, err := db.InvitationResolverScope(actor, correlation)
+	if err != nil {
+		t.Fatalf("InvitationResolverScope: %v", err)
+	}
+	if !scope.IsInvitationResolver() || scope.IsProvider() || scope.IsConsumer() || scope.IsSelf() ||
+		!scope.TenantID().IsNil() || scope.Authority().Kind() != db.AuthorityReporter {
+		t.Fatalf("the resolver scope is %+v", scope)
+	}
+	ctx := db.WithScope(db.WithAccessRoute(context.Background(), "POST /v1/invitations/resolve", mustUUID(t)), scope)
+	source := &fakeTx{}
+	evidence := &recorder{}
+	pool, err := db.NewInvitationResolverPool(source, evidence)
+	if err != nil {
+		t.Fatalf("NewInvitationResolverPool: %v", err)
+	}
+	const hash = "c0ffee"
+	reached := false
+	if err := db.WithInvitationResolver(ctx, pool, hash, func(context.Context, db.Tx) error {
+		reached = true
+		if len(evidence.calls) != 1 {
+			t.Errorf("the body ran with %d access records, want the one written before it", len(evidence.calls))
+		}
+		return nil
+	}); err != nil || !reached {
+		t.Fatalf("WithInvitationResolver: %v, reached %t", err, reached)
+	}
+	record := evidence.calls[0]
+	if record.Actor != actor || record.Correlation != correlation || record.Authority != db.AuthorityReporter ||
+		record.Reason != db.InvitationResolvePurpose || !record.Tenant.IsNil() || !record.Activation.IsNil() ||
+		record.Operation != "POST /v1/invitations/resolve" {
+		t.Errorf("recorded %+v", record)
+	}
+	if got := source.bound(); len(got) != 1 || got[0] != "app.invitation_resolve_hash" {
+		t.Errorf("bound settings = %v, want [app.invitation_resolve_hash]", got)
+	}
+	calls := source.tx.Calls()
+	if len(calls) < 3 || !strings.Contains(calls[0].SQL, "READ ONLY") ||
+		calls[1].SQL != "SET LOCAL ROLE organization_invitation_resolver_rt" {
+		t.Fatalf("statements %v, want read-only, then the resolver role, then the binding", calls)
+	}
+	if strings.Contains(calls[2].SQL, hash) || len(calls[2].Args) != 1 || calls[2].Args[0] != hash {
+		t.Errorf("the binding %q %v does not carry the hash as a parameter", calls[2].SQL, calls[2].Args)
+	}
+
+	opened, recorded := source.opened, len(evidence.calls)
+	if err := db.WithInvitationResolver(ctx, pool, "", func(context.Context, db.Tx) error { return nil }); err == nil {
+		t.Error("a blank hash was bound")
+	}
+	selfScope, _ := db.SelfScope(mustUUID(t), mustUUID(t))
+	tenantScope, _ := db.TenantScope(mustUUID(t), mustUUID(t), mustUUID(t))
+	providerScope, _ := db.ProviderScope(mustUUID(t), mustUUID(t), db.ReporterAuthority())
+	consumerScope, _ := db.ConsumerScope(mustUUID(t), mustUUID(t))
+	for _, other := range []db.Scope{selfScope, tenantScope, providerScope, consumerScope} {
+		if err := db.WithInvitationResolver(db.WithScope(context.Background(), other), pool, hash,
+			func(context.Context, db.Tx) error { return nil }); !errors.Is(err, db.ErrWrongScope) {
+			t.Errorf("WithInvitationResolver with %+v: error = %v, want ErrWrongScope", other, err)
+		}
+	}
+	if source.opened != opened || len(evidence.calls) != recorded {
+		t.Errorf("a refused resolve opened %d transactions and wrote %d records", source.opened-opened,
+			len(evidence.calls)-recorded)
+	}
+
+	// A record that cannot be written stops the read.
+	evidence.err = errors.New("the audit table is unreachable")
+	if err := db.WithInvitationResolver(ctx, pool, hash, func(context.Context, db.Tx) error { return nil }); err == nil {
+		t.Error("the resolve ran without its access record")
+	}
+	if source.opened != opened {
+		t.Errorf("an unrecorded resolve opened %d transactions", source.opened-opened)
+	}
+
+	// The resolver scope opens no other pool.
+	tenantPool, _ := db.NewTenantPool(source)
+	providerPool, _ := db.NewProviderPool(source, &recorder{})
+	selfPool, _ := db.NewSelfPool(source)
+	body := func(context.Context, db.Tx) error { return nil }
+	for name, open := range map[string]func() error{
+		"WithTenantScope":    func() error { return db.WithTenantScope(ctx, tenantPool, body) },
+		"WithTenantRead":     func() error { return db.WithTenantRead(ctx, tenantPool, body) },
+		"WithProviderScope":  func() error { return db.WithProviderScope(ctx, providerPool, "reason", body) },
+		"WithSelfRead":       func() error { return db.WithSelfRead(ctx, selfPool, body) },
+		"WithSelfInvitation": func() error { return db.WithSelfInvitation(ctx, selfPool, hash, body) },
+	} {
+		if err := open(); !errors.Is(err, db.ErrWrongScope) {
+			t.Errorf("%s with the resolver scope: error = %v, want ErrWrongScope", name, err)
+		}
+	}
+}
