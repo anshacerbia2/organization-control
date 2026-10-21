@@ -1,6 +1,6 @@
 # Runbook: suspected cross-tenant exposure
 
-Version 1.1.0. Owner: Core Platform Team; incident policy: Security. Last reviewed 2026-10-20.
+Version 1.2.0. Owner: Core Platform Team; incident policy: Security. Last reviewed 2026-10-21.
 
 A Tenant's data or authority may have been read or changed by someone acting for another Tenant, or
 by a provider without a recorded reason. SAD-004 §9.2 treats "a cross-tenant authorization defect" as
@@ -83,7 +83,9 @@ Any of:
   (`POST /v1/tenants/{tenant_id}/administrators/{grant_id}/revoke`). A compromised member of one
   Tenant: suspend or revoke that one Membership as a provider,
   `POST /v1/tenants/{tenant_id}/memberships/{membership_id}/suspend` or `/revoke`
-  `{"expected_version": n}` (1.1.0, ADR-ORG-003 §5.6); it publishes the priority withdrawal and is
+  `{"expected_version": n}` (1.1.0, ADR-ORG-003 §5.6). Read `n` first with
+  `GET /v1/tenants/{tenant_id}/memberships/{membership_id}` and the same reason (1.2.0); that read is
+  recorded naming the Tenant too. The suspension or revocation publishes the priority withdrawal and is
   recorded naming the Tenant. A provider never restores it: the Tenant administrator does, once the
   incident allows. A reporter workload: retire it (`POST /v1/reporters/{reporter_id}/retire`). A consumer: retire it
   (`POST /v1/projections/consumers/{consumer_id}/retire`; it stops being served, and is an outage for

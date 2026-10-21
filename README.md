@@ -413,10 +413,12 @@ GET   /v1/principals/{principal_id}/contexts      your own, with any human token
 POST  /v1/offboardings/{offboarding_id}/cancel    {"expected_version": n}   in freeze or obligations only
 ```
 
-What an operator recovers with (TDD-organization-control-001 1.22.0, -002 1.15.0, -004 1.11.0,
+What an operator recovers with (TDD-organization-control-001 1.22.0, -002 1.15.0 to 1.19.0, -004 1.11.0,
 -005 2.5.0; the runbooks in `docs/runbooks/` say when):
 
 ```text
+GET   /v1/tenants/{tenant_id}/memberships/{membership_id}   a provider's read of its status and version, recorded with the Tenant
+POST  /v1/tenants/{tenant_id}/memberships/{membership_id}/suspend|revoke   {"expected_version": n}   a provider's withdrawal
 GET   /v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement   a provider's read, recorded with the Tenant
 GET   /v1/projections/consumers/{consumer_id}/dead-letters   ?state=open|resolved   one consumer's incidents
 POST  /v1/offboardings/{offboarding_id}/deprovisioning/resend   a failed deprovisioning only; Idempotency-Key

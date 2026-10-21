@@ -255,6 +255,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// A provider's read of one Membership's enforcement evidence, inside the Tenant the path names
 	// (TDD-organization-control-002 1.15.0 §Enforcement Evidence).
 	api.HandleFunc("GET /v1/tenants/{tenant_id}/memberships/{membership_id}/enforcement", h.tenantMembershipEnforcement)
+	// A provider reads one Membership inside the Tenant the path names, the read its suspension and
+	// revocation need (ADR-ORG-003 §5.6 amended 2026-10-21, TDD-organization-control-002 1.19.0).
+	api.HandleFunc("GET /v1/tenants/{tenant_id}/memberships/{membership_id}", h.providerGetMembership)
 	// A provider suspends or revokes one Membership inside the Tenant the path names, never restores
 	// or grants one (ADR-ORG-003 §5.6, TDD-organization-control-002 1.16.0).
 	api.HandleFunc("POST /v1/tenants/{tenant_id}/memberships/{membership_id}/suspend", command(h.providerSuspendMembership))

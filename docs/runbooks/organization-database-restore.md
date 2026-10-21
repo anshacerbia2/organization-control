@@ -1,6 +1,6 @@
 # Runbook: Organization Database restore
 
-Version 1.3.0. Owner: Core Platform Team. Last reviewed 2026-10-20.
+Version 1.4.0. Owner: Core Platform Team. Last reviewed 2026-10-21.
 
 The Organization Database is the authority for Organizations, Tenants, Memberships, provider grants
 and offboardings, and it holds the outbox every consumer's projection is built from. This runbook
@@ -113,7 +113,8 @@ Run under the pause, in this order. Every call is a provider call with the incid
    **Membership** revocation or suspension is re-applied by a provider, under the pause, with
    `POST /v1/tenants/{tenant_id}/memberships/{membership_id}/suspend` or `/revoke`
    `{"expected_version": <its version>}`, the incident in the reason and an `Idempotency-Key`
-   (ADR-ORG-003 §5.6). It is recorded naming the Tenant, which its administrators read in
+   (ADR-ORG-003 §5.6). Its version is read with `GET /v1/tenants/{tenant_id}/memberships/{membership_id}`
+   and the same reason (1.4.0). It is recorded naming the Tenant, which its administrators read in
    `GET /v1/provider-access`. A provider never restores or grants one. Grants come last, and only when
    their requester confirms them again. The sources are the incident record, the consumers' own logs and
    the requesters.

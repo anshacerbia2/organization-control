@@ -453,6 +453,34 @@ func (s *Service) Get(ctx context.Context, membershipID id.UUID) (Membership, er
 	return record, nil
 }
 
+// GetInTenant is Get for a provider, inside the one Tenant it names: the read the provider's
+// suspension and revocation need, with their authority and no more (ADR-ORG-003 §5.6, amended
+// 2026-10-21; TDD-organization-control-002 1.19.0 §A Provider Withdraws One Membership).
+//
+// db.WithProviderInTenant records the access with the provider's reason and that Tenant before it
+// reads, so the Tenant's administrators see the read in GET /v1/provider-access. The Membership is
+// read under that Tenant's policy, so one in another Tenant is not found, as an absent one is.
+func (s *Service) GetInTenant(ctx context.Context, tenantID, membershipID id.UUID, reason string) (Membership, error) {
+	switch {
+	case s.provider == nil:
+		return Membership{}, errors.New("membership: a provider reads inside a Tenant only on a service built with the provider pool")
+	case tenantID.IsNil() || membershipID.IsNil():
+		return Membership{}, fmt.Errorf("%w: a tenant and a membership identifier are required", ErrInvalid)
+	case strings.TrimSpace(reason) == "":
+		return Membership{}, ErrReasonRequired
+	}
+	var record Membership
+	if err := db.WithProviderInTenant(ctx, s.provider, s.pool, tenantID, strings.TrimSpace(reason),
+		func(ctx context.Context, tx db.Tx) error {
+			var err error
+			record, err = load(ctx, tx, selectOne, membershipID)
+			return err
+		}); err != nil {
+		return Membership{}, err
+	}
+	return record, nil
+}
+
 // ListQuery selects one page of the bound Tenant's Memberships (STD-GLB-001 1.3.0 §Pagination).
 type ListQuery struct {
 	// After is the last membership_id of the previous page; the nil identifier starts at the first.

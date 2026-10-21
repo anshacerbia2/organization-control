@@ -84,3 +84,50 @@ func TestAProviderNeverRestoresOrGrants(t *testing.T) {
 		t.Error("a Tenant scope suspended through the provider's route")
 	}
 }
+
+// TestAProviderReadsOneMembershipInsideItsTenant: the read the two commands need, with their authority
+// and no more (ADR-ORG-003 §5.6, amended 2026-10-21). It is recorded naming the Tenant, and a
+// Membership outside that Tenant is not found, as an absent one is.
+func TestAProviderReadsOneMembershipInsideItsTenant(t *testing.T) {
+	service, ctx, pool := newFixture(t)
+	granted := grantOne(t, service, ctx)
+	membershipID := granted.Membership.MembershipID
+	sink, providerCtx := providerIn(t, service, ctx, pool)
+	tenant, err := id.Parse(tenantA)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	other, err := id.Parse(tenantB)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	sink.accesses = nil
+	record, err := service.GetInTenant(providerCtx, tenant, membershipID, " INC-3 a compromised member ")
+	if err != nil || record.MembershipID != membershipID || record.Status != granted.Membership.Status ||
+		record.Version != granted.Membership.Version {
+		t.Fatalf("GetInTenant answered %+v, %v; want the granted Membership", record, err)
+	}
+	if len(sink.accesses) != 1 || sink.accesses[0].Tenant != tenant || sink.accesses[0].Reason != "INC-3 a compromised member" {
+		t.Errorf("the read recorded %+v; want one access naming the Tenant, with the reason", sink.accesses)
+	}
+
+	// Inside another Tenant the Membership is not found; an absent one is not found the same way.
+	if _, err := service.GetInTenant(providerCtx, other, membershipID, "INC-3"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a read inside another Tenant answered %v, want ErrNotFound", err)
+	}
+	absent, err := id.NewV7()
+	if err != nil {
+		t.Fatalf("id: %v", err)
+	}
+	if _, err := service.GetInTenant(providerCtx, tenant, absent, "INC-3"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a read of an absent Membership answered %v, want ErrNotFound", err)
+	}
+	// A reason is required, and a Tenant scope is no provider's.
+	if _, err := service.GetInTenant(providerCtx, tenant, membershipID, "  "); !errors.Is(err, ErrReasonRequired) {
+		t.Errorf("a read without a reason answered %v, want ErrReasonRequired", err)
+	}
+	if _, err := service.GetInTenant(ctx, tenant, membershipID, "INC-3"); err == nil {
+		t.Error("a Tenant scope read through the provider's route")
+	}
+}
