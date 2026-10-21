@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-005
   title: Dead-Letter Resolution, Scope and Limits
   owner: Core Platform Team
-  version: 2.8.0
+  version: 2.9.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-09-17
-  last_reviewed: 2026-10-19
+  last_reviewed: 2026-10-21
   parent_sad: SAD-004
 ---
 
@@ -110,6 +110,12 @@ secret authenticates the delivery (`STD-IAM-001 §3`).
   one `net/http` client and is the one package `arch.json` excepts to call out; `internal/httpapi`'s
   outbound walk holds every other package, the two that serve included, to constructing none. It
   uses the same workload token source as the dispatchers.
+- **foundation-reference is the proof consumer, for development and CI only** (2.9.0, `SAD-004` 2.7.0
+  §4.1). It is drawn as a container of the development server and CI, with its own database on
+  purpose: a consumer that shared this system's database could be updated by a join, not by an event,
+  and the property under test would no longer be a property of the event path (`SAD-004 §7.6`,
+  `TDD-foundation-reference-001`). Production registers no such consumer: no delivery target, no
+  subscription and no `REFERENCE_DELIVERY_PRINCIPAL_ID` outside `deploy/dev` and the system proof.
 - **Every consumer is delivered from here** (2.6.0). foundation-reference's own dispatcher
   (`cmd/foundation-reference-dispatcher`, with a static bearer token and its own copy of the
   publisher) is deleted, as `ADR-GLB-018` Alternative G anticipated and its 2026-10-15 amendment
@@ -821,7 +827,7 @@ handler-level tests cover only refusals that must land before the database is re
 
 | Relationship | Reference |
 | :-- | :-- |
-| Parent system architecture | SAD-004 §7.6, §9.1.1 |
+| Parent system architecture | SAD-004 2.7.0 §4.1, §7.6, §9.1.1 — foundation-reference as the dev and CI proof consumer container (2.9.0) |
 | Delivery profile and evidence rules | ADR-GLB-016 §5.4 |
 | Membership authority, revocation and the projection contract | TDD-organization-control-002 |
 | Tenant isolation and the role model the grants extend | TDD-organization-control-001 |

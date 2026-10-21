@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-004
   title: Invitation, Onboarding Correlation, and Offboarding Obligations
   owner: Core Platform Team
-  version: 1.16.0
+  version: 1.17.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-20
+  last_reviewed: 2026-10-21
   parent_sad: SAD-004
 ---
 
@@ -352,7 +352,7 @@ POST   /v1/invitations/expire-lapsed
 Unauthenticated
 POST   /v1/invitations/lookup
 
-Planned, not built (1.16.0, ADR-IAM-011 §5.6): identity-control's workload alone
+Planned, not built (1.16.0, ADR-IAM-011 §5.6, §5.7 in 1.17.0): identity-control's workload alone, registry entry `invitation:resolve`
 POST   /v1/invitations/resolve
 ```
 
@@ -440,11 +440,44 @@ token names. `ADR-IAM-011 §5.6` assigns this design `POST /v1/invitations/resol
 - **What it does not do.** It changes nothing. Acceptance stays `POST /v1/invitations/accept`, by the
   person, signed in, once the enrolment has made an account.
 
-Three points are not decided by `ADR-IAM-011` and are settled here before the route is built: how
-this service recognises identity-control's workload (its consumer registration, a reporter-style
-record, or another record); the answer for a token that resolves to nothing, which must not tell an
-unknown, expired, revoked and accepted token apart (`ADR-IAM-011 §5.1`, WSTG-IDNT-04); and the read
-path, which today is the self caller's (`db.WithSelfInvitation`). ROADMAP backlog item 56 tracks it.
+Three points `ADR-IAM-011 §5.1` left to this design are decided in `ADR-IAM-011 §5.7` (amended
+2026-10-21) and `ADR-ORG-001 §5.11`, and the design follows them (1.17.0). The code is planned, not
+built (ROADMAP backlog item 56).
+
+- **(a) The caller is admitted from a registry row, for this route alone.** The reporter registry
+  (§Reporters in `TDD-organization-control-001`) gains a third kind of `reports`, `invitation:resolve`,
+  beside `provisioning` and `obligation:<domain>`, for identity-control's workload. A token is the
+  resolver's when its `subject_type` is `workload` and its `principal_id` is that of an active
+  registered entry with that capability. No OAuth scope decides it (`STD-IAM-002 §3.2`) and no
+  `client_id` does (RFC 9068 §5). It is not identity-control's consumer registration (`SAD-004 §7.6`),
+  which admits it to the consumer routes only: each route has its own entry (AC-6). The entry reaches
+  this route and nothing else, every other route answers that workload `403`, and every other caller
+  answers `403` here. The entry has an owner, is reviewed through it, and is registered by the
+  ordinary reporter route; development registers it too and runs production's path.
+- **(b) One answer for a token that resolves to nothing: `404`.** An unknown, expired, revoked or
+  accepted token gets the same status, the same problem type and the same body, with no field derived
+  from the row (RFC 9110 §15.5.5, OWASP WSTG-IDNT-04). The route makes one lookup by the token's hash
+  whatever the outcome, so duration does not separate the cases. A malformed body is a `400` that says
+  nothing about invitations. identity-control never forwards the `404`.
+- **(c) The read path is a scope of its own, `db.WithInvitationResolver(token_hash)`.** It binds the
+  hash of the request's token, and a dedicated database role is the only role that reads
+  `invitation.invitation` through it. A `SELECT` policy on that role admits only the row whose
+  `token_hash` equals the bound value and that is `pending` and unexpired, so the database returns at
+  most one row and an absent, expired, revoked or accepted invitation is the same empty result
+  (PostgreSQL `CREATE POLICY`). The role holds the invitation's identifier and target address only. The
+  policy is declared by name in `posture.AdditionalPolicies`, so the startup and readiness check
+  refuses a database without it or with one more. Not `db.WithProviderScope` (it needs a Tenant, an
+  actor and recorded access), not `db.WithSelfInvitation` (the signed-in invitee's), not an owning
+  connection, not a `security_barrier` view (it would let the role list every pending address) and not
+  a `SECURITY DEFINER` function (`STD-GLB-002` §Aggregate Reads Under Row-Level Security).
+- **The audit record carries the purpose.** Each call writes a privileged-access row with authority
+  `reporter` and, in its detail, the registry entry's purpose `invitation:resolve`, because NIST AU-3
+  asks a record to establish "What type of event occurred" (`ADR-IAM-011 §5.7`). It names no Tenant: a
+  call that finds nothing names none, and a call that finds an invitation must not differ. It is
+  reviewed through the workload's owner. A new authority value would be cleaner and needs a schema
+  change; that is the owner's open choice in `ADR-IAM-011`.
+- **Calls are bounded** by identity-control's limits per invitation and per client address
+  (`ADR-IAM-011 §5.2`).
 
 The lookup's constant `next` is `accept` from 1.14.0, where it was `verify-identity`.
 
@@ -1236,6 +1269,7 @@ and sends a failed deprovisioning again. Written (1.11.0):
 | Governed by | ADR-ORG-001 §5.11 (amended 2026-10-20) — the provisioning system and each obligation-owning domain report as registered reporter workloads (1.15.0) |
 | Governed by | ADR-ORG-007 §5.4, §5.5 (amended 2026-10-20) — the refusal's own type; a retry answers the invitation without its token (1.15.0) |
 | Governed by | ADR-IAM-011 §5.1, §5.6 (accepted 2026-10-20) — `POST /v1/invitations/resolve` for identity-control's workload, planned, not built (1.16.0) |
+| Governed by | ADR-IAM-011 §5.7 (amended 2026-10-21) and ADR-ORG-001 §5.11 — the `invitation:resolve` registry entry, the one `404`, `db.WithInvitationResolver`, the audit purpose (1.17.0, §API / Interface) |
 | Conforms to | STD-GLB-001 1.7.0 — the problem type registry; a secret answered once is never in the idempotency record, tested (1.15.0) |
 | Governed by | ADR-ORG-007 — the invited person accepts an invitation, signed in as themselves; the caller must hold the invited address as a proven address (1.14.0) |
 | Depends on | `TDD-identity-control-008` — `POST /v1/principals/{principal_id}/identifiers:match`, Organization Control's workload alone (1.14.0) |

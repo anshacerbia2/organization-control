@@ -605,3 +605,12 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
+  # STD-GLB-009 3.0.0 §5 item 9 (ADR-GLB-020): the repository has a .dockerignore, and it matches a
+  # path of each kind in §Container Images rule 12. scripts/check-dockerignore.sh says how.
+  dockerignore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: build context excludes secrets, local state and version control
+        run: scripts/check-dockerignore.sh

@@ -45,3 +45,6 @@ deploy/dev/compose.override.yaml
 # scripts/image-scan.sh and scripts/atlas-execute-path.sh work here outside CI: the vulnerability
 # database, saved images and traces.
 .image-scan/
+
+# The scratch build context of scripts/check-dockerignore.sh, removed when it exits.
+.dockerignore-check.*/
