@@ -34,3 +34,6 @@ foundation-reference/
 coverage
 cov-src
 *.out
+
+# The scratch build context of scripts/check-dockerignore.sh.
+.dockerignore-check.*

@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.28.0
+  version: 1.29.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-20
+  last_reviewed: 2026-10-21
   parent_sad: SAD-004
 ---
 
@@ -1230,6 +1230,16 @@ the period to the organization [R7]; CIS asks for "a minimum of 90 days" (Safegu
   users with the appropriate SET privilege can change this setting") [R21]. Those are the people who
   could drop a policy too. The integration suite turns triggers off the same way, for its own seeded
   rows, on its disposable database.
+- **How the 7 years count (1.29.0, `STD-GLB-007` 1.3.0 §Data Retention Lifecycle).** Seven years is a
+  minimum, not a deadline. An evidence row counts from when it was written, as the column that says
+  when its newest evidence was made, which is the column chosen above for each table. A row that
+  records something that stays in force counts from the later of when it was written and when it
+  stopped being in force, and is never purged while in force. A row a current decision depends on is
+  state and is kept while it does. The three tables here are evidence rows: an access, a review and
+  the last use of an emergency grant, which `EmergencyValidation` already reads as "never used" once
+  purged (above); the 90-day validation reads only recent uses, so it is evidence, not state. None is a record of a grant or a standing, so the later-of count has no row to apply
+  to; the grants are `organization.provider_grant`, which is not purged. The sources are the
+  standard's: CA/Browser Forum BR §5.4.3 and §5.5.2, NIST AU-11, OMB M-21-31.
 - **Decommissioning purges none.** Retiring a Tenant through offboarding deletes no audit record,
   however old. A provider's access to a retired Tenant is what a later investigation needs, and
   `STD-GLB-007` exempts audit records from the decommissioning purge. There is no decommissioning
@@ -2230,6 +2240,12 @@ leaves out the sibling checkouts, every `keys/` directory, `*.pem`, `.env`, a se
   because they persist in the final image" [R23].
 - **The same file in identity-control.** identity-control made the same change (`aa31462`). No
   standard states the rule yet; it is reported for `STD-GLB-009` §Container Images.
+- **The rule and its check (1.29.0).** `STD-GLB-009` 3.0.0 §Container Images rule 12 now states it
+  (`ADR-GLB-020`): the file MUST exclude secrets and key material, local state, and `.git` and
+  `.github`. This file already does. `scripts/check-dockerignore.sh`, byte-identical in
+  identity-kernel and identity-control, builds a scratch context with the file and a probe of each
+  kind and fails when one reaches the context, by Docker's own matching (§5 item 9). The
+  `dockerignore` job of `ci.yml` runs it.
 
 | Ref | Source |
 | :-- | :-- |
@@ -2249,6 +2265,8 @@ leaves out the sibling checkouts, every `keys/` directory, `*.pem`, `.env`, a se
 | Governed by | ADR-ORG-007 §5.1, §5.2 — the self caller accepts an invitation; the token selects one row through the self role (1.26.0) |
 | Governed by | ADR-ORG-002 §5.6 — the privileged-access record is read and reviewed (1.21.0); kept 7 years, purged by maintenance, never by decommissioning (amended 2026-10-20, 1.27.0) |
 | Conforms to | STD-GLB-007 1.1.0 §Data Retention Lifecycle and compliance check 4 — audit records kept 7 years, purged through a delete-only control, exempt from decommissioning (1.27.0) |
+| Conforms to | STD-GLB-007 1.3.0 §Data Retention Lifecycle — how the 7 years count, evidence against state (1.29.0, §Retention) |
+| Conforms to | STD-GLB-009 3.0.0 §Container Images rule 12 and §5 item 9, authorized by ADR-GLB-020 — `.dockerignore` and its CI check (1.29.0, §The Build Context) |
 | Conforms to | STD-GLB-007 1.2.0 §Data Retention Lifecycle and compliance check 4 — the `BEFORE DELETE` and `BEFORE TRUNCATE` triggers it describes as this service's, under the §Retention heading it cites (1.28.0) |
 | Conforms to | STD-GLB-007 1.2.1 enforcement item 4, "Where it stands" — names this service as implementing the purge, the triggers and the tests (organization-control #75, `TestTheAuditPurgeDeletesOnlyRecordsOlderThanSevenYears`, `TestTheDatabaseRefusesToDeleteAYoungAuditRecord`) (1.28.0) |
 | Governed by | ADR-ORG-003 §5.5, §5.6 (amended 2026-10-20) — the drill proves the restore bump; a provider re-applies a lost Membership withdrawal under the pause (1.28.0) |

@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.17.0
+  version: 1.18.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-20
+  last_reviewed: 2026-10-21
   parent_sad: SAD-004
 ---
 
@@ -927,15 +927,25 @@ POST /v1/tenants/{tenant_id}/memberships/{membership_id}/revoke     {"expected_v
   that Tenant's policy, so one in another Tenant is `404`.
 - **No Tenant approval first, and usable at any time.** It only narrows access and is used in
   incidents; the pause of Tenant administration does not hold it.
-- **Planned, not built: a provider read of the one Membership** (1.17.0, recorded 2026-10-20).
-  `GET /v1/tenants/{tenant_id}/memberships/{membership_id}`, with the same authority as the two
-  commands: a provider in force, `X-Administrative-Reason`, through `db.WithProviderInTenant`, the
-  access recorded naming the Tenant, and a Membership of another Tenant `404`. It would answer the
-  shape of the Tenant administrator's `GET /v1/memberships/{membership_id}`, so the operator reads the
-  status and `expected_version` instead of typing them. organization-experience #22 found the gap: its
-  provider suspend and revoke screen asks for the Membership's identifier and version by hand.
-  `ADR-ORG-003 §5.6` names the two commands and no read, so the read waits for the architecture to
-  name it before it is built (ROADMAP backlog item 61).
+- **Planned, not built: a provider read of the one Membership** (named by `ADR-ORG-003 §5.6`, amended
+  2026-10-21; design 1.18.0). `GET /v1/tenants/{tenant_id}/memberships/{membership_id}` is decided; the
+  code waits (ROADMAP backlog item 61).
+  - **Authority, the same as the two commands and no more.** A provider in force (an approved activation
+    or an emergency grant), through `db.WithProviderInTenant`. It is a privileged function whether it
+    changes the record or reads it, and the privileged-access row names the Tenant, so the Tenant's
+    administrators see the read in `GET /v1/provider-access` (`ADR-ORG-003 §5.6`; AC-6, AC-6(9)).
+  - **The reason header.** `X-Administrative-Reason` is required, like the commands. An eligible holder
+    is refused before a transaction opens. A read needs it too: the decision is `ADR-ORG-003 §5.6`
+    (amended 2026-10-21).
+  - **One Membership, `404` otherwise.** It answers that Membership's identifier, state and
+    `expected_version`, in the shape of the Tenant administrator's `GET /v1/memberships/{membership_id}`.
+    The Membership is read under the path Tenant's policy, so one that is not in that Tenant answers
+    `404`, as an absent one does. It is not a listing and not an unscoped read by identifier.
+  - **A safe method.** `GET` takes no `Idempotency-Key` and no `expected_version` (RFC 9110 §9.2.1).
+  - **No Tenant approval first.** It only narrows access and is used in incidents, as the commands are.
+  - **Consumer.** organization-experience's provider screen reads the status and `expected_version`
+    instead of asking the operator to type them (organization-experience #22). `api/openapi.yaml` gains
+    the route when it is built, and that screen's contract copy follows it.
 
 ### Published Events
 
@@ -1560,6 +1570,7 @@ as a provider. Written (1.15.0): `docs/runbooks/fresh-check-misuse.md`.
 | Realizes capability | PAD-PLT-002 — Organization & Tenancy Platform |
 | Governed by | ADR-ORG-001 — Separate Organization Authority and Keycloak Projection; §5.11 a consumer is a registered workload Principal |
 | Governed by | ADR-ORG-001 §5.7 (amended 2026-10-20) — a consumer reconciles itself on a declared interval, alerted at one and two (1.16.0, §Reconciliation Interval) |
+| Governed by | ADR-ORG-003 §5.6 (amended 2026-10-21) — the provider's read of one Membership, planned, not built (1.18.0, §A Provider Withdraws One Membership) |
 | Governed by | ADR-ORG-003 §5.5 (amended 2026-10-20) — the restore bump; §5.6 — a provider suspends or revokes one Membership inside a Tenant (1.16.0) |
 | Conforms to | STD-GLB-002 3.3.0 §A restore to an older point — the drill proves the bump (1.16.0) |
 | Governed by | ADR-ORG-003 §5.5 (amended 2026-10-20) — identity-control and foundation-reference order a Tenant by (`tenant_security_version`, `tenant_version`); the bump runs once per restore (1.17.0) |
