@@ -1831,19 +1831,27 @@ administrative connection is explicitly not accepted as evidence.
 
 ### The Schemas Against the Handlers (1.32.0)
 
-`internal/httpapi/contract_test.go` holds every exchange the route tests make to `api/openapi.yaml`;
-`contract_types_test.go` holds the Go types the handlers write and read to it. `ROADMAP.md` §API
-specification states the approach and its sources.
+Built 2026-10-22 (`ROADMAP.md` item 62). `ROADMAP.md` §API specification states the approach and its
+sources.
 
-- A route test's response must satisfy the schema its status names, and an accepted request its
-  operation's parameters and body.
-- The route tests stop a request before the database, so they produce no success body. For each
-  operation the table in `contract_types_test.go` names, a document is generated from the response
-  schema, read into the type the handler writes with unknown fields refused, and written back; the
-  request body is read into the type the handler decodes. Six operations whose handler writes a map
-  literal are waived (`mapResponses`), until item 67 puts an exchange against a database.
-- After a whole run of the package, every operation has had a success (or a waiver) and a problem
-  checked.
+- `internal/httpapi/contract_test.go` checks every exchange the route tests make against
+  `api/openapi.yaml`: the response against the schema its status names, and an accepted request
+  against its operation's parameters and body.
+- The route tests stop a request before the database, so they check the problems. The success
+  exchanges are `contract_live_test.go` and its `contract_live_*_test.go` files: the same handlers on
+  the services `cmd/organization-control` wires, each pool on its production login role, against the
+  integration database. They drive each resource through its lifecycle by the API itself, so every
+  request body they send is checked too. Seeding is on the owner connection: a Tenant, the fixture's
+  emergency grant, an abandoned delivery and its dead letter, an applied receipt.
+- After a whole run of the package, every operation must have had a success and a problem checked.
+  A run with no integration database is not held to it; CI sets `REQUIRE_INTEGRATION`, so there it
+  always applies.
+- Found and fixed: an empty snapshot page wrote `"rows": null` or `"grants": null` where the
+  specification documents an array (`projection.endPage`, `endProviderPage`).
+- Found and not changed: a Membership with no Workspace is written with the nil UUID as
+  `workspace_id`, and one with no end with `0001-01-01T00:00:00Z` as `valid_until`. Both satisfy the
+  schema, which requires the two fields and does not say what an absent value is. Changing them changes
+  the documented shape, so it waits on a decision (`ROADMAP.md` item 67).
 
 ### Restore
 

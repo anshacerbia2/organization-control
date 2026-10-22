@@ -162,10 +162,6 @@ func describe(problems []*verrors.ValidationError) string {
 	return strings.Join(lines, "\n")
 }
 
-// contractWaived names the operations whose success is not yet checked, with the reason. It is empty
-// unless a repository's own file fills it; the coverage gate does not ask for a success of these.
-var contractWaived = map[string]string{}
-
 // serveChecked runs a request through a handler and checks the exchange.
 func serveChecked(t testing.TB, handler http.Handler, request *http.Request) *httptest.ResponseRecorder {
 	t.Helper()
@@ -185,7 +181,9 @@ func serveChecked(t testing.TB, handler http.Handler, request *http.Request) *ht
 
 // TestMain holds the route tests to the specification's coverage: after a whole run of the package,
 // every operation that declares a success response has had a success checked, and every operation
-// has had a problem checked. A run narrowed by -run or -short is not held to it.
+// has had a problem checked. A run narrowed by -run or -short is not held to it, and neither is a run
+// with no integration database: the success exchanges are contract_live_test.go's, against it. CI sets
+// REQUIRE_INTEGRATION, so there the gate always applies.
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if code == 0 && wholeRun() {
@@ -201,7 +199,8 @@ func TestMain(m *testing.M) {
 func wholeRun() bool {
 	run := flag.Lookup("test.run")
 	short := flag.Lookup("test.short")
-	return (run == nil || run.Value.String() == "") && (short == nil || short.Value.String() != "true")
+	database := os.Getenv("TEST_DATABASE_URL") != "" || os.Getenv("REQUIRE_INTEGRATION") != ""
+	return database && (run == nil || run.Value.String() == "") && (short == nil || short.Value.String() != "true")
 }
 
 // uncovered names each operation lacking a checked success (when it declares one) or a checked
@@ -227,10 +226,9 @@ func uncovered() []string {
 				problem = problem || status >= 400
 			}
 			switch {
-			case wantSuccess && contractWaived[key] != "" && problem:
-			case wantSuccess && !success && contractWaived[key] == "" && !problem:
+			case wantSuccess && !success && !problem:
 				missing = append(missing, key+": no success and no problem")
-			case wantSuccess && !success && contractWaived[key] == "":
+			case wantSuccess && !success:
 				missing = append(missing, key+": no success")
 			case wantProblem && !problem:
 				missing = append(missing, key+": no problem")

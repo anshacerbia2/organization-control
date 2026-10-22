@@ -175,6 +175,10 @@ func providerSnapshotIn(ctx context.Context, tx db.Tx, req SnapshotRequest, size
 }
 
 func endProviderPage(page ProviderPage, size int) ProviderPage {
+	// An empty page is an empty array, as api/openapi.yaml documents it, never null.
+	if page.Grants == nil {
+		page.Grants = []ProviderGrantRow{}
+	}
 	if len(page.Grants) == size {
 		page.Cursor = page.Grants[len(page.Grants)-1].GrantID.String()
 	}
