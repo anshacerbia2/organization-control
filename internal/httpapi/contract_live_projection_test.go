@@ -49,7 +49,9 @@ func TestLiveProjectionConsumer(t *testing.T) {
 	asked := map[string]any{"tenant_id": fixtureTenant, "principal_id": fixturePrincipal}
 	l.call(consumer, http.MethodPost, "/v1/context/verify", asked, http.StatusOK)
 	l.call(consumer, http.MethodPost, "/v1/context/switch-eligible", asked, http.StatusOK)
-	l.call(provider, http.MethodPost, "/v1/context/rate", map[string]any{"consumer_id": name, "requests": 1}, http.StatusOK)
+	// Two checks in a thousand requests: a ratio well under 1, which internal/context's ranking test
+	// assumes of every interval on the shared database, retired consumers' included.
+	l.call(provider, http.MethodPost, "/v1/context/rate", map[string]any{"consumer_id": name, "requests": 1000}, http.StatusOK)
 	l.call(provider, http.MethodGet, "/v1/context/rate/over-threshold?threshold=1", nil, http.StatusOK)
 	l.call(provider, http.MethodGet, "/v1/principals/"+fixturePrincipal+"/contexts", nil, http.StatusOK)
 
