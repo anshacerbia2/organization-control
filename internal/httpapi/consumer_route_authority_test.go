@@ -74,8 +74,7 @@ func TestAConsumerIsRefusedOnEveryRouteThatIsNotItsOwn(t *testing.T) {
 		// The header a provider would send. Without it a refusal would prove only that the header
 		// was missing.
 		request.Header.Set(ReasonHeader, "a consumer claiming provider authority")
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, request)
+		recorder := serveChecked(t, handler, request)
 
 		if recorder.Code != http.StatusForbidden {
 			t.Errorf("%s answered %d to a consumer carrying a reason, want 403", route, recorder.Code)

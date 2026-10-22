@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.31.0
+  version: 1.32.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -1828,6 +1828,22 @@ administrative connection is explicitly not accepted as evidence.
   requires a finding for each. Its own tests run it on a fixture module with one case for
   every attribution rule and every refusal, and a mutation to either walk rule turns them
   red.
+
+### The Schemas Against the Handlers (1.32.0)
+
+`internal/httpapi/contract_test.go` holds every exchange the route tests make to `api/openapi.yaml`;
+`contract_types_test.go` holds the Go types the handlers write and read to it. `ROADMAP.md` §API
+specification states the approach and its sources.
+
+- A route test's response must satisfy the schema its status names, and an accepted request its
+  operation's parameters and body.
+- The route tests stop a request before the database, so they produce no success body. For each
+  operation the table in `contract_types_test.go` names, a document is generated from the response
+  schema, read into the type the handler writes with unknown fields refused, and written back; the
+  request body is read into the type the handler decodes. Six operations whose handler writes a map
+  literal are waived (`mapResponses`), until item 67 puts an exchange against a database.
+- After a whole run of the package, every operation has had a success (or a waiver) and a problem
+  checked.
 
 ### Restore
 

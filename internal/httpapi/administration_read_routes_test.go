@@ -19,8 +19,7 @@ func get(t *testing.T, handler http.Handler, path string, headers map[string]str
 	for name, value := range headers {
 		request.Header.Set(name, value)
 	}
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
+	recorder := serveChecked(t, handler, request)
 	return recorder
 }
 
