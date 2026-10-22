@@ -39,6 +39,11 @@ services:
       # proxy builds with GOPROXY=direct (STD-GLB-009 §Development Server Deployment).
       args:
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+      # The commit this image was built from, read back by deploy-dev from the image the running
+      # container uses. CI passes GITHUB_SHA; on a server: BUILD_REVISION=$(git rev-parse HEAD)
+      # (TDD-organization-control-001 §The Migrate Image and Its Exceptions).
+      labels:
+        org.opencontainers.image.revision: ${BUILD_REVISION:-unknown}
     # Named, so every one-off task below runs this image and `up --build` rebuilds them with the
     # release.
     image: scnehaux-organization-control-dev-migrate

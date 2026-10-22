@@ -62,6 +62,8 @@ docker compose up -d --build
 curl -fsS http://127.0.0.1:8083/readyz       # ready once the migration job has succeeded
 ```
 
+Set `BUILD_REVISION=$(git rev-parse HEAD)` for the build to record the commit as the image's `org.opencontainers.image.revision` label (`unknown` without it); `deploy-dev` sets it and checks it.
+
 The service starts with no provider and no dispatcher. §One-off tasks and §Wiring to other services
 make it useful.
 

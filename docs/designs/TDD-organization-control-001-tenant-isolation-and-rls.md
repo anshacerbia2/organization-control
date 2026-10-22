@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.30.0
+  version: 1.31.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-21
+  last_reviewed: 2026-10-22
   parent_sad: SAD-004
 ---
 
@@ -2226,8 +2226,28 @@ registry and relies on the platform cached image. If there is no cached image, a
 reported" [R18]. The default for a service that does not build is `missing`, under which a task run
 before the first build would have pulled the name. `deploy-dev` asserts both on every run. Every image
 the stack names without a digest must carry `build` where its service builds it and `never`
-elsewhere, and the migrate image in use must have no registry digest, which shows it was built and
-not pulled.
+elsewhere, and the migrate image in use must carry the commit under test (1.31.0).
+
+The check on the image itself is positive since 1.31.0. It reads the commit under test back from the
+image the running migrate container uses. Compose sets the label: "`labels` add metadata to the
+resulting image" [R24], here `org.opencontainers.image.revision`, fed from `GITHUB_SHA` in CI and
+from `git rev-parse HEAD` on a server (`BUILD_REVISION`). The OCI Image Specification defines it:
+"**org.opencontainers.image.revision** Source control revision identifier for the packaged
+software", in the namespace that "is reserved for use in the OCI Image Specification" [R25].
+`deploy-dev` takes the image ID of the migrate container, not a tag, and requires that image's label
+to equal `GITHUB_SHA`. An image pulled under the same name would not carry the revision of a commit
+that did not exist when it was published.
+
+Until 1.31.0 the check required the image to carry no registry digest. It failed on 2026-10-22 in
+identity-control's `deploy-dev`, run 39735938275, on the runner image `ubuntu-26.04` (its last pass,
+run 39651327871, ran on `ubuntu-24.04`): the log shows the image built, not pulled, with its
+"exporting attestation manifest" and "exporting manifest list" lines, and the same check then
+reported a registry digest. Docker's containerd image store is "the default storage backend for
+Docker Engine 29.0 and later on fresh installations", and it is the store that handles "images that
+include attestations (provenance, SBOM)", which "use image indices that the classic store doesn't
+support" [R26]. The explanation is that a locally built image in that store carries a digest too, so
+an absent digest no longer shows that an image was built here. The log does not print the digests,
+so the check now prints them. The runner image is not pinned to dodge it.
 
 **Residual risk.**
 
@@ -2284,6 +2304,9 @@ leaves out the sibling checkouts, every `keys/` directory, `*.pem`, `.env`, a se
 | :-- | :-- |
 | R22 | Docker, *Build context*, <https://docs.docker.com/build/concepts/context/>, accessed 2026-10-20: "You can use a `.dockerignore` file to exclude files or directories from the build context." |
 | R23 | Docker, *Build secrets*, <https://docs.docker.com/build/building/secrets/>, accessed 2026-10-20: "Build arguments and environment variables are inappropriate for passing secrets to your build, because they persist in the final image." |
+| R24 | Docker, _Compose Build Specification_, `labels`, <https://docs.docker.com/reference/compose-file/build/#labels>, accessed 2026-10-22. "`labels` add metadata to the resulting image." |
+| R25 | Open Container Initiative, _Image Format Specification: Annotations_, <https://github.com/opencontainers/image-spec/blob/main/annotations.md>, accessed 2026-10-22. "**org.opencontainers.image.revision** Source control revision identifier for the packaged software." "Keys using the `org.opencontainers.image` namespace are reserved for use in the OCI Image Specification and MUST NOT be used by other specifications and extensions, including other OCI specifications." The page defines annotations; that the same key is set as an image label is Compose's `labels` [R24]. |
+| R26 | Docker, _containerd image store_, <https://docs.docker.com/engine/storage/containerd/>, accessed 2026-10-22. "The containerd image store is the default storage backend for Docker Engine 29.0 and later on fresh installations." "Working with images that include attestations (provenance, SBOM). These use image indices that the classic store doesn't support." |
 
 ## Traceability
 
