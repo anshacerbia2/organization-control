@@ -52,6 +52,10 @@ env:
 jobs:
   wiring:
     runs-on: ubuntu-latest
+    env:
+      # The commit under test: the images are built with it as their revision label and the
+      # check reads it back from the image the running container uses.
+      BUILD_REVISION: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -157,7 +161,8 @@ jobs:
       # §The Migrate Image and Its Exceptions). Compose pulls a service's image name before building
       # unless pull_policy says otherwise, and a published image of that name would run instead. Every
       # undigested name must be pull_policy build where the service builds it and never elsewhere, and
-      # the migrate image in use must carry no registry digest: it was built here, not pulled.
+      # the image the migrate container runs must carry this commit as its OCI revision label: it was
+      # built here, not pulled.
       - name: no image named here is pulled from a registry
         working-directory: deploy/dev
         run: |
@@ -178,12 +183,19 @@ jobs:
               print(f"::error::{message}")
           sys.exit(1 if bad else 0)
           PY
-          digests="$(docker image inspect -f '{{len .RepoDigests}}' scnehaux-organization-control-dev-migrate)"
-          if [ "$digests" != 0 ]; then
-            echo "::error::scnehaux-organization-control-dev-migrate carries a registry digest: it was pulled, not built"
+          # The image the migrate container runs, by its ID and not by the tag, must carry this
+          # commit as its revision label: it was built from it here. The image store gives no such
+          # proof by its digests: with the containerd store a local build is a manifest list too.
+          cid="$(docker compose ps -aq migrate)"
+          [ "$(printf '%s\n' "$cid" | grep -c .)" = 1 ] || { echo "::error::expected one migrate container, got: $cid"; exit 1; }
+          image_id="$(docker inspect -f '{{.Image}}' "$cid")"
+          got="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id")"
+          echo "repo digests of $image_id: $(docker image inspect -f '{{.RepoDigests}}' "$image_id")"
+          if [ -z "$GITHUB_SHA" ] || [ "$got" != "$GITHUB_SHA" ]; then
+            echo "::error::the migrate container runs image $image_id with revision '$got', want '$GITHUB_SHA': it was not built from this commit"
             exit 1
           fi
-          echo "scnehaux-organization-control-dev-migrate has no registry digest: built here"
+          echo "the migrate container runs image $image_id, built from $got"
 
       - name: wire the two services (README §Wiring to other services, steps 1 to 6)
         run: |
