@@ -1840,7 +1840,8 @@ sources.
 - The route tests stop a request before the database, so they check the problems. The success
   exchanges are `contract_live_test.go` and its `contract_live_*_test.go` files: the same handlers on
   the services `cmd/organization-control` wires, each pool on its production login role, against the
-  integration database. They drive each resource through its lifecycle by the API itself, so every
+  integration database. The privileged-access recorder is stubbed: `internal/access` is not an edge
+  of `internal/httpapi` (`arch.json`), and its records are its own suite's. They drive each resource through its lifecycle by the API itself, so every
   request body they send is checked too. Seeding is on the owner connection: a Tenant, the fixture's
   emergency grant, an abandoned delivery and its dead letter, an applied receipt.
 - After a whole run of the package, every operation must have had a success and a problem checked.

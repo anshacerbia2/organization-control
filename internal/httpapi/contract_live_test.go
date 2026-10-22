@@ -21,7 +21,6 @@ import (
 	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/observability"
 
-	"github.com/anshacerbia2/organization-control/internal/access"
 	"github.com/anshacerbia2/organization-control/internal/authority"
 	occontext "github.com/anshacerbia2/organization-control/internal/context"
 	"github.com/anshacerbia2/organization-control/internal/db"
@@ -90,9 +89,9 @@ func liveSurface(t *testing.T) *live {
 			t.Fatalf("%s: %v", what, err)
 		}
 	}
-	// As cmd/organization-control/main.go wires them.
-	recorder, err := access.New(providerConns)
-	must(err, "recorder")
+	// As cmd/organization-control/main.go wires them, but for the privileged-access recorder:
+	// internal/access is not an edge of this package (arch.json), and its records are its own suite's.
+	recorder := stubRecorder{}
 	tenantPool, err := db.NewTenantPool(tenantConns)
 	must(err, "tenant pool")
 	providerPool, err := db.NewProviderPool(providerConns, recorder)
