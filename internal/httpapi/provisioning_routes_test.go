@@ -112,8 +112,7 @@ func TestAMalformedTenantIdentifierIsRefusedBeforeTheDatabase(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodGet, "/v1/tenants/not-a-uuid", nil)
 	request.Header.Set(ReasonHeader, "an audit")
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
+	recorder := serveChecked(t, handler, request)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Errorf("a malformed tenant identifier answered %d, want 400:\n%s",

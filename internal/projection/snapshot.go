@@ -259,6 +259,10 @@ func snapshotIn(ctx context.Context, tx db.Tx, req SnapshotRequest, size int, pa
 // whose successor turns out to be empty — which costs one extra request and avoids reporting
 // "no more rows" from a count that a concurrent snapshot could make wrong.
 func endPage(page Page, size int) Page {
+	// An empty page is an empty array, as api/openapi.yaml documents it, never null.
+	if page.Rows == nil {
+		page.Rows = []Row{}
+	}
 	if len(page.Rows) == size {
 		page.Cursor = page.Rows[len(page.Rows)-1].MembershipID.String()
 	}

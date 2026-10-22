@@ -18,14 +18,14 @@ func TestTheProviderMembershipReadIsAProvidersInForceWithAReason(t *testing.T) {
 
 	tenant, eligible := tenantCaller(t), eligibleCaller(t)
 	for name, caller := range map[string]*Caller{"a tenant caller": &tenant, "an eligible holder": &eligible} {
-		if recorder := getWith(mounted(t, caller), path, reason); recorder.Code != http.StatusForbidden {
+		if recorder := getWith(t, mounted(t, caller), path, reason); recorder.Code != http.StatusForbidden {
 			t.Errorf("%s answered %d, want 403", name, recorder.Code)
 		}
 	}
 
 	provider := providerCaller(t)
 	handler := mounted(t, &provider)
-	if recorder := getWith(handler, path, nil); recorder.Code != http.StatusBadRequest ||
+	if recorder := getWith(t, handler, path, nil); recorder.Code != http.StatusBadRequest ||
 		!strings.Contains(recorder.Body.String(), ReasonHeader) {
 		t.Errorf("a read without a reason answered %d, want 400 naming %s:\n%s",
 			recorder.Code, ReasonHeader, recorder.Body.String())
@@ -34,7 +34,7 @@ func TestTheProviderMembershipReadIsAProvidersInForceWithAReason(t *testing.T) {
 		"a malformed Tenant":     "/v1/tenants/kc-tenant/memberships/" + mustID(t).String(),
 		"a malformed Membership": "/v1/tenants/" + mustID(t).String() + "/memberships/m-1",
 	} {
-		if recorder := getWith(handler, malformed, reason); recorder.Code != http.StatusBadRequest {
+		if recorder := getWith(t, handler, malformed, reason); recorder.Code != http.StatusBadRequest {
 			t.Errorf("%s answered %d, want 400", name, recorder.Code)
 		}
 	}
