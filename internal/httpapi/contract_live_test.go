@@ -248,6 +248,16 @@ func str(t *testing.T, body map[string]any, field string) string {
 	return value
 }
 
+// requireNull requires a field present with the value null: an absent value, written as STD-GLB-001
+// 2.0.0 asks, and not the zero value of its type.
+func requireNull(t *testing.T, body map[string]any, field string) {
+	t.Helper()
+	value, ok := body[field]
+	if !ok || value != nil {
+		t.Fatalf("%s is %v (present: %v), want null: %v", field, value, ok, body)
+	}
+}
+
 // obj reads an object field of a decoded body.
 func obj(t *testing.T, body map[string]any, field string) map[string]any {
 	t.Helper()

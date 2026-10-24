@@ -28,16 +28,18 @@ import (
 // domain type cannot widen a response by itself.
 
 type membershipView struct {
-	MembershipID id.UUID   `json:"membership_id"`
-	PrincipalID  id.UUID   `json:"principal_id"`
-	TenantID     id.UUID   `json:"tenant_id"`
-	WorkspaceID  id.UUID   `json:"workspace_id"`
-	SubjectType  string    `json:"subject_type"`
-	Status       string    `json:"status"`
-	Version      int64     `json:"version"`
-	ValidFrom    time.Time `json:"valid_from"`
-	ValidUntil   time.Time `json:"valid_until"`
-	Provenance   string    `json:"provenance"`
+	MembershipID id.UUID `json:"membership_id"`
+	PrincipalID  id.UUID `json:"principal_id"`
+	TenantID     id.UUID `json:"tenant_id"`
+	// WorkspaceID and ValidUntil are null when absent, never the nil UUID or the zero time
+	// (STD-GLB-001 2.0.0, ADR-GLB-021).
+	WorkspaceID *id.UUID   `json:"workspace_id"`
+	SubjectType string     `json:"subject_type"`
+	Status      string     `json:"status"`
+	Version     int64      `json:"version"`
+	ValidFrom   time.Time  `json:"valid_from"`
+	ValidUntil  *time.Time `json:"valid_until"`
+	Provenance  string     `json:"provenance"`
 }
 
 type membershipResultView struct {
@@ -53,10 +55,27 @@ type membershipResultView struct {
 func viewMembership(m membership.Membership) membershipView {
 	return membershipView{
 		MembershipID: m.MembershipID, PrincipalID: m.PrincipalID, TenantID: m.TenantID,
-		WorkspaceID: m.WorkspaceID, SubjectType: m.SubjectType, Status: string(m.Status),
-		Version: m.Version, ValidFrom: m.ValidFrom, ValidUntil: m.ValidUntil,
+		WorkspaceID: presentID(m.WorkspaceID), SubjectType: m.SubjectType, Status: string(m.Status),
+		Version: m.Version, ValidFrom: m.ValidFrom, ValidUntil: presentTime(m.ValidUntil),
 		Provenance: m.Provenance,
 	}
+}
+
+// presentID is the identifier, or nil when it is the nil UUID, which a domain value uses for "none".
+// A response writes nil as null (STD-GLB-001 2.0.0: "A sentinel is never allowed").
+func presentID(u id.UUID) *id.UUID {
+	if u.IsNil() {
+		return nil
+	}
+	return &u
+}
+
+// presentTime is the instant, or nil when it is Go's zero time, which a domain value uses for "none".
+func presentTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 func viewMembershipResult(r membership.Result) membershipResultView {

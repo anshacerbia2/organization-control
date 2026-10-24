@@ -23,6 +23,7 @@ func TestLiveTenantAdministration(t *testing.T) {
 			"provenance": "contract test", "valid_from": time.Now().UTC().Format(time.RFC3339)}
 		if workspace {
 			body["workspace_id"] = str(t, space, "workspace_id")
+			body["valid_until"] = time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
 		}
 		return l.call(caller, http.MethodPost, "/v1/memberships", body, http.StatusCreated)
 	}
@@ -30,13 +31,25 @@ func TestLiveTenantAdministration(t *testing.T) {
 	memberPath := "/v1/memberships/" + str(t, obj(t, member, "membership"), "membership_id")
 	l.call(caller, http.MethodGet, "/v1/memberships?limit=2", nil, http.StatusOK)
 	member = l.call(caller, http.MethodGet, memberPath, nil, http.StatusOK)
+	str(t, member, "workspace_id")
+	str(t, member, "valid_until")
 	l.call(caller, http.MethodGet, memberPath+"/enforcement", nil, http.StatusOK)
 	member = l.call(caller, http.MethodPost, memberPath+"/suspend", version(t, member), http.StatusOK)
 	member = l.call(caller, http.MethodPost, memberPath+"/restore", version(t, member), http.StatusOK)
 	l.call(caller, http.MethodPost, memberPath+"/revoke", version(t, member), http.StatusOK)
 
+	// A Tenant-wide Membership with no end: both members are null, never the nil UUID or the zero
+	// time, in the command's answer and in the read (STD-GLB-001 2.0.0, ROADMAP item 67).
+	bare := obj(t, grant(false), "membership")
+	requireNull(t, bare, "workspace_id")
+	requireNull(t, bare, "valid_until")
+	barePath := "/v1/memberships/" + str(t, bare, "membership_id")
+	read := l.call(caller, http.MethodGet, barePath, nil, http.StatusOK)
+	requireNull(t, read, "workspace_id")
+	requireNull(t, read, "valid_until")
+
 	batch := l.call(caller, http.MethodPost, "/v1/membership-batches", map[string]any{
-		"action": "suspend", "membership_ids": []string{str(t, obj(t, grant(false), "membership"), "membership_id")},
+		"action": "suspend", "membership_ids": []string{str(t, bare, "membership_id")},
 	}, http.StatusCreated)
 	batchPath := "/v1/membership-batches/" + str(t, batch, "batch_id")
 	l.call(caller, http.MethodGet, batchPath, nil, http.StatusOK)
