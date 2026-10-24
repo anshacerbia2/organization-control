@@ -28,7 +28,7 @@ func TestThePrivilegedAccessRoutesAreAProvidersInForce(t *testing.T) {
 		for name, caller := range map[string]*Caller{"a tenant caller": &tenant, "an eligible holder": &eligible} {
 			// An eligible caller is refused by authentication in production; mounted here it reaches
 			// the route, and requireProvider refuses it on any route regardless.
-			if recorder := getWith(mounted(t, caller), path, reason); recorder.Code != http.StatusForbidden {
+			if recorder := getWith(t, mounted(t, caller), path, reason); recorder.Code != http.StatusForbidden {
 				t.Errorf("%s on %s answered %d, want 403", name, path, recorder.Code)
 			}
 		}
@@ -45,7 +45,7 @@ func TestTheProviderListRefusesWhatItCannotHonour(t *testing.T) {
 	handler := mounted(t, &provider)
 	reason := map[string]string{ReasonHeader: "weekly review"}
 
-	if recorder := getWith(handler, privilegedAccessPath, nil); recorder.Code != http.StatusBadRequest ||
+	if recorder := getWith(t, handler, privilegedAccessPath, nil); recorder.Code != http.StatusBadRequest ||
 		!strings.Contains(recorder.Body.String(), ReasonHeader) {
 		t.Errorf("a read without a reason answered %d, want 400 naming %s", recorder.Code, ReasonHeader)
 	}
@@ -61,7 +61,7 @@ func TestTheProviderListRefusesWhatItCannotHonour(t *testing.T) {
 		"a filter given twice":         "?authority=emergency&authority=activation",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if recorder := getWith(handler, privilegedAccessPath+query, reason); recorder.Code != http.StatusBadRequest {
+			if recorder := getWith(t, handler, privilegedAccessPath+query, reason); recorder.Code != http.StatusBadRequest {
 				t.Errorf("answered %d, want 400:\n%s", recorder.Code, recorder.Body.String())
 			}
 		})
@@ -72,7 +72,7 @@ func TestTheTenantsListIsATenantAdministratorsAndNamesNoTenant(t *testing.T) {
 	t.Parallel()
 
 	provider, tenant := providerCaller(t), tenantCaller(t)
-	if recorder := getWith(mounted(t, &provider), "/v1/provider-access", map[string]string{ReasonHeader: "r"}); recorder.Code != http.StatusForbidden {
+	if recorder := getWith(t, mounted(t, &provider), "/v1/provider-access", map[string]string{ReasonHeader: "r"}); recorder.Code != http.StatusForbidden {
 		t.Errorf("a provider on the Tenant's list answered %d, want 403", recorder.Code)
 	}
 	handler := mounted(t, &tenant)
@@ -83,7 +83,7 @@ func TestTheTenantsListIsATenantAdministratorsAndNamesNoTenant(t *testing.T) {
 		"a malformed instant": "?to=now",
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
-			if recorder := getWith(handler, "/v1/provider-access"+query, nil); recorder.Code != http.StatusBadRequest {
+			if recorder := getWith(t, handler, "/v1/provider-access"+query, nil); recorder.Code != http.StatusBadRequest {
 				t.Errorf("answered %d, want 400:\n%s", recorder.Code, recorder.Body.String())
 			}
 		})

@@ -26,8 +26,7 @@ func TestTheTenantAdministrationRoutesAreProviderOnly(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodGet, own, nil)
 	request.Header.Set(ReasonHeader, "an audit")
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
+	recorder := serveChecked(t, handler, request)
 	if recorder.Code != http.StatusForbidden {
 		t.Errorf("a tenant caller on GET %s answered %d, want 403", own, recorder.Code)
 	}

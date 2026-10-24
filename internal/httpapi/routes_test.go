@@ -190,8 +190,7 @@ func post(t *testing.T, handler http.Handler, path, body string, headers map[str
 			request.Header.Set(name, value)
 		}
 	}
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
+	recorder := serveChecked(t, handler, request)
 	return recorder
 }
 
@@ -228,8 +227,7 @@ func TestProbesNeedNoCaller(t *testing.T) {
 
 	for _, path := range []string{"/healthz", "/readyz"} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, request)
+		recorder := serveChecked(t, handler, request)
 
 		if recorder.Code != http.StatusOK {
 			t.Errorf("%s answered %d with no caller, want 200", path, recorder.Code)
@@ -249,8 +247,7 @@ func TestReadinessFailsWhenTheDatabaseIsUnreachable(t *testing.T) {
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
-	recorder := httptest.NewRecorder()
-	surface.Probes.ServeHTTP(recorder, request)
+	recorder := serveChecked(t, surface.Probes, request)
 
 	// 503, not 500. The replica is healthy and its dependency is not, and the orchestrator's
 	// correct response is to take it out of rotation rather than to restart it.
@@ -411,8 +408,7 @@ func TestScopeRequiresACorrelation(t *testing.T) {
 	handler := ResolveScope(surface.API)
 	request := httptest.NewRequest(http.MethodPost, "/v1/memberships", strings.NewReader(`{}`))
 	request = request.WithContext(WithCaller(request.Context(), caller))
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
+	recorder := serveChecked(t, handler, request)
 
 	if recorder.Code != http.StatusInternalServerError {
 		t.Errorf("a request with no correlation answered %d, want 500", recorder.Code)

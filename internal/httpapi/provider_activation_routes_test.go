@@ -25,13 +25,12 @@ import (
 
 const heldGrantsPath = "/v1/provider-activations/grants"
 
-func getWith(handler http.Handler, path string, headers map[string]string) *httptest.ResponseRecorder {
+func getWith(t testing.TB, handler http.Handler, path string, headers map[string]string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodGet, path, nil)
 	for name, value := range headers {
 		request.Header.Set(name, value)
 	}
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
+	recorder := serveChecked(t, handler, request)
 	return recorder
 }
 
@@ -44,7 +43,7 @@ func TestTheHeldGrantsRouteRefusesATenantCaller(t *testing.T) {
 	t.Parallel()
 
 	tenant := tenantCaller(t)
-	if recorder := getWith(mounted(t, &tenant), heldGrantsPath, map[string]string{ReasonHeader: "an audit"}); recorder.Code != http.StatusForbidden {
+	if recorder := getWith(t, mounted(t, &tenant), heldGrantsPath, map[string]string{ReasonHeader: "an audit"}); recorder.Code != http.StatusForbidden {
 		t.Errorf("a tenant caller answered %d, want 403", recorder.Code)
 	}
 }
@@ -53,7 +52,7 @@ func TestTheHeldGrantsRouteRequiresAReason(t *testing.T) {
 	t.Parallel()
 
 	for _, caller := range []Caller{eligibleCaller(t), providerCaller(t)} {
-		recorder := getWith(mounted(t, &caller), heldGrantsPath, nil)
+		recorder := getWith(t, mounted(t, &caller), heldGrantsPath, nil)
 		if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), ReasonHeader) {
 			t.Errorf("%+v without a reason answered %d, want 400 naming the header: %s", caller, recorder.Code,
 				recorder.Body.String())
@@ -117,7 +116,7 @@ func TestAnEligibleHolderReadsItsOwnGrants(t *testing.T) {
 		return establish(ResolveScope(next))
 	})
 
-	recorder := getWith(handler, heldGrantsPath, map[string]string{ReasonHeader: "find what I can activate"})
+	recorder := getWith(t, handler, heldGrantsPath, map[string]string{ReasonHeader: "find what I can activate"})
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("an eligible holder answered %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}

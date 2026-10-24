@@ -515,11 +515,12 @@ Items 11 to 18 were recorded as P1 in the review record but were missing from th
 | 59 | ✅ The system proof pins foundation-reference at `5653681` | Done 2026-10-20. `systemproof/foundation-reference.rev` moves from `de3619a` to `5653681`, the merge of foundation-reference #30, which reconciles on the declared interval and orders a Tenant by (`tenant_security_version`, `tenant_version`) (TDD-002 1.17.0 §Published Events) | ADR-ORG-001 §5.7, ADR-ORG-003 §5.5 |
 | 60 | ✅ The designs, runbooks and this plan agree with the architecture of 2026-10-20 | Done 2026-10-20 (scnehaux-architecture #108 audit). TDD-001 1.28.0: §Restore Evidence steps 3a, 4a and 8, the bump in place of "not reconciled", §The Build Context, a §Retention heading, the provider's Membership withdrawal as decided. TDD-002 1.17.0: both schedulers built, foundation-reference ordering a Tenant by the pair, the bump run once. TDD-003 1.18.1: the 7-day window cited from `STD-GLB-001` 1.8.0. TDD-004 1.16.0: `POST /v1/invitations/resolve` planned, and Organization Experience's replay handling cited from organization-experience #22. Restore runbook 1.3.0 and fresh-check runbook 1.0.1: stale "not built" lines. `deploy/dev/README.md`: the 900 s registration and the ceremony's witness. No code and no API shape changed | ADR-ORG-001 §5.7, ADR-ORG-003 §5.5, §5.6, STD-GLB-001 1.8.0, STD-GLB-007 1.2.0, 1.2.1, STD-GLB-009 rule 9, ADR-IAM-011 §5.6, ADR-GLB-004 §5.1 item 2 |
 | 61 | ✅ A provider reads one Membership inside a Tenant | Done 2026-10-21 (recorded 2026-10-20, decided 2026-10-21, TDD-002 1.19.0 §A Provider Withdraws One Membership). `GET /v1/tenants/{tenant_id}/memberships/{membership_id}`, with the authority of item 55 and no more: a provider in force, `X-Administrative-Reason`, `db.WithProviderInTenant`, recorded naming the Tenant; one Membership, `404` for one not in that Tenant, a safe `GET` with no `Idempotency-Key`. `membership.Service.GetInTenant` and `providerGetMembership`; `api/openapi.yaml` 1.1.0 `getTenantMembership`. organization-experience #22 found that its provider suspend and revoke screen made the operator type the Membership's identifier and version; its ROADMAP O4a reads the Membership first, in the same change set, with its contract copy pinned to this change | ADR-ORG-003 §5.6 (amended 2026-10-21) |
-| 62 | A contract test of the API specification's schemas against the handlers | Planned (recorded 2026-10-20, §API specification). The routes are checked against `api/openapi.yaml` in CI; the request and response schemas are not. Split from item 57 on 2026-10-20, when the client side was built in organization-experience | ADR-GLB-010 §5.1 |
+| 62 | ✅ A contract test of the API specification's schemas against the handlers | Done 2026-10-22 (§API specification, TDD-001 1.32.0 §The Schemas Against the Handlers). Every exchange of the route tests is checked against `api/openapi.yaml`, and every operation's success is exchanged against the integration database (`contract_live_*_test.go`), its request body checked too. A whole run fails when an operation has no checked success or no checked problem. Fixed: an empty snapshot page wrote `null` for its array. Split from item 57 on 2026-10-20, when the client side was built in organization-experience | ADR-GLB-010 §5.1 |
 | 63 | ✅ The audit retention clocks follow the standard | Done 2026-10-21 (TDD-001 1.29.0 §Retention). `STD-GLB-007` 1.3.0 says how the 7 years count: an evidence row from when it was written, a row that records something in force from the later of written and ended and never while in force, and a row a decision depends on is state. The three purged tables are evidence rows counted by their newest-evidence column, so no code changes. If a row recording a standing is ever added to the purge, the later-of count applies to it first | STD-GLB-007 1.3.0 §Data Retention Lifecycle |
 | 64 | ✅ foundation-reference is drawn as the proof consumer, for development and CI only | Done 2026-10-21 (TDD-005 2.9.0 §Technical Context). `SAD-004` 2.7.0 §4.1 draws it as a container with its own database; production registers no such consumer. No code changes | SAD-004 2.7.0 §4.1, §7.6 |
 | 65 | ✅ `.dockerignore` is checked in CI | Done 2026-10-21 (TDD-001 1.29.0 §The Build Context). `scripts/check-dockerignore.sh`, the same file as in identity-kernel and identity-control, and the `dockerignore` job of `ci.yml`; the file already met rule 12, so it gained one line for the check's own scratch directory | STD-GLB-009 3.0.0 §Container Images rule 12, §5 item 9, ADR-GLB-020 |
 | 66 | ✅ `deploy-dev` proves the migrate image was built from the commit under test | Done 2026-10-22 (TDD-001 1.31.0 §The Migrate Image and Its Exceptions; STD-GLB-009 §Development Server Deployment, the never-pulled rule). Reason: identity-control's `deploy-dev` run 39735938275 failed on the runner image `ubuntu-26.04`, where a local build carries a registry digest, so "no registry digest" no longer proves "built here". The proof is the `org.opencontainers.image.revision` label, set by compose `build.labels` from `GITHUB_SHA` and read back from the image ID the migrate container runs. `pull_policy` stays asserted. |
+| 67 | A Membership's absent Workspace and end, as the API writes them | Planned (recorded 2026-10-22, found by item 62). A Membership with no Workspace is written with the nil UUID as `workspace_id`, and one with no end with `0001-01-01T00:00:00Z` as `valid_until`. `api/openapi.yaml` requires both fields and does not say what an absent value is, so the schema check passes. Writing `null` (or leaving the field out) changes the documented shape, and organization-experience pins this specification: it needs an owner decision and the architecture first | ADR-GLB-010 §5.1 |
 
 ## Waiting on nothing
 
@@ -546,9 +547,46 @@ beside `internal/httpapi/routes.go` (2026-10-20). ADR-GLB-010 §5.1, accepted 20
   no operation names, or an operation names a route routes.go does not register or a path that route
   does not serve. The verify job's step "the API specification lints" runs Redocly CLI 2.55.0, pinned
   by digest, with every rule of its recommended set an error (`api/redocly.yaml`).
-- **Not checked yet: the schemas against the handlers.** The request and response schemas are read
-  from the handlers and `views.go` by hand. A contract test that sends each documented body to the
-  handler is planned, recorded 2026-10-20 as backlog item 62.
+- **Checked in CI: the schemas against the handlers (item 62, 2026-10-22).**
+  `internal/httpapi/contract_test.go` sends every exchange of the route tests to
+  `github.com/pb33f/libopenapi-validator` v0.16.1 (MIT; libopenapi v0.41.3), which validates an
+  `http.Response` and an `http.Request` against an OpenAPI 3.1 document. `get`, `getWith`, `post` and
+  the other route helpers call it. The same file is in identity-control, but for the database condition
+  on the coverage check.
+  - *What fails.* A response whose body does not satisfy the schema its status names; a status the
+    operation does not declare; a request a handler accepted that does not satisfy the operation's
+    parameters or body. An undeclared `500` is checked as a Problem and passes, because the
+    specification does not list unexpected failures.
+  - *The success bodies.* The route tests stop a request before the database. The success exchanges
+    are `contract_live_test.go` and its `contract_live_*_test.go` files: the handlers on the services
+    `cmd/organization-control` wires, each pool on its production login role, against the integration
+    database (`TEST_DATABASE_URL`). Each resource is driven through its lifecycle by the API itself.
+  - *Coverage.* After a whole run of the package (not with `-run` or `-short`, and not without the
+    integration database), every operation has had a success and a problem checked. A route with no
+    test fails the run, naming it. CI sets `REQUIRE_INTEGRATION`, so there the check always applies.
+  - *Why this approach.* OpenAPI 3.1.0 §4.4: "Models are defined using the Schema Object, which is a
+    superset of JSON Schema Specification Draft 2020-12." JSON Schema 2020-12 core §7.6: "JSON Schema
+    can be used to assert constraints on a JSON document, which either passes or fails the assertions."
+    The validator is that assertion applied to a real response. Its README: "http.Response - Validates
+    the response against the OpenAPI specification" and "Document validation is explicitly covered for
+    OpenAPI 3.0, 3.1, and 3.2." OpenAPI 3.1.0 §Responses Object: "The documentation is not necessarily
+    expected to cover all possible HTTP response codes because they may not be known in advance.
+    However, documentation is expected to cover a successful operation response and any known errors."
+    That is why an undeclared `500` is read as a Problem and any other undeclared status fails. RFC 9110
+    §15.6.1: "The 500 (Internal Server Error) status code indicates that the server encountered an
+    unexpected condition that prevented it from fulfilling the request." A recorder, unlike a server,
+    sets no `Content-Type`; `net/http`'s `ResponseWriter.Write`: "If the Header does not contain a
+    Content-Type line, Write adds a Content-Type set to the result of passing the initial 512 bytes of
+    written data to DetectContentType", so the test does the same.
+  - *The library.* Chosen over kin-openapi because it validates OpenAPI 3.1 documents natively, with
+    the JSON Schema 2020-12 vocabulary. Both are maintained (releases of 2026-10-11 and 2026-10-15).
+    `govulncheck -test ./...` reports nothing in a required module. It is a test-only dependency, so
+    the deployable's binary does not link it; the radar lists technologies, not Go libraries
+    (`01-enterprise/tech-radar.yaml`), and STD-GLB-009 restricts none.
+  - *The library's path matcher.* Its radix-tree router cannot tell `{id}:suspend` from `{id}:restore`
+    where a document has such paths, so the test resolves the path with the library's
+    regular-expression matcher and passes the path item to the validator.
+
 - **The BFF's client is organization-experience's.** ADR-GLB-010 §5.1 has a hand-written client
   contract-tested in CI against this document. ✅ organization-experience #22 (2026-10-20) builds it:
   `contracts/organization-control/openapi.yaml`, pinned at `6a36b8d`, checked by
