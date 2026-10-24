@@ -444,7 +444,7 @@ func TestTheCheckAnswersAboutNowRatherThanAboutTheProjection(t *testing.T) {
 			if decision.Refusal != tc.wantRefusal {
 				t.Errorf("refusal = %q, want %q", decision.Refusal, tc.wantRefusal)
 			}
-			if !decision.Granted && !decision.MembershipID.IsNil() {
+			if !decision.Granted && decision.MembershipID != nil {
 				t.Error("a refusal disclosed a Membership identifier")
 			}
 			if decision.Granted {

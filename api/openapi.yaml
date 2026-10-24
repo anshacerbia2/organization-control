@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Organization Control API
-  version: 1.2.0
+  version: 1.3.0
   summary: The authority for Organizations, Tenants, Workspaces, Memberships and provider authority (SAD-004).
   description: |
     The HTTP contract of organization-control, published as a versioned artifact under ADR-GLB-010
@@ -16,6 +16,11 @@ info:
     minor version for an addition (a route, an optional field, a new value of an open set), and the
     patch version for a correction of the description alone. The repository commit pins it for a
     consumer.
+
+    **Absent values** (1.3.0, STD-GLB-001 2.0.0, ADR-GLB-021). A response writes a member with no value
+    as `null`, declared `type: [<type>, "null"]`; a member that is always present stays required. It
+    never writes a sentinel such as the nil UUID or `0001-01-01T00:00:00Z`. A client reads a missing
+    member and a `null` member as the same "none".
 
     **Mux patterns.** Every operation names the Go `net/http` mux pattern that serves it in
     `x-mux-pattern`, exactly as `routes.go` writes it. Here each pattern is its own path.
@@ -4339,7 +4344,8 @@ components:
         tenant_id:
           $ref: "#/components/schemas/UUID"
         workspace_id:
-          $ref: "#/components/schemas/UUID"
+          $ref: "#/components/schemas/NullableUUID"
+          description: The Workspace a Workspace-scoped Membership names; `null` for a Tenant-wide one (1.3.0).
         subject_type:
           $ref: "#/components/schemas/SubjectType"
         status:
@@ -4350,7 +4356,8 @@ components:
         valid_from:
           $ref: "#/components/schemas/Timestamp"
         valid_until:
-          $ref: "#/components/schemas/Timestamp"
+          $ref: "#/components/schemas/NullableTimestamp"
+          description: When the Membership ends; `null` for one with no end (1.3.0).
         provenance:
           type: string
     MembershipResult:
@@ -5195,7 +5202,7 @@ components:
           type: boolean
     Decision:
       type: object
-      description: The membership fields and versions are present only on a granted decision.
+      description: The membership fields and versions are present only on a granted decision; a refusal leaves them out (1.3.0 no longer writes the nil UUID as `membership_id`).
       required: [granted, tenant_id, principal_id, checked_at]
       properties:
         granted:

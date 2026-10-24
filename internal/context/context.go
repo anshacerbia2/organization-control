@@ -70,7 +70,9 @@ type Decision struct {
 	// MembershipID and the versions are present only on a granted decision. On a refusal they
 	// would describe a context the caller may not assert, and a caller that logged them would be
 	// recording the shape of access it was denied.
-	MembershipID id.UUID  `json:"membership_id,omitempty"`
+	// A pointer, because omitempty never leaves out an array such as id.UUID: a value would write the
+	// nil UUID on a refusal (STD-GLB-001 2.0.0, ADR-GLB-021).
+	MembershipID *id.UUID `json:"membership_id,omitempty"`
 	WorkspaceID  *id.UUID `json:"workspace_id,omitempty"`
 	SubjectType  string   `json:"subject_type,omitempty"`
 
@@ -246,7 +248,7 @@ func verifyIn(ctx stdcontext.Context, tx db.Tx, req VerifyRequest, decision *Dec
 	if err != nil {
 		return fmt.Errorf("context: stored membership id %q: %w", *rawMembership, err)
 	}
-	decision.MembershipID = membershipID
+	decision.MembershipID = &membershipID
 	if rawWorkspace != nil && *rawWorkspace != "" {
 		workspace, err := id.Parse(*rawWorkspace)
 		if err != nil {

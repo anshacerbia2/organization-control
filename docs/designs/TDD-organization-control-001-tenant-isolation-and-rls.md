@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-001
   title: Tenant Isolation and Row-Level Security
   owner: Core Platform Team
-  version: 1.32.0
+  version: 1.33.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-22
+  last_reviewed: 2026-10-24
   parent_sad: SAD-004
 ---
 
@@ -1849,10 +1849,18 @@ sources.
   always applies.
 - Found and fixed: an empty snapshot page wrote `"rows": null` or `"grants": null` where the
   specification documents an array (`projection.endPage`, `endProviderPage`).
-- Found and not changed: a Membership with no Workspace is written with the nil UUID as
-  `workspace_id`, and one with no end with `0001-01-01T00:00:00Z` as `valid_until`. Both satisfy the
-  schema, which requires the two fields and does not say what an absent value is. Changing them changes
-  the documented shape, so it waits on a decision (`ROADMAP.md` item 67).
+- Found, and fixed in 1.33.0 (`ROADMAP.md` item 67): a Membership with no Workspace was written with the
+  nil UUID as `workspace_id`, and one with no end with `0001-01-01T00:00:00Z` as `valid_until`. Both
+  satisfied the schema, which required the two fields and did not say what an absent value is. A refused
+  context decision wrote the nil UUID as `membership_id`. `STD-GLB-001` 2.0.0 (`ADR-GLB-021`) decided
+  it: an absent value is `null`, declared `type: [<t>, "null"]`, and a sentinel is never allowed
+  (`TDD-organization-control-002` 1.20.0 §API / Interface).
+- The null case is checked for each (1.33.0), as the standard's §Enforcement Mechanism asks: "A
+  service's tests assert that a response with an absent optional value carries `null` and not the zero
+  value of its type, and its schema check includes a response whose optional member is absent." The live
+  exchanges grant a Membership with a Workspace and an end and one with neither, read each, and require
+  `null` for both members of the second and a value for both of the first. A refused context check is
+  exchanged and must carry no `membership_id`. Each of these bodies also passes the schema check.
 
 ### Restore
 
@@ -2354,6 +2362,7 @@ leaves out the sibling checkouts, every `keys/` directory, `*.pem`, `.env`, a se
 | Governed by | ADR-ORG-003 §5.5, §5.6 (amended 2026-10-20) — the drill proves the restore bump; a provider re-applies a lost Membership withdrawal under the pause (1.28.0) |
 | Conforms to | STD-GLB-009 2.0.0 rule 9 — `backup.sh` keeps the newest 14 complete sets, and the drill proves it (1.28.0, §Restore Evidence steps 3a and 4a) |
 | Conforms to | STD-GLB-001 1.6.0 §Pagination — the list form and its time window |
+| Conforms to | STD-GLB-001 2.0.0 §Enforcement Mechanism, `ADR-GLB-021` — the schema check includes responses whose optional members are absent, and the tests require `null`, not the zero value (1.33.0) |
 | Conforms to | STD-IAM-002 §3.1.1, §3.2, §3.5 — the grant's holder checks its own record; `principal_id` is the persisted identifier |
 | Conforms to | STD-GLB-002 — `FORCE ROW LEVEL SECURITY`, non-owner runtime role, no `SUPERUSER`/`BYPASSRLS`, isolation proven as the runtime role |
 | Conforms to | STD-GLB-009 1.8.0 §Container Images rules 4, 5, 7, 8 and 10 — the migrate image's exceptions as VEX statements, and the zlib upgrade; 1.8.0 lands with scnehaux-architecture #86 (1.24.0, §The Migrate Image and Its Exceptions) |

@@ -49,6 +49,12 @@ func TestLiveProjectionConsumer(t *testing.T) {
 	asked := map[string]any{"tenant_id": fixtureTenant, "principal_id": fixturePrincipal}
 	l.call(consumer, http.MethodPost, "/v1/context/verify", asked, http.StatusOK)
 	l.call(consumer, http.MethodPost, "/v1/context/switch-eligible", asked, http.StatusOK)
+	// A refusal leaves the Membership out, never the nil UUID (STD-GLB-001 2.0.0, ROADMAP item 67).
+	refused := l.call(consumer, http.MethodPost, "/v1/context/verify",
+		map[string]any{"tenant_id": fixtureTenant, "principal_id": mustID(t).String()}, http.StatusOK)
+	if value, present := refused["membership_id"]; refused["granted"] != false || present {
+		t.Fatalf("a refusal carried membership_id %v: %v", value, refused)
+	}
 	// Two checks in a thousand requests: a ratio well under 1, which internal/context's ranking test
 	// assumes of every interval on the shared database, retired consumers' included.
 	l.call(provider, http.MethodPost, "/v1/context/rate", map[string]any{"consumer_id": name, "requests": 1000}, http.StatusOK)

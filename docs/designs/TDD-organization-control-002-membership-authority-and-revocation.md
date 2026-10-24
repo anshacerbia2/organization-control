@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-organization-control-002
   title: Membership Authority, Revocation, and Projection Publication
   owner: Core Platform Team
-  version: 1.19.0
+  version: 1.20.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-21
+  last_reviewed: 2026-10-24
   parent_sad: SAD-004
 ---
 
@@ -468,6 +468,18 @@ Security confines every read and write to it, so a Membership in another Tenant 
 1.9.0 the three transitions were written `:suspend`, `:revoke` and `:restore`. They are served as path
 segments, because a Go 1.22 `net/http` wildcard fills a whole segment, and that is the form a client
 uses (`TDD-organization-control-003` §API / Interface says the same of every lifecycle route).
+
+**An absent value is written as `null` (1.20.0, `ROADMAP.md` item 67).** `STD-GLB-001` 2.0.0 §A Response
+Writes an Absent Optional Value as `null`, Never as a Sentinel, authorized by `ADR-GLB-021`: "A sentinel is
+never allowed." A Membership with no Workspace writes `"workspace_id": null`, and one with no end writes
+`"valid_until": null`. `api/openapi.yaml` 1.3.0 declares both `type: [string, "null"]` and keeps them
+required: the key is always there, and `null` is the value. Until 1.20.0 they were written as the nil
+UUID and `0001-01-01T00:00:00Z`, values valid for their type that no schema and no client could tell from
+a real one. A refused context decision (`POST /v1/context/verify` and `/switch-eligible`) no longer
+carries `membership_id`. It was meant to be absent on a refusal, but a Go UUID is an array, which
+`omitempty` never leaves out, so the nil UUID was written. The member is not required, so it is left
+out, as the standard allows. The handler holds each such value as a pointer, so the zero value of Go is
+never written as "none".
 
 **The list** is `GET /v1/memberships`, in the form STD-GLB-001 1.3.0 §Pagination fixes for the estate
 and identity-control serves for `GET /v1/registrations`:
@@ -1591,6 +1603,7 @@ as a provider. Written (1.15.0): `docs/runbooks/fresh-check-misuse.md`.
 | Conforms to | STD-IAM-001 §3.3 — one active Tenant context per token; the Membership set is never placed in a token |
 | Conforms to | STD-IAM-001 §3.4 — enforcement delay is propagation plus remaining token lifetime |
 | Conforms to | STD-GLB-001 — RFC 7807 problem details |
+| Conforms to | STD-GLB-001 2.0.0 §A Response Writes an Absent Optional Value as `null`, `ADR-GLB-021` — a Membership's absent `workspace_id` and `valid_until` are `null`; a refused decision carries no `membership_id` (1.20.0) |
 | Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/memberships`: `after`, `limit` 1 to 100, key order, `next` |
 | Conforms to | STD-GLB-001 1.3.0 §Pagination — `GET /v1/projections/consumers` (1.11.0): `after` is the `consumer_id`, key order, `state` filter, `next` |
 | Consumed by | `TDD-organization-experience-002` §Projection Health — the consumer list, with `stale` computed by the API |
