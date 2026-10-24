@@ -433,7 +433,8 @@ change.
 
 ```text
 GET    /v1/principals/{principal_id}/contexts       ?after=&limit=
-GET    /v1/context/{tenant_id}/{principal_id}:verify
+POST   /v1/context/verify                         body `ContextCheck` (api/openapi.yaml; 1.20.0 corrects the GET form)
+POST   /v1/context/switch-eligible                body `ContextCheck` (1.20.0)
 GET    /v1/memberships                       ?after=&limit=&status=&workspace_id=&principal_id=
 GET    /v1/memberships/{membership_id}
 POST   /v1/memberships                            Idempotency-Key
