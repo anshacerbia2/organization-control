@@ -15,6 +15,23 @@
 # TDD-organization-control-001 §The Migrate Image and Its Exceptions.
 check-for-app-update: false
 ignore:
+  # Atlas, the third-party binary the migrate image copies and does not build.
+  - vulnerability: GHSA-mgcc-cww5-fp2q
+    package:
+      name: github.com/go-jose/go-jose/v4
+      version: v4.1.4
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2026-12-27: affected: detected 2026-10-28: the migrate image (Dockerfile target
+      migrate), whose /usr/local/bin/atlas is arigaio/atlas:1.3.4: action: move the Atlas pin to the
+      first release built with go-jose v4.1.6 or later. On 2026-10-30 none exists: 1.3.6, the newest
+      tag, still carries v4.1.4. A crafted RSA key in a JWK makes JWK parsing use excess CPU
+      (CVE-2026-116587). govulncheck v1.8.0 has no entry for it yet, and Atlas's official build is
+      closed, so no evidence shows JSONWebKey.UnmarshalJSON unreached, and not_affected is not open.
+      BOD 26-04: not publicly exposed, not in the KEV, and in CISA's Vulnrichment Automatable yes,
+      Technical Impact partial, so 60 days from detection. To be asked of Ariga by the owner.
+      TDD-organization-control-001 §The Migrate Image and Its Exceptions, 1.34.0.
   # The Control Database, which runs the official image without building it.
   - vulnerability: CVE-2026-85091
     package:
