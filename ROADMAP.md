@@ -670,6 +670,36 @@ recovery to the verified read 37.5 s, against 900 s. Two gaps stay recorded, not
   workload and owner; on the development server `scripts/dev-obligation.ps1` and
   `scripts/dev-deprovisioning.ps1` report as development reporters.
 
+### Information security gates (ISMS-005, 2026-11-01)
+
+The approved risk treatment plan
+([ISMS-005](https://github.com/anshacerbia2/scnehaux-architecture/blob/main/07-isms/ISMS-005-risk-treatment-and-soa.md#treatment-plan))
+makes these production gate items for this repository. Each risk (R) is rated in
+[ISMS-004](https://github.com/anshacerbia2/scnehaux-architecture/blob/main/07-isms/ISMS-004-risk-register.md#the-register);
+each action (T) has its owner role and target date there. When an action completes, this list and
+the SoA in ISMS-005 change together.
+
+- ⏳ **The alert rules are evaluated and delivered to a person** (T10, R16; before production).
+  `observability/alerts/` is tested in CI, but nothing evaluates it on the development server.
+  Development: a scheduled check of `maintenance`'s exit code by 31 December 2026.
+- ⏳ **The Organization Database archives continuously, with copies off the host** (T11, R4; before
+  production), which also closes the RPO gap recorded above.
+- ⏳ **The privileged-access record reaches Audit & Evidence** (T13, R5; before production).
+- ⏳ **A path to erase a person's data, and a record of processing** (T39; before production).
+- ⏳ **A failed backup is reported** (T9, R18; by 30 November 2026).
+- ⏳ **Production secrets come from a managed store, never from `.env`** (T23, R7; before
+  production).
+- ⏳ **A failed scheduled run alerts the Information Security Officer** (T4, R21; by 30 November
+  2026). Today a failed run of `ci`, `image-scan` or `deploy-dev` alerts nobody; it shows only to
+  someone who opens the Actions tab.
+- ⏳ **Secret scanning in CI** (T5, R7; by 15 December 2026), as STD-IAM-001 §5 lists. Today nothing
+  scans a change for a secret before it reaches this public repository.
+- ⏳ **The shared workflows are called at a pinned commit** (T6, R14; by 31 December 2026). Today
+  `linter.yml` and `deploy-dev-skeleton.yml` are called from scnehaux-architecture's `main` branch,
+  so a change there changes what this repository's CI runs.
+- ⏳ **A second person's approval on `main`** (T19, R19 and R23; before production). A ruleset
+  requires one approval once a second maintainer exists; until then each merge is a recorded risk.
+
 ## Repository governance
 
 **2026-10-20: `ee98ec4` reached `main` without a pull request, and stays in history.** STD-GLB-009
