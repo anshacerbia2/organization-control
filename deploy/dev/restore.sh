@@ -1,8 +1,8 @@
 #!/bin/sh
 # Restores the Organization Database into an empty stack (README.md §Backups, STD-GLB-009 rule 9).
 #
-#   ./restore.sh /mnt/imam-storage/backups/organization-control/globals-2026-10-08.sql \
-#                /mnt/imam-storage/backups/organization-control/organization_control-2026-10-08.dump
+#   ./restore.sh /mnt/dev-storage/backups/organization-control/globals-2026-10-08.sql \
+#                /mnt/dev-storage/backups/organization-control/organization_control-2026-10-08.dump
 #   docker compose up -d --build
 #
 # 1. Starts postgres alone and waits until it accepts TCP connections, which the image's first-start

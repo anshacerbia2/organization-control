@@ -508,7 +508,7 @@ The Control Database lives only in the Docker volume `scnehaux-organization-cont
 projection is built from (§Never do).
 
 Back it up daily to storage outside the volume; on the development server that is
-`/mnt/imam-storage`. `./backup.sh <directory>` writes two files: `globals-<date>.sql`, the cluster's
+`/mnt/dev-storage`. `./backup.sh <directory>` writes two files: `globals-<date>.sql`, the cluster's
 roles from `pg_dumpall --globals-only`, and `organization_control-<date>.dump`, the database from
 `pg_dump --format=custom`. A database dump holds no roles, and the roles must exist before the
 objects they own or are granted are restored. Both files hold role password hashes, so the script
@@ -516,7 +516,7 @@ makes them readable by their owner alone. It runs `pg_dump` inside the `postgres
 local socket, which the image trusts, so no password is typed or stored. In the operator's crontab:
 
 ```text
-30 2 * * * /home/development/apps/organization-control/deploy/dev/backup.sh /mnt/imam-storage/backups/organization-control >/dev/null
+30 2 * * * /home/development/apps/organization-control/deploy/dev/backup.sh /mnt/dev-storage/backups/organization-control >/dev/null
 ```
 
 The cron line runs `backup.sh`, never a bare `pg_dump`, because the script is what writes the two
@@ -541,8 +541,8 @@ To restore into an empty volume, put `.env` and `keys/` back first, then:
 
 ```sh
 PAUSE_REASON="INC-<n> restored from the <date> backup" \
-./restore.sh /mnt/imam-storage/backups/organization-control/globals-<date>.sql \
-             /mnt/imam-storage/backups/organization-control/organization_control-<date>.dump
+./restore.sh /mnt/dev-storage/backups/organization-control/globals-<date>.sql \
+             /mnt/dev-storage/backups/organization-control/organization_control-<date>.dump
 docker compose up -d --build
 curl -fsS http://127.0.0.1:8083/readyz
 ```
