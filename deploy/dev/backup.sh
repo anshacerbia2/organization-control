@@ -2,7 +2,7 @@
 # The Organization Database's backup (README.md §Backups, STD-GLB-009 rule 9): the cluster's roles and the
 # database, read from the running postgres container into a directory outside the Docker volume.
 #
-#   ./backup.sh /mnt/imam-storage/backups/organization-control
+#   ./backup.sh /mnt/dev-storage/backups/organization-control
 #
 # Writes globals-<date>.sql (pg_dumpall --globals-only) and organization_control-<date>.dump
 # (pg_dump --format=custom). Each is written under a .partial name and renamed once complete, so a
