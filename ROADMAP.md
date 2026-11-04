@@ -631,7 +631,7 @@ Phase 1 is merged and the owner redeploys.
 | P6 | ⏳ `POST /v1/provisioning/progress {correlation_id, stage, expected_by}` | The sweep ages a request against `expected_by` when set, capped at 8 days |
 | P7 | ⏳ `requested_by` on each item of P1's read | For the approval check of `ADR-PRV-002 §5.3` |
 | P8 | ⏳ `provider:provisioning` as a registered provider scope, projected to Provisioning Control | As `provider:identity-control` is; needs the same activation surface, which no console has today |
-| P9 | ⏳ In production, provider authority refused on `POST /v1/provisioning/realized` | `failed` stays open to a provider; `docs/runbooks/provisioning.md` C changes in the same pull request |
+| P9 | ⏳ In production, a person's `POST /v1/provisioning/realized` accepted only under an emergency grant | Break-glass, the owner's decision of 2026-11-04 (`SAD-021 §5.5`): a provider under an activated eligible grant is refused; under an emergency grant the reason names the incident and the health checks run, the access is recorded with the authority `emergency`, and every use alerts the Information Security Officer for review within 1 working day. `failed` stays open to a provider; `docs/runbooks/provisioning.md` C changes in the same pull request |
 
 ## Gates
 
@@ -729,8 +729,9 @@ the SoA in ISMS-005 change together.
   requires one approval once a second maintainer exists; until then each merge is a recorded risk.
 - ⏳ **Tenant outcomes come from the provisioning system, not a person** (T46, R25; before
   production). Items P1 to P5 above.
-- ⏳ **A provider cannot report `realized` in production; dedicated plans are approved by someone
-  other than the requester** (T47, R25 and R26; before the first non-pooled Tenant). Items P6 to P9.
+- ⏳ **In production a person reports `realized` only under an emergency grant; dedicated plans are
+  approved by the Platform Engineering lead, never the requester** (T47, R25 and R26; before the first
+  non-pooled Tenant). Items P6 to P9.
 - ⏳ **Deprovisioning holds and the legal-hold check are tested end to end** (T48, R27; before the
   first non-pooled Tenant). This service's part: `legal_hold` on P1's read.
 
