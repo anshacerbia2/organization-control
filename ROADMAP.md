@@ -600,10 +600,38 @@ Recorded so scope creep is visible rather than convenient:
 - Authentication, credentials, sessions, tokens, federation — the identity kernel.
 - Applying context into Keycloak and removing Keycloak sessions — `identity-control`.
 - Product permissions, entitlements, business roles — their owning domains.
-- Physical Tenant provisioning — external, coordinated through desired state.
+- Physical Tenant provisioning — external, coordinated through desired state. Designed as
+  Provisioning Control (`SAD-021`, `PAD-PLT-017`, proposed 2026-11-04), a separate service that
+  holds the cloud credentials this one never holds (`ADR-PRV-004`).
 
 This service holds no Keycloak credential. That is what makes the ADR-ORG-001 §5.4
 prohibition structural rather than procedural, and it is asserted by test.
+
+## Provisioning Control · what this service adds for it
+
+`SAD-004` 2.8.0 §7.5 and `SAD-021` §7.1 and §13 (scnehaux-architecture, proposed 2026-11-04). Nothing
+here starts until the owner ratifies that design. Every existing provisioning route keeps its meaning.
+The development server keeps `scripts/dev-provisioning.ps1` and `scripts/dev-deprovisioning.ps1` until
+Phase 1 is merged and the owner redeploys.
+
+**Phase 1: the pooled path, with no person reporting `realized`.**
+
+| # | Item | Notes |
+| :-- | :-- | :-- |
+| P1 | ⏳ `GET /v1/provisioning/requests?state=&operation=&after=&limit=` for the `provisioning` reporter | Items carry `provisioning_request_id`, `correlation_id`, `tenant_id`, `operation`, `desired_profile`, `state`, `requested_at`; a deprovisioning also `offboarding_id` and `legal_hold`. The reporter's reach grows from three routes to four (`ADR-ORG-001 §5.11`) |
+| P2 | ⏳ Command event `com.scnehaux.organization.tenant.provisioning.requested` | Identifiers only, written in the transaction of every `tenant.provisioning_request` row: intake, retry, release, resend. Not offered to projection consumers; the three provisioning transitions stay silent as Tenant events |
+| P3 | ⏳ A provisioning target, a delivery kind of its own | Subscribes to P2's type alone; no projection, no snapshot, no authority debt; delivered by the per-consumer dispatch of `ADR-GLB-018 §5.4` |
+| P4 | ⏳ `TDD-organization-control-003` updated in the same pull request as P1 to P3 | Also corrects its reference for the four isolation profiles: EAD-005 §5.3 does not define them; `PAD-PLT-017 §3.4` does |
+| P5 | ⏳ The stand-ins leave the deploy steps | Once Provisioning Control's stack-level proof passes: `deploy-dev` and `docs/runbooks/provisioning.md` stop running `dev-provisioning.ps1` and `dev-deprovisioning.ps1`; they stay at most as CI fixtures for this service's own route tests; `ISMS-007 §Scripts` changes in the same change set |
+
+**Phase 2: dedicated profiles, before the first non-pooled Tenant.**
+
+| # | Item | Notes |
+| :-- | :-- | :-- |
+| P6 | ⏳ `POST /v1/provisioning/progress {correlation_id, stage, expected_by}` | The sweep ages a request against `expected_by` when set, capped at 8 days |
+| P7 | ⏳ `requested_by` on each item of P1's read | For the approval check of `ADR-PRV-002 §5.3` |
+| P8 | ⏳ `provider:provisioning` as a registered provider scope, projected to Provisioning Control | As `provider:identity-control` is; needs the same activation surface, which no console has today |
+| P9 | ⏳ In production, provider authority refused on `POST /v1/provisioning/realized` | `failed` stays open to a provider; `docs/runbooks/provisioning.md` C changes in the same pull request |
 
 ## Gates
 
@@ -699,6 +727,12 @@ the SoA in ISMS-005 change together.
   so a change there changes what this repository's CI runs.
 - ⏳ **A second person's approval on `main`** (T19, R19 and R23; before production). A ruleset
   requires one approval once a second maintainer exists; until then each merge is a recorded risk.
+- ⏳ **Tenant outcomes come from the provisioning system, not a person** (T46, R25; before
+  production). Items P1 to P5 above.
+- ⏳ **A provider cannot report `realized` in production; dedicated plans are approved by someone
+  other than the requester** (T47, R25 and R26; before the first non-pooled Tenant). Items P6 to P9.
+- ⏳ **Deprovisioning holds and the legal-hold check are tested end to end** (T48, R27; before the
+  first non-pooled Tenant). This service's part: `legal_hold` on P1's read.
 
 ## Repository governance
 
