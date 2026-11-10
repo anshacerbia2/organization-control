@@ -16,38 +16,58 @@
 check-for-app-update: false
 ignore:
   # Atlas, the third-party binary the migrate image copies and does not build.
-  - vulnerability: GHSA-mgcc-cww5-fp2q
+  - vulnerability: GO-2026-6888
     package:
-      name: github.com/go-jose/go-jose/v4
-      version: v4.1.4
+      name: github.com/andybalholm/brotli
+      version: v1.2.0
       type: go-module
       location: /usr/local/bin/atlas
     reason: >-
-      review-by 2026-12-27: affected: detected 2026-10-28: the migrate image (Dockerfile target
-      migrate), whose /usr/local/bin/atlas is arigaio/atlas:1.3.4: action: move the Atlas pin to the
-      first release built with go-jose v4.1.6 or later. On 2026-10-30 none exists: 1.3.6, the newest
-      tag, still carries v4.1.4. A crafted RSA key in a JWK makes JWK parsing use excess CPU
-      (CVE-2026-116587). govulncheck v1.8.0 has no entry for it yet, and Atlas's official build is
-      closed, so no evidence shows JSONWebKey.UnmarshalJSON unreached, and not_affected is not open.
-      BOD 26-04: not publicly exposed, not in the KEV, and in CISA's Vulnrichment Automatable yes,
-      Technical Impact partial, so 60 days from detection. To be asked of Ariga by the owner.
-      TDD-organization-control-001 §The Migrate Image and Its Exceptions, 1.34.0.
-  # The Control Database, which runs the official image without building it.
-  - vulnerability: CVE-2026-85091
+      review-by 2026-11-20: affected: detected 2026-11-06: the migrate image (Dockerfile target
+      migrate), whose /usr/local/bin/atlas is arigaio/atlas:1.3.9: action: move the Atlas pin to the
+      first release built with andybalholm/brotli v1.2.7 or later. On 2026-11-10 none exists: 1.3.9,
+      published 2026-11-09, still carries v1.2.0. CVE-2026-111497, excessive memory allocation when
+      decompressing a crafted stream. govulncheck v1.1.4 -mode binary on the 1.3.9 linux/amd64
+      release binary (go1.26.10, revision 5314a229caa6) finds brotli.Reader.Read, so
+      not_affected/vulnerable_code_not_present is not open. BOD 26-04: not publicly exposed (the
+      migrate image runs once on the stack's internal network and, traced on every scan, connects to
+      nothing but the database); in the KEV (added 2026-10-27, catalog 2026.11.09); Vulnrichment
+      Automatable no, Technical Impact total, so 14 days from detection: by 2026-11-20. If no Atlas
+      release carries the fix by then, the image runs Atlas built from source with the fixed module
+      (rule 9) or the finding is raised to the owner. To be asked of Ariga by the owner (ISMS-005 T2).
+      TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: GO-2026-6865
+    package:
+      name: github.com/klauspost/compress
+      version: v1.18.7
+      type: go-module
+      location: /usr/local/bin/atlas
+    reason: >-
+      review-by 2027-01-05: affected: detected 2026-11-06: the migrate image (Dockerfile target
+      migrate), whose /usr/local/bin/atlas is arigaio/atlas:1.3.9: action: move the Atlas pin to the
+      first release built with klauspost/compress v1.20.2 or later; on 2026-11-10 1.3.9 still carries
+      v1.18.7. CVE-2026-116591, a panic on two-block frames. govulncheck v1.1.4 -mode binary on the
+      1.3.9 release binary finds fse.Compress and fse.Decompress, so not_affected is not open. BOD
+      26-04: not publicly exposed; not in the KEV (catalog 2026.11.09); Vulnrichment Automatable yes,
+      Technical Impact partial, so 60 days from detection. Asked of Ariga with GO-2026-6888 (T2).
+      TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  # The database, which runs the official image without building it (rule 10). On 2026-11-10 zlib
+  # 1.3.2-r1 is found in this image alone, so the version keeps the rule to it.
+  - vulnerability: CVE-2026-4738
     package:
       name: zlib
-      version: 1.3.2-r0
+      version: 1.3.2-r1
       type: apk
       location: /lib/apk/db/installed
     reason: >-
-      review-by 2026-11-16: affected: detected 2026-10-07: postgres:17.11-alpine
-      (postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24), the
-      Control Database in deploy/dev/compose.yaml: action: wait for the Docker Official Image
-      rebuild that carries zlib 1.3.2-r1, expected with PostgreSQL 17.12, scheduled for 2026-11-12,
-      then move the pin in compose and in the migrate image's base. Alpine 3.24 ships the fix; on
-      2026-10-10 the tag still resolved to the pinned digest. BOD 26-04: not publicly exposed, not
-      in the KEV, and in CISA's Vulnrichment Automatable no, Technical Impact total, so fix on
-      system upgrade, the next pin move, within 90 days of detection. Not asked of the upstream: the
-      official images rebuild on their maintainers' schedule. The migrate image upgrades zlib in its
-      Dockerfile (rule 10) and the service image has no package database, so this rule matches the
-      Control Database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+      review-by 2026-11-20: affected: detected 2026-11-06: postgres:17.11-alpine3.24
+      (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac, rebuilt
+      upstream 2026-11-06), the database in deploy/dev/compose.yaml: action: move the pin to the
+      official image that carries zlib 1.4-r0, expected with PostgreSQL 17.12, scheduled for
+      2026-11-12. The 2026-11-06 rebuild carries zlib 1.3.2-r1, which closed CVE-2026-85091 (ISMS-005
+      T1). BOD 26-04: not publicly exposed (internal network only, no published port); not in the KEV
+      (catalog 2026.11.09); Vulnrichment Automatable no, Technical Impact total, so fix on system
+      upgrade, the next pin move, within 90 days of detection. Reviewed by 2026-11-20 to move the pin
+      once the rebuild lands; if it has not, the stack builds its own image from the pinned one with
+      the upgrade line (rule 10). Not asked of the upstream: the official images rebuild on their
+      maintainers' schedule. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
