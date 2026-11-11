@@ -8,7 +8,7 @@ name: scheduled-failure-alert
 #
 # `workflow_run` runs this file as it is on the default branch, so it acts only after it is merged.
 # `workflow_dispatch` takes the same three values, so the open, comment and close paths can be run
-# on a branch before review.
+# by hand once it is there; GitHub dispatches only workflows that exist on the default branch.
 
 on:
   workflow_run:
