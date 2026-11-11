@@ -17,14 +17,15 @@ RUN if [ "$GOPROXY" = "direct" ]; then apk add --no-cache git; fi && go mod down
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/organization-control ./cmd/organization-migrate
 
-# arigaio/atlas:1.3.4, resolved from Docker Hub on 2026-10-18: Atlas v1.3.4, built with go1.26.9,
-# golang.org/x/net v0.60.0 and google.golang.org/grpc v1.83.2, the fixed versions of every Go advisory
-# the gate found in 1.3.3's binary, GO-2026-6617 among them (TDD-organization-control-001 §The
-# Migrate Image and Its Exceptions).
-FROM arigaio/atlas@sha256:3cd6883d5ec2703741f750fd5f9efed3a61f8e164b9dcea93ab7a7be429a1b5b AS atlas
+# arigaio/atlas:1.3.9, resolved from Docker Hub on 2026-11-10. 1.3.4 carried andybalholm/brotli v1.2.0
+# (GO-2026-6888, Critical, in the CISA KEV catalogue) and klauspost/compress v1.18.7 (GO-2026-6865,
+# High), which the gate found from 2026-11-05 (TDD-organization-control-001 §The Migrate Image and
+# Its Exceptions).
+FROM arigaio/atlas@sha256:ce36679f6e253ff13ec0c9cb07787c8c7b02934ad9b76c969977570391d696a8 AS atlas
 
-# postgres:17.11-alpine -- the same image the Control Database runs, so psql matches the server.
-FROM postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 AS migrate
+# postgres:17.11-alpine3.24, resolved from Docker Hub on 2026-11-10 (rebuilt upstream 2026-11-06) --
+# the same image the Control Database runs, so psql matches the server.
+FROM postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac AS migrate
 COPY --from=atlas /atlas /usr/local/bin/atlas
 # Atlas checks for a newer release over HTTPS around every command unless ATLAS_NO_UPDATE_NOTIFIER is
 # set, and may send anonymous telemetry unless ATLAS_NO_ANON_TELEMETRY is true. With both off it
@@ -41,10 +42,11 @@ COPY migrations ./migrations
 COPY scripts/login-roles.sql ./login-roles.sql
 COPY deploy/dev/migrate.sh /usr/local/bin/organization-dev-migrate
 RUN chmod 0755 /usr/local/bin/organization-dev-migrate
-# CVE-2026-85091: the pinned base carries zlib 1.3.2-r0, and Alpine ships the fix as 1.3.2-r1
-# (STD-GLB-009 §Container Images rule 10). The constraint fails the build if no repository can meet
-# it. Remove this line when the postgres pin moves to an image that carries the fix.
-RUN apk add --no-cache 'zlib>=1.3.2-r1'
+# The pinned base may lag Alpine's fixes (STD-GLB-009 §Container Images rule 10). These constraints
+# fail the build if no repository can meet them: zlib 1.4-r0 fixes CVE-2026-4738 (Critical) and
+# CVE-2026-85091, musl 1.2.6-r3 fixes CVE-2026-107891 (High). Remove a constraint once the postgres
+# pin carries the fix.
+RUN apk add --no-cache 'zlib>=1.4-r0' 'musl>=1.2.6-r3' 'musl-utils>=1.2.6-r3'
 USER postgres
 ENTRYPOINT ["organization-dev-migrate"]
 
