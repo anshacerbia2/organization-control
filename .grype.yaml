@@ -15,6 +15,103 @@
 # TDD-organization-control-001 §The Migrate Image and Its Exceptions.
 check-for-app-update: false
 ignore:
+  # The database image, 2026-11-11: libxslt and krb5-libs, fixed in Alpine, not yet in the official image.
+  - vulnerability: CVE-2026-125350
+    package:
+      name: libxslt
+      version: 1.1.43-r3
+      type: apk
+      location: /lib/apk/db/installed
+    reason: >-
+      review-by 2026-11-14: affected: detected 2026-11-11: postgres:17.11-alpine3.24 (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac), the database in deploy/dev/compose.yaml: in the KEV (added 2026-11-10, catalog 2026.11.10); no Vulnrichment record yet, so the strictest row for an image not exposed and in the KEV: 3 days from detection, by 2026-11-14. action: move the pin to the PostgreSQL 17.12 image, release scheduled for 2026-11-12, once it carries the fixed package; if it is not published by 2026-11-13, build the database image from the pinned one with the upgrade line (rule 10) instead. BOD 26-04: not publicly exposed (internal network only, no published port). The migrate image upgrades the package in its Dockerfile, so this rule matches the database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: CVE-2026-87636
+    package:
+      name: libxslt
+      version: 1.1.43-r3
+      type: apk
+      location: /lib/apk/db/installed
+    reason: >-
+      review-by 2026-11-14: affected: detected 2026-11-11: postgres:17.11-alpine3.24 (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac), the database in deploy/dev/compose.yaml: not in the KEV; Vulnrichment Automatable no, Technical Impact total: fix on system upgrade; reviewed with CVE-2026-125350, the same package, by 2026-11-14. action: move the pin to the PostgreSQL 17.12 image, release scheduled for 2026-11-12, once it carries the fixed package; if it is not published by 2026-11-13, build the database image from the pinned one with the upgrade line (rule 10) instead. BOD 26-04: not publicly exposed (internal network only, no published port). The migrate image upgrades the package in its Dockerfile, so this rule matches the database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: CVE-2026-9947
+    package:
+      name: libxslt
+      version: 1.1.43-r3
+      type: apk
+      location: /lib/apk/db/installed
+    reason: >-
+      review-by 2026-11-14: affected: detected 2026-11-11: postgres:17.11-alpine3.24 (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac), the database in deploy/dev/compose.yaml: not in the KEV; no Vulnrichment record; reviewed with CVE-2026-125350, the same package, by 2026-11-14. action: move the pin to the PostgreSQL 17.12 image, release scheduled for 2026-11-12, once it carries the fixed package; if it is not published by 2026-11-13, build the database image from the pinned one with the upgrade line (rule 10) instead. BOD 26-04: not publicly exposed (internal network only, no published port). The migrate image upgrades the package in its Dockerfile, so this rule matches the database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: CVE-2026-112314
+    package:
+      name: krb5-libs
+      version: 1.22.2-r1
+      type: apk
+      location: /lib/apk/db/installed
+    reason: >-
+      review-by 2026-11-14: affected: detected 2026-11-11: postgres:17.11-alpine3.24 (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac), the database in deploy/dev/compose.yaml: not in the KEV (catalog 2026.11.10); at most Automatable yes, Technical Impact partial (CVE-2026-112314 in Vulnrichment): 60 days; reviewed with libxslt, by 2026-11-14. action: move the pin to the PostgreSQL 17.12 image, release scheduled for 2026-11-12, once it carries the fixed package; if it is not published by 2026-11-13, build the database image from the pinned one with the upgrade line (rule 10) instead. BOD 26-04: not publicly exposed (internal network only, no published port). The migrate image upgrades the package in its Dockerfile, so this rule matches the database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: CVE-2026-112321
+    package:
+      name: krb5-libs
+      version: 1.22.2-r1
+      type: apk
+      location: /lib/apk/db/installed
+    reason: >-
+      review-by 2026-11-14: affected: detected 2026-11-11: postgres:17.11-alpine3.24 (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac), the database in deploy/dev/compose.yaml: not in the KEV (catalog 2026.11.10); at most Automatable yes, Technical Impact partial (CVE-2026-112314 in Vulnrichment): 60 days; reviewed with libxslt, by 2026-11-14. action: move the pin to the PostgreSQL 17.12 image, release scheduled for 2026-11-12, once it carries the fixed package; if it is not published by 2026-11-13, build the database image from the pinned one with the upgrade line (rule 10) instead. BOD 26-04: not publicly exposed (internal network only, no published port). The migrate image upgrades the package in its Dockerfile, so this rule matches the database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: CVE-2026-112322
+    package:
+      name: krb5-libs
+      version: 1.22.2-r1
+      type: apk
+      location: /lib/apk/db/installed
+    reason: >-
+      review-by 2026-11-14: affected: detected 2026-11-11: postgres:17.11-alpine3.24 (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac), the database in deploy/dev/compose.yaml: not in the KEV (catalog 2026.11.10); at most Automatable yes, Technical Impact partial (CVE-2026-112314 in Vulnrichment): 60 days; reviewed with libxslt, by 2026-11-14. action: move the pin to the PostgreSQL 17.12 image, release scheduled for 2026-11-12, once it carries the fixed package; if it is not published by 2026-11-13, build the database image from the pinned one with the upgrade line (rule 10) instead. BOD 26-04: not publicly exposed (internal network only, no published port). The migrate image upgrades the package in its Dockerfile, so this rule matches the database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: CVE-2026-112320
+    package:
+      name: krb5-libs
+      version: 1.22.2-r1
+      type: apk
+      location: /lib/apk/db/installed
+    reason: >-
+      review-by 2026-11-14: affected: detected 2026-11-11: postgres:17.11-alpine3.24 (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac), the database in deploy/dev/compose.yaml: not in the KEV (catalog 2026.11.10); at most Automatable yes, Technical Impact partial (CVE-2026-112314 in Vulnrichment): 60 days; reviewed with libxslt, by 2026-11-14. action: move the pin to the PostgreSQL 17.12 image, release scheduled for 2026-11-12, once it carries the fixed package; if it is not published by 2026-11-13, build the database image from the pinned one with the upgrade line (rule 10) instead. BOD 26-04: not publicly exposed (internal network only, no published port). The migrate image upgrades the package in its Dockerfile, so this rule matches the database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: CVE-2026-40355
+    package:
+      name: krb5-libs
+      version: 1.22.2-r1
+      type: apk
+      location: /lib/apk/db/installed
+    reason: >-
+      review-by 2026-11-14: affected: detected 2026-11-11: postgres:17.11-alpine3.24 (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac), the database in deploy/dev/compose.yaml: not in the KEV (catalog 2026.11.10); at most Automatable yes, Technical Impact partial (CVE-2026-112314 in Vulnrichment): 60 days; reviewed with libxslt, by 2026-11-14. action: move the pin to the PostgreSQL 17.12 image, release scheduled for 2026-11-12, once it carries the fixed package; if it is not published by 2026-11-13, build the database image from the pinned one with the upgrade line (rule 10) instead. BOD 26-04: not publicly exposed (internal network only, no published port). The migrate image upgrades the package in its Dockerfile, so this rule matches the database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: CVE-2026-112323
+    package:
+      name: krb5-libs
+      version: 1.22.2-r1
+      type: apk
+      location: /lib/apk/db/installed
+    reason: >-
+      review-by 2026-11-14: affected: detected 2026-11-11: postgres:17.11-alpine3.24 (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac), the database in deploy/dev/compose.yaml: not in the KEV (catalog 2026.11.10); at most Automatable yes, Technical Impact partial (CVE-2026-112314 in Vulnrichment): 60 days; reviewed with libxslt, by 2026-11-14. action: move the pin to the PostgreSQL 17.12 image, release scheduled for 2026-11-12, once it carries the fixed package; if it is not published by 2026-11-13, build the database image from the pinned one with the upgrade line (rule 10) instead. BOD 26-04: not publicly exposed (internal network only, no published port). The migrate image upgrades the package in its Dockerfile, so this rule matches the database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: CVE-2026-119079
+    package:
+      name: krb5-libs
+      version: 1.22.2-r1
+      type: apk
+      location: /lib/apk/db/installed
+    reason: >-
+      review-by 2026-11-14: affected: detected 2026-11-11: postgres:17.11-alpine3.24 (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac), the database in deploy/dev/compose.yaml: not in the KEV (catalog 2026.11.10); at most Automatable yes, Technical Impact partial (CVE-2026-112314 in Vulnrichment): 60 days; reviewed with libxslt, by 2026-11-14. action: move the pin to the PostgreSQL 17.12 image, release scheduled for 2026-11-12, once it carries the fixed package; if it is not published by 2026-11-13, build the database image from the pinned one with the upgrade line (rule 10) instead. BOD 26-04: not publicly exposed (internal network only, no published port). The migrate image upgrades the package in its Dockerfile, so this rule matches the database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: CVE-2026-40356
+    package:
+      name: krb5-libs
+      version: 1.22.2-r1
+      type: apk
+      location: /lib/apk/db/installed
+    reason: >-
+      review-by 2026-11-14: affected: detected 2026-11-11: postgres:17.11-alpine3.24 (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac), the database in deploy/dev/compose.yaml: not in the KEV (catalog 2026.11.10); at most Automatable yes, Technical Impact partial (CVE-2026-112314 in Vulnrichment): 60 days; reviewed with libxslt, by 2026-11-14. action: move the pin to the PostgreSQL 17.12 image, release scheduled for 2026-11-12, once it carries the fixed package; if it is not published by 2026-11-13, build the database image from the pinned one with the upgrade line (rule 10) instead. BOD 26-04: not publicly exposed (internal network only, no published port). The migrate image upgrades the package in its Dockerfile, so this rule matches the database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
+  - vulnerability: CVE-2026-107778
+    package:
+      name: krb5-libs
+      version: 1.22.2-r1
+      type: apk
+      location: /lib/apk/db/installed
+    reason: >-
+      review-by 2026-11-14: affected: detected 2026-11-11: postgres:17.11-alpine3.24 (postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac), the database in deploy/dev/compose.yaml: not in the KEV (catalog 2026.11.10); at most Automatable yes, Technical Impact partial (CVE-2026-112314 in Vulnrichment): 60 days; reviewed with libxslt, by 2026-11-14. action: move the pin to the PostgreSQL 17.12 image, release scheduled for 2026-11-12, once it carries the fixed package; if it is not published by 2026-11-13, build the database image from the pinned one with the upgrade line (rule 10) instead. BOD 26-04: not publicly exposed (internal network only, no published port). The migrate image upgrades the package in its Dockerfile, so this rule matches the database alone. TDD-organization-control-001 §The Migrate Image and Its Exceptions.
   # Atlas, the third-party binary the migrate image copies and does not build.
   - vulnerability: GO-2026-6888
     package:

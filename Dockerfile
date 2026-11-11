@@ -46,7 +46,10 @@ RUN chmod 0755 /usr/local/bin/organization-dev-migrate
 # fail the build if no repository can meet them: zlib 1.4-r0 fixes CVE-2026-4738 (Critical) and
 # CVE-2026-85091, musl 1.2.6-r3 fixes CVE-2026-107891 (High). Remove a constraint once the postgres
 # pin carries the fix.
-RUN apk add --no-cache 'zlib>=1.4-r0' 'musl>=1.2.6-r3' 'musl-utils>=1.2.6-r3'
+# 2026-11-11: libxslt 1.1.43-r4 fixes CVE-2026-125350 (in the KEV), CVE-2026-87636 and CVE-2026-9947;
+# krb5-libs 1.22.3-r0 fixes nine High findings, CVE-2026-112314 among them.
+RUN apk add --no-cache 'zlib>=1.4-r0' 'musl>=1.2.6-r3' 'musl-utils>=1.2.6-r3' \
+      'libxslt>=1.1.43-r4' 'krb5-libs>=1.22.3-r0'
 USER postgres
 ENTRYPOINT ["organization-dev-migrate"]
 
