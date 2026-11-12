@@ -719,11 +719,12 @@ the SoA in ISMS-005 change together.
 - ⏳ **Production secrets come from a managed store, never from `.env`** (T23, R7; before
   production).
 - ✅ **A failed scheduled run alerts the Information Security Officer** (T4, R21; brought forward by
-  ISMS-008 NC-4, built 2026-11-11). `.github/workflows/scheduled-failure-alert.yml` runs when a scheduled
-  run of `ci`, `deploy-dev` or `image-scan` completes. A failure opens one issue per workflow, labelled
-  `scheduled-failure`, which GitHub sends to everyone watching the repository; a further failure
-  comments on it, and the next scheduled run that passes closes it. In effect from its merge, because
-  `workflow_run` reads the default branch.
+  ISMS-008 NC-4, built 2026-11-11, assigned to the owner 2026-11-12).
+  `.github/workflows/scheduled-failure-alert.yml` runs when a scheduled run of `ci`, `deploy-dev` or
+  `image-scan` completes. A failure opens one issue per workflow, labelled `scheduled-failure` and
+  assigned to the repository owner's account, so GitHub notifies it whatever its watch settings; a
+  further failure comments on it, and the next scheduled run that passes closes it. In effect from
+  its merge, because `workflow_run` reads the default branch.
 - ⏳ **Secret scanning in CI** (T5, R7; by 15 December 2026), as STD-IAM-001 §5 lists. Today nothing
   scans a change for a secret before it reaches this public repository.
 - ⏳ **The shared workflows are called at a pinned commit** (T6, R14; by 31 December 2026). Today

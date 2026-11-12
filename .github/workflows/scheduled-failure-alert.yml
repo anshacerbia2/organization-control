@@ -3,8 +3,11 @@ name: scheduled-failure-alert
 # ISMS-005 T4 (ISMS-008 NC-1, NC-4): a failed scheduled run alerts the Information Security Officer.
 # Twice a daily scan failed for days because a failed scheduled run shows only to someone who opens
 # the Actions tab. This workflow turns each failed scheduled run into an issue labelled
-# `scheduled-failure`, one open issue per workflow, which GitHub sends to everyone watching the
-# repository. The next scheduled run that passes closes it, with a link to that run.
+# `scheduled-failure`, one open issue per workflow, assigned to the repository owner's account. The
+# holder of that account is the Information Security Officer today (ISMS-002, who holds the roles).
+# GitHub notifies an assignee whatever the account's watch settings: an issue alone reached nobody on
+# 12 November 2026, because the account watched none of the repositories. A further failure comments
+# on the issue; the next scheduled run that passes closes it, with a link to that run.
 #
 # `workflow_run` runs this file as it is on the default branch, so it acts only after it is merged.
 # `workflow_dispatch` takes the same three values, so the open, comment and close paths can be run
@@ -38,6 +41,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
           WORKFLOW: ${{ github.event.workflow_run.name || inputs.workflow }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion || inputs.conclusion }}
           RUN_URL: ${{ github.event.workflow_run.html_url || inputs.run_url }}
@@ -59,9 +63,11 @@ jobs:
 
           Read the failed job, then fix it or record the decision. A finding with a remediation time (STD-GLB-009 §Container Images, rule 8) counts from the day the scan first reported it, not from today. This issue closes itself when a scheduled run of \`${WORKFLOW}\` passes (ISMS-005 T4)."
               if [ -n "${number}" ]; then
+                gh issue edit "${number}" --add-assignee "${OWNER}"
                 gh issue comment "${number}" --body "Failed again: ${RUN_URL} (\`${CONCLUSION}\`)."
               else
-                gh issue create --title "${title}" --label scheduled-failure --body "${body}"
+                gh issue create --title "${title}" --label scheduled-failure --assignee "${OWNER}" \
+                  --body "${body}"
               fi
               ;;
             *)
