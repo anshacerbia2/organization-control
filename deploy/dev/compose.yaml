@@ -14,8 +14,8 @@ name: scnehaux-organization-control-dev
 
 services:
   postgres:
-    # postgres:17.11-alpine
-    image: postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
+    # postgres:17.12-alpine3.24, resolved from Docker Hub on 2026-11-13
+    image: postgres@sha256:34261f594522cf41dfcb76aefd42b9d201098b0e6b23c9c68733f169e4218b6f
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}

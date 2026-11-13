@@ -23,9 +23,9 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/organizatio
 # Its Exceptions).
 FROM arigaio/atlas@sha256:ce36679f6e253ff13ec0c9cb07787c8c7b02934ad9b76c969977570391d696a8 AS atlas
 
-# postgres:17.11-alpine3.24, resolved from Docker Hub on 2026-11-10 (rebuilt upstream 2026-11-06) --
+# postgres:17.12-alpine3.24, resolved from Docker Hub on 2026-11-13 --
 # the same image the Control Database runs, so psql matches the server.
-FROM postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac AS migrate
+FROM postgres@sha256:34261f594522cf41dfcb76aefd42b9d201098b0e6b23c9c68733f169e4218b6f AS migrate
 COPY --from=atlas /atlas /usr/local/bin/atlas
 # Atlas checks for a newer release over HTTPS around every command unless ATLAS_NO_UPDATE_NOTIFIER is
 # set, and may send anonymous telemetry unless ATLAS_NO_ANON_TELEMETRY is true. With both off it
@@ -42,14 +42,6 @@ COPY migrations ./migrations
 COPY scripts/login-roles.sql ./login-roles.sql
 COPY deploy/dev/migrate.sh /usr/local/bin/organization-dev-migrate
 RUN chmod 0755 /usr/local/bin/organization-dev-migrate
-# The pinned base may lag Alpine's fixes (STD-GLB-009 §Container Images rule 10). These constraints
-# fail the build if no repository can meet them: zlib 1.4-r0 fixes CVE-2026-4738 (Critical) and
-# CVE-2026-85091, musl 1.2.6-r3 fixes CVE-2026-107891 (High). Remove a constraint once the postgres
-# pin carries the fix.
-# 2026-11-11: libxslt 1.1.43-r4 fixes CVE-2026-125350 (in the KEV), CVE-2026-87636 and CVE-2026-9947;
-# krb5-libs 1.22.3-r0 fixes nine High findings, CVE-2026-112314 among them.
-RUN apk add --no-cache 'zlib>=1.4-r0' 'musl>=1.2.6-r3' 'musl-utils>=1.2.6-r3' \
-      'libxslt>=1.1.43-r4' 'krb5-libs>=1.22.3-r0'
 USER postgres
 ENTRYPOINT ["organization-dev-migrate"]
 
